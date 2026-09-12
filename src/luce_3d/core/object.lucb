@@ -199,7 +199,7 @@ pub struct ObjectNode:
 pub let object_node_type: interop.Type[ObjectNode] = interop.Type[ObjectNode]("ObjectNode", ObjectNode.dispose, ObjectNode.trace, main_thread = true)
 
 pub func make_node() -> interop.Reference[ObjectNode]!:
-    return try interop.Reference[ObjectNode].adopt(try new ObjectNode() in memory.heap, object_node_type, memory.heap)
+    return try interop.Reference[ObjectNode].adopt(new ObjectNode() in memory.heap, object_node_type, memory.heap)
 
 pub func object_node(object: interop.Interface[Object3D]) -> interop.Reference[ObjectNode]!:
     try object.enter()

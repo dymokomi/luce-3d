@@ -48,7 +48,7 @@ pub struct SphereGeometry: Geometry:
                     indices[count + 2] = d
                     count += 3
         assert(count == indices.length)
-        self.buffer = try interop.Reference[BufferGeometry].adopt(try new BufferGeometry(vertices, indices) in memory.heap, buffer_geometry_type, memory.heap)
+        self.buffer = try interop.Reference[BufferGeometry].adopt(new BufferGeometry(vertices, indices) in memory.heap, buffer_geometry_type, memory.heap)
 
     pub func vertex_count() -> i64:
         return self.buffer.value().vertex_count()

@@ -10,15 +10,15 @@ from three import Scene, Mesh, SphereGeometry, MeshLambertMaterial, Color, Persp
 from three_ui import SceneView
 
 pub func main(arguments: list[str]) -> int!:
-    let scene = try Scene()
-    let geometry = try SphereGeometry()
-    let material = try MeshLambertMaterial(Color(0.1, 0.4, 1.0))
-    try scene.add(try Mesh(geometry, material))
-    try scene.add(try AmbientLight(intensity = 0.25))
-    try scene.add(try DirectionalLight(intensity = 0.8))
-    let view = try SceneView(scene, try PerspectiveCamera())
-    let app = try Application(view, title = "A sphere")
-    try app.run()
+    let scene = Scene()
+    let geometry = SphereGeometry()
+    let material = MeshLambertMaterial(Color(0.1, 0.4, 1.0))
+    scene.add(Mesh(geometry, material))
+    scene.add(AmbientLight(intensity = 0.25))
+    scene.add(DirectionalLight(intensity = 0.8))
+    let view = SceneView(scene, PerspectiveCamera())
+    let app = Application(view, title = "A sphere")
+    app.run()
     return 0
 ```
 

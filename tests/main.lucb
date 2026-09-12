@@ -152,9 +152,9 @@ func allocations(tracker: Tracker*) -> !:
     assert(succeeded and failures >= 6)
 
 func scene_membership(tracker: Tracker*) -> !:
-    let parent = try interop.Reference[Group].adopt(try new Group() in memory.heap, three.group_type, memory.heap)
+    let parent = try interop.Reference[Group].adopt(new Group() in memory.heap, three.group_type, memory.heap)
     defer parent.release()
-    let child = try interop.Reference[Group].adopt(try new Group() in memory.heap, three.group_type, memory.heap)
+    let child = try interop.Reference[Group].adopt(new Group() in memory.heap, three.group_type, memory.heap)
     defer child.release()
     let parent_object = parent.as_interface[Object3D](parent.value())
     defer parent_object.release()
@@ -193,7 +193,7 @@ func scene_membership(tracker: Tracker*) -> !:
     assert(try parent.value().remove(child_object))
     assert(child_node.value().parent_id() == 0 and parent_node.value().child_count() == 0)
     assert(not try parent.value().remove(child_object))
-    let remaining = try interop.Reference[Group].adopt(try new Group() in memory.heap, three.group_type, memory.heap)
+    let remaining = try interop.Reference[Group].adopt(new Group() in memory.heap, three.group_type, memory.heap)
     defer remaining.release()
     let remaining_object = remaining.as_interface[Object3D](remaining.value())
     defer remaining_object.release()

@@ -48,11 +48,11 @@ pub struct SceneView: Widget:
 
     pub func init(scene: interop.Interface[Object3D], camera: interop.Reference[PerspectiveCamera],
                   renderer: interop.Reference[Renderer]? = none, width: f64 = 320.0, height: f64 = 240.0) -> !:
-        let viewport = try interop.Reference[Viewport].adopt(try new Viewport(width, height) in memory.heap, viewport_type, memory.heap)
+        let viewport = try interop.Reference[Viewport].adopt(new Viewport(width, height) in memory.heap, viewport_type, memory.heap)
         errdefer viewport.release()
         let selected = try select_renderer(renderer)
         defer selected.release()
-        let binding = try interop.Reference[RenderBinding].adopt(try new RenderBinding(scene, camera, selected) in memory.heap, render_binding_type, memory.heap)
+        let binding = try interop.Reference[RenderBinding].adopt(new RenderBinding(scene, camera, selected) in memory.heap, render_binding_type, memory.heap)
         errdefer binding.release()
         let callback = try interop.Callback[interop.View[gpu.RenderTarget], unit].bind_mutating(binding, RenderBinding.draw)
         defer callback.release()
@@ -99,4 +99,4 @@ func select_renderer(renderer: interop.Reference[Renderer]?) -> interop.Referenc
     if let provided = renderer:
         discard(try provided.get())
         return provided.clone()
-    return try interop.Reference[Renderer].adopt(try new Renderer() in memory.heap, renderer_type, memory.heap)
+    return try interop.Reference[Renderer].adopt(new Renderer() in memory.heap, renderer_type, memory.heap)

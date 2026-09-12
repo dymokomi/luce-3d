@@ -61,19 +61,19 @@ class Blue: Material:
 
 pub func main(arguments: list[str]) -> int!:
     let triangle = Triangle()
-    let mesh = try Mesh(triangle, Blue())
-    let scene = try Scene()
-    try scene.add(mesh)
-    let camera = try PerspectiveCamera()
-    let renderer = try Renderer()
-    let frame = try Frame(window.Size(100.0, 100.0, 100.0, 100.0, 1.0))
-    let target = try frame.target()
+    let mesh = Mesh(triangle, Blue())
+    let scene = Scene()
+    scene.add(mesh)
+    let camera = PerspectiveCamera()
+    let renderer = Renderer()
+    let frame = Frame(window.Size(100.0, 100.0, 100.0, 100.0, 1.0))
+    let target = frame.target()
     triangle.renderer = renderer
     triangle.scene = scene
     triangle.camera = camera
     triangle.target = target
     triangle.reenter = true
-    try renderer.render(scene, camera, target)
+    renderer.render(scene, camera, target)
     assert(triangle.saw_reentry)
     triangle.failing = true
     var rejected = false
@@ -89,11 +89,11 @@ pub func main(arguments: list[str]) -> int!:
         rejected = true
     assert(rejected)
     triangle.invalid_index = false
-    try renderer.render(scene, camera, target)
-    let view = try SceneView(scene, camera, renderer)
-    let app = try Application(view)
+    renderer.render(scene, camera, target)
+    let view = SceneView(scene, camera, renderer)
+    let app = Application(view)
     triangle.close_renderer = true
-    try app.render(target)
+    app.render(target)
     assert(renderer.is_closed())
     rejected = false
     app.render(target) catch failure:
