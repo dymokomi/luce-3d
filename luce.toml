@@ -1,0 +1,10 @@
+[package]
+name = "luce_3d"
+source = "src"
+
+[exports]
+three = "luce_3d.graphics"
+three_ui = "luce_3d.ui"
+
+[dependencies]
+luce_ui = "../luce-ui"

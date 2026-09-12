@@ -1,0 +1,12 @@
+import gpu
+import luce_3d.errors as errors
+
+pub type Color = gpu.Color
+
+pub interface Material:
+    func color() -> Color
+    func is_lit() -> bool
+
+pub func check_color(color: Color) -> !:
+    if not (color.red >= 0.0 and color.red <= 1.0 and color.green >= 0.0 and color.green <= 1.0 and color.blue >= 0.0 and color.blue <= 1.0):
+        error(errors.invalid, "material and light colors must be finite linear RGB in 0..1")

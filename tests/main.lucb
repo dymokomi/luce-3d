@@ -1,0 +1,221 @@
+import gpu
+import interop
+import math
+import memory
+import ownership
+import window
+import three
+from three import SphereGeometry, BufferGeometry, Vertex, Vector3, Matrix4, MeshLambertMaterial, Color, Scene, Group, Mesh, Object3D, Geometry, Material, PerspectiveCamera, Renderer
+
+struct Tracker: memory.Allocator:
+    var upstream: memory.Allocator
+    var live: usize
+    var remaining: usize?
+
+    pub mutating func allocate(size: usize, alignment: usize) -> u8[]?:
+        if let remaining = self.remaining:
+            if remaining == 0:
+                return none
+            self.remaining = remaining - 1
+        let block = self.upstream.allocate(size, alignment) else return none
+        self.live += 1
+        return block
+
+    pub mutating func resize(block: u8[], size: usize) -> bool:
+        return self.upstream.resize(block, size)
+
+    pub mutating func release(block: u8[]):
+        assert(self.live > 0)
+        self.live -= 1
+        self.upstream.release(block)
+
+func restore(previous: memory.Allocator):
+    memory.heap = previous
+
+func near(left: f64, right: f64):
+    assert(math.abs(left - right) < 0.00000001)
+
+func sample_vertex(sphere: SphereGeometry*, index: i64) -> Vertex!:
+    let value = sphere.vertex(index)
+    defer value.release()
+    return try value.get()
+
+func sample_index(sphere: SphereGeometry*, offset: i64) -> i64!:
+    let value = sphere.index(offset)
+    defer value.release()
+    return try value.get()
+
+func geometry() -> !:
+    var sphere = try SphereGeometry(2.0, 32, 16)
+    defer sphere.close()
+    assert(sphere.vertex_count() == 561 and sphere.index_count() == 2880)
+    let bounds = sphere.bounds()
+    near(bounds.minimum.x, -2.0)
+    near(bounds.maximum.y, 2.0)
+    for row in 0..<17:
+        let first = try sample_vertex(&sphere, row * 33)
+        let last = try sample_vertex(&sphere, row * 33 + 32)
+        assert(first.position == last.position and first.normal == last.normal)
+        assert(first.u == 0.0 and last.u == 1.0)
+    for offset in 0..<sphere.vertex_count():
+        let point = try sample_vertex(&sphere, offset)
+        near(point.position.length(), 2.0)
+        near(point.normal.length(), 1.0)
+        assert(point.u >= 0.0 and point.u <= 1.0 and point.v >= 0.0 and point.v <= 1.0)
+    var offset: i64 = 0
+    while offset < sphere.index_count():
+        let a = (try sample_vertex(&sphere, try sample_index(&sphere, offset))).position
+        let b = (try sample_vertex(&sphere, try sample_index(&sphere, offset + 1))).position
+        let c = (try sample_vertex(&sphere, try sample_index(&sphere, offset + 2))).position
+        # Every triangle is nondegenerate and faces outward, including both poles.
+        assert(b.subtract(a).cross(c.subtract(a)).dot(a.add(b).add(c)) > 0.00000001)
+        offset += 3
+    let outside = sphere.vertex(-1)
+    defer outside.release()
+    assert(not outside.is_success())
+    let missing = sphere.index(sphere.index_count())
+    defer missing.release()
+    assert(not missing.is_success())
+    var rejected = false
+    var invalid: SphereGeometry? = SphereGeometry(0.0) catch failure:
+        assert(failure.code == three.invalid)
+        rejected = true
+        recover none
+    assert(rejected and invalid == none)
+    var points = [Vertex(Vector3(-1.0, -1.0, 0.0), Vector3(0.0, 0.0, 1.0)),
+                  Vertex(Vector3(1.0, -1.0, 0.0), Vector3(0.0, 0.0, 1.0)),
+                  Vertex(Vector3(0.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0))]
+    var indices: i64[3] = [0, 1, 2]
+    var buffer = try BufferGeometry(points, indices)
+    defer buffer.close()
+    points[0] = points[1]
+    indices[0] = 2
+    let copied = buffer.vertex(0)
+    defer copied.release()
+    assert((try copied.get()).position.x == -1.0)
+    let copied_index = buffer.index(0)
+    defer copied_index.release()
+    assert((try copied_index.get()) == 0)
+    indices[0] = 3
+    rejected = false
+    var bad: BufferGeometry? = BufferGeometry(points, indices) catch failure:
+        rejected = true
+        assert(failure.code == three.invalid)
+        recover none
+    assert(rejected and bad == none)
+
+func transforms() -> !:
+    let matrix = Matrix4.compose(Vector3(1.0, 2.0, 3.0), Vector3(), Vector3(2.0, 3.0, 4.0))
+    assert(matrix.transform_point(Vector3(1.0, 1.0, 1.0)) == Vector3(3.0, 5.0, 7.0))
+    let child = Matrix4.compose(Vector3(2.0, 1.0, 0.0), Vector3(0.0, 0.0, math.pi / 2.0), Vector3(1.0, 1.0, 1.0))
+    let composed = matrix.multiply(child)
+    let expected = matrix.transform_point(child.transform_point(Vector3(1.0, 0.0, 0.0)))
+    let actual = composed.transform_point(Vector3(1.0, 0.0, 0.0))
+    near(actual.x, expected.x)
+    near(actual.y, expected.y)
+    near(actual.z, expected.z)
+    let normal = try matrix.transform_normal(Vector3(1.0, 1.0, 0.0))
+    near(normal.length(), 1.0)
+    near(normal.dot(matrix.transform_direction(Vector3(1.0, -1.0, 0.0))), 0.0)
+    var camera = try PerspectiveCamera(60.0, 2.0, 0.5, 100.0)
+    let projection = try camera.projection()
+    near(projection.focal, math.sqrt(3.0))
+    assert(projection.aspect == 2.0 and projection.near == 0.5)
+    try camera.set_position(Vector3(0.0, 5.0, 0.0))
+    try camera.look_at(Vector3())
+    let polar = try camera.projection()
+    near(polar.right.length(), 1.0)
+    near(polar.up.dot(polar.backward), 0.0)
+    var rejected = false
+    camera.set_aspect(0.0) catch failure:
+        assert(failure.code == three.invalid)
+        rejected = true
+    assert(rejected and camera.aspect() == 2.0)
+
+func allocations(tracker: Tracker*) -> !:
+    var failures: usize = 0
+    var succeeded = false
+    for stage in 0..<20:
+        tracker.remaining = (usize)stage
+        var sphere: SphereGeometry? = SphereGeometry() catch failure:
+            assert(failure.code == memory.exhausted)
+            failures += 1
+            recover none
+        tracker.remaining = none
+        if let completed = sphere:
+            var value = completed
+            value.close()
+            succeeded = true
+        ownership.collect()
+        discard(ownership.finish_run(0))
+        assert(tracker.live == 0)
+    assert(succeeded and failures >= 6)
+
+func scene_membership(tracker: Tracker*) -> !:
+    let parent = try interop.Reference[Group].adopt(try new Group() in memory.heap, three.group_type, memory.heap)
+    defer parent.release()
+    let child = try interop.Reference[Group].adopt(try new Group() in memory.heap, three.group_type, memory.heap)
+    defer child.release()
+    let parent_object = parent.as_interface[Object3D](parent.value())
+    defer parent_object.release()
+    let child_object = child.as_interface[Object3D](child.value())
+    defer child_object.release()
+    let parent_node = parent.value().node()
+    defer parent_node.release()
+    let child_node = child.value().node()
+    defer child_node.release()
+    # The shared ARC collector keeps a roots buffer. Initialize that runtime
+    # storage before injecting failure into the package's child-buffer growth.
+    parent_node.clone().release()
+    ownership.collect()
+    let baseline = tracker.live
+    tracker.remaining = (usize)0
+    var rejected = false
+    parent.value().add(child_object) catch failure:
+        assert(failure.code == memory.exhausted)
+        rejected = true
+    tracker.remaining = none
+    assert(rejected and tracker.live == baseline)
+    assert(parent_node.value().child_count() == 0 and child_node.value().parent_id() == 0)
+    try parent.value().add(child_object)
+    assert(child_node.value().parent_id() == parent_node.value().id())
+    rejected = false
+    child.value().add(parent_object) catch failure:
+        assert(failure.code == three.invalid)
+        rejected = true
+    assert(rejected)
+    rejected = false
+    parent.value().add(child_object) catch failure:
+        assert(failure.code == three.busy)
+        rejected = true
+    assert(rejected and parent_node.value().child_count() == 1)
+    child.close()
+    assert(try parent.value().remove(child_object))
+    assert(child_node.value().parent_id() == 0 and parent_node.value().child_count() == 0)
+    assert(not try parent.value().remove(child_object))
+    let remaining = try interop.Reference[Group].adopt(try new Group() in memory.heap, three.group_type, memory.heap)
+    defer remaining.release()
+    let remaining_object = remaining.as_interface[Object3D](remaining.value())
+    defer remaining_object.release()
+    let remaining_node = remaining.value().node()
+    defer remaining_node.release()
+    try parent.value().add(remaining_object)
+    parent.close()
+    assert(parent_node.value().child_count() == 0 and remaining_node.value().parent_id() == 0)
+
+pub func main(arguments: str[]) -> i32!:
+    let previous = memory.heap
+    var tracker = Tracker(previous, 0, none)
+    memory.heap = &tracker
+    defer restore(previous)
+    try geometry()
+    try transforms()
+    ownership.collect()
+    assert(tracker.live == 0)
+    try allocations(&tracker)
+    try scene_membership(&tracker)
+    ownership.collect()
+    discard(ownership.finish_run(0))
+    assert(tracker.live == 0)
+    print("ok geometry, transforms, camera, membership and allocation failures")
+    return 0

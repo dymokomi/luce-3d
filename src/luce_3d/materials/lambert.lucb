@@ -1,0 +1,25 @@
+import interop
+from luce_3d.core.material import Material, Color, check_color
+
+pub struct MeshLambertMaterial: Material:
+    var tint: Color
+
+    pub func init(color: Color = Color(1.0, 1.0, 1.0)) -> !:
+        try check_color(color)
+        self.tint = color
+
+    pub func color() -> Color:
+        return self.tint
+
+    pub mutating func set_color(color: Color) -> !:
+        try check_color(color)
+        self.tint = color
+
+    pub func is_lit() -> bool:
+        return true
+
+    pub mutating func close():
+        # Color is inline; the shared owner enforces closure across mesh aliases.
+        discard(self.tint)
+
+pub let lambert_material_type: interop.Type[MeshLambertMaterial] = interop.Type[MeshLambertMaterial]("MeshLambertMaterial", MeshLambertMaterial.close, closeable = true, main_thread = true)

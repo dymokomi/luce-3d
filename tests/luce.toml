@@ -1,0 +1,7 @@
+[package]
+name = "luce_3d_tests"
+source = "."
+
+[dependencies]
+luce_3d = ".."
+luce_ui = "../../luce-ui"

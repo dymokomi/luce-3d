@@ -1,0 +1,230 @@
+## Transform and Lambert lighting currently run on the CPU. Standard gpu performs
+## homogeneous clipping, rasterization, interpolation and depth testing. Backend
+## selection, shader implementation and native resources remain entirely in gpu.
+import gpu
+import interop
+import math
+import memory
+import ownership
+import luce_3d.core.object as object
+import luce_3d.errors as errors
+from luce_3d.core.object import Object3D, ObjectNode, Light, LightKind
+from luce_3d.core.geometry import Geometry
+from luce_3d.core.material import Material, Color, check_color
+from luce_3d.math.vector import Vector3
+from luce_3d.math.matrix import Matrix4
+from luce_3d.cameras.perspective import PerspectiveCamera, Projection
+
+struct Item:
+    let object: interop.Interface[Object3D]
+    let node: interop.Reference[ObjectNode]
+    let world: Matrix4
+    let geometry: interop.Interface[Geometry]?
+    let material: interop.Interface[Material]?
+    let illumination: Light
+    let visible: bool
+
+pub struct Renderer:
+    var items: Item[]
+    var count: usize
+    var vertices: gpu.Vertex[]
+    var rendering: bool
+
+    pub func init() -> !:
+        self.items = try alloc Item[1024] in memory.heap
+        self.count = 0
+        var empty: gpu.Vertex[]
+        self.vertices = empty
+        self.rendering = false
+
+    ## A frame retains the scene traversal while custom interfaces execute.
+    ## Reusing the output buffer avoids per-mesh allocation after capacity grows.
+    pub mutating func render(scene: interop.Interface[Object3D], camera: interop.Reference[PerspectiveCamera],
+                             target: interop.View[gpu.RenderTarget], fit_aspect: bool = false) -> interop.Outcome[unit]:
+        if self.rendering:
+            return errors.failure[unit](errors.busy, "the renderer cannot reenter a render pass")
+        self.rendering = true
+        defer self.finish()
+        let native = target.get() catch failure:
+            return errors.failure[unit](failure.code, failure.message)
+        let extent = native.size() catch failure:
+            return errors.failure[unit](failure.code, failure.message)
+        let lens = camera.get() catch failure:
+            return errors.failure[unit](failure.code, failure.message)
+        let aspect: f64? = extent.width / extent.height if fit_aspect and extent.height > 0.0 else none
+        let projection = lens.projection(aspect) catch failure:
+            return errors.failure[unit](failure.code, failure.message)
+        if extent.width <= 0.0 or extent.height <= 0.0:
+            return errors.success[unit](())
+        let version = object.epoch()
+        self.gather(scene, Matrix4(), true, 0, 0) catch failure:
+            return errors.failure[unit](failure.code, failure.message)
+        if object.epoch() != version:
+            return errors.failure[unit](errors.busy, "a scene changed during traversal")
+        for index in 0..<self.count:
+            let item = &self.items[index]
+            if not item.visible:
+                continue
+            let geometry = item.geometry else continue
+            let material = item.material else return errors.failure[unit](errors.invalid, "a renderable object has geometry without material")
+            let rendered = self.draw(item, geometry, material, projection, target)
+            if not rendered.is_success():
+                return rendered
+            rendered.release()
+        return errors.success[unit](())
+
+    mutating func gather(source: interop.Interface[Object3D], parent: Matrix4, visible: bool, depth: usize, parent_id: u64) -> !:
+        if depth >= 64 or self.count >= self.items.length:
+            error(errors.limit, "a renderer supports at most 1024 objects and 64 levels")
+        try source.enter()
+        defer source.leave()
+        let native = source.value()
+        let node = native.node()
+        defer node.release()
+        let state = try node.get()
+        if state.parent_id() != parent_id:
+            error(errors.invalid, "an object returned an unstable node or belongs to another parent")
+        for item in self.items[..<self.count]:
+            if item.node.value().id() == state.id():
+                error(errors.invalid, "a scene contains duplicate object identities")
+        let world = parent.multiply(state.matrix())
+        if not world.is_finite():
+            error(errors.invalid, "world transform components overflowed")
+        let geometry = native.geometry()
+        defer release_geometry(geometry)
+        let material = native.material()
+        defer release_material(material)
+        let illumination = native.light()
+        try check_color(illumination.color)
+        if not (illumination.intensity >= 0.0 and illumination.intensity <= 100.0) or not illumination.direction.is_finite():
+            error(errors.invalid, "a custom light returned invalid parameters")
+        let shown = visible and state.is_visible()
+        self.items[self.count] = Item(source.clone(), node.clone(), world, clone_geometry(geometry), clone_material(material), illumination, shown)
+        self.count += 1
+        let length = state.child_count()
+        var index: i64 = 0
+        while index < length:
+            let child = try state.child(index)
+            defer child.release()
+            try self.gather(child, world, shown, depth + 1, state.id())
+            index += 1
+
+    mutating func reserve(count: usize) -> !:
+        if count <= self.vertices.length:
+            return
+        let doubled = self.vertices.length * 2 if self.vertices.length <= 98304 else 196608
+        let capacity = count if count > doubled else doubled
+        let replacement = try alloc gpu.Vertex[capacity] in memory.heap
+        if self.vertices.length > 0:
+            free(self.vertices) in memory.heap
+        self.vertices = replacement
+
+    mutating func draw(item: const Item*, geometry: interop.Interface[Geometry], material: interop.Interface[Material],
+                       projection: Projection, target: interop.View[gpu.RenderTarget]) -> interop.Outcome[unit]:
+        geometry.enter() catch failure:
+            return errors.failure[unit](failure.code, failure.message)
+        defer geometry.leave()
+        material.enter() catch failure:
+            return errors.failure[unit](failure.code, failure.message)
+        defer material.leave()
+        let shape = geometry.value()
+        let appearance = material.value()
+        let count = shape.index_count()
+        let vertices = shape.vertex_count()
+        if count <= 0 or count > 196608 or count % 3 != 0 or vertices <= 0 or vertices > 65536:
+            return errors.failure[unit](errors.invalid, "a custom geometry returned invalid buffer counts")
+        let tint = appearance.color()
+        check_color(tint) catch failure:
+            return errors.failure[unit](failure.code, failure.message)
+        let lit = appearance.is_lit()
+        self.reserve((usize)count) catch failure:
+            return errors.failure[unit](failure.code, failure.message)
+        for offset in 0..<count:
+            let indexed = shape.index(offset)
+            defer indexed.release()
+            let index = indexed.get() catch failure:
+                return errors.failure[unit](failure.code, failure.message)
+            if index < 0 or index >= vertices:
+                return errors.failure[unit](errors.invalid, "a custom geometry returned an out-of-bounds index")
+            let result = shape.vertex(index)
+            defer result.release()
+            let vertex = result.get() catch failure:
+                return errors.failure[unit](failure.code, failure.message)
+            if not vertex.position.is_finite() or not vertex.normal.is_finite():
+                return errors.failure[unit](errors.invalid, "a custom geometry returned non-finite attributes")
+            let world = item.world.transform_point(vertex.position)
+            let relative = world.subtract(projection.position)
+            let distance = -relative.dot(projection.backward)
+            var color = tint
+            if lit:
+                let normal = item.world.transform_normal(vertex.normal) catch failure:
+                    return errors.failure[unit](failure.code, failure.message)
+                color = self.illuminate(normal, tint) catch failure:
+                    return errors.failure[unit](failure.code, failure.message)
+            self.vertices[(usize)offset] = gpu.Vertex(
+                x = (f32)(relative.dot(projection.right) * projection.focal / projection.aspect),
+                y = (f32)(relative.dot(projection.up) * projection.focal),
+                z = (f32)(projection.far * (distance - projection.near) / (projection.far - projection.near)),
+                w = (f32)distance, red = (f32)color.red, green = (f32)color.green, blue = (f32)color.blue)
+        let native = target.get() catch failure:
+            return errors.failure[unit](failure.code, failure.message)
+        native.triangles(self.vertices[..<(usize)count], true) catch failure:
+            return errors.failure[unit](failure.code, failure.message)
+        return errors.success[unit](())
+
+    func illuminate(normal: Vector3, tint: Color) -> Color!:
+        var illumination = Vector3()
+        for item in self.items[..<self.count]:
+            let light = item.illumination
+            if not item.visible or light.kind == LightKind.inactive:
+                continue
+            var intensity = light.intensity
+            if light.kind == LightKind.directional:
+                let direction = try item.world.transform_direction(light.direction).normalized()
+                intensity *= math.max(0.0, normal.dot(direction))
+            illumination = illumination.add(Vector3(light.color.red, light.color.green, light.color.blue).multiply_scalar(intensity))
+        return Color(math.min(1.0, tint.red * illumination.x), math.min(1.0, tint.green * illumination.y), math.min(1.0, tint.blue * illumination.z))
+
+    mutating func finish():
+        for item in self.items[..<self.count]:
+            release_geometry(item.geometry)
+            release_material(item.material)
+            item.node.release()
+            item.object.release()
+        self.count = 0
+        self.rendering = false
+
+    pub mutating func close():
+        self.finish()
+        free(self.items) in memory.heap
+        if self.vertices.length > 0:
+            free(self.vertices) in memory.heap
+
+    func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
+        for item in self.items[..<self.count]:
+            item.object.trace(visit, context)
+            item.node.trace(visit, context)
+            if let geometry = item.geometry:
+                geometry.trace(visit, context)
+            if let material = item.material:
+                material.trace(visit, context)
+
+pub let renderer_type: interop.Type[Renderer] = interop.Type[Renderer]("Renderer", Renderer.close, Renderer.trace, closeable = true, main_thread = true)
+
+func release_geometry(value: interop.Interface[Geometry]?):
+    if let geometry = value:
+        geometry.release()
+
+func release_material(value: interop.Interface[Material]?):
+    if let material = value:
+        material.release()
+
+func clone_geometry(value: interop.Interface[Geometry]?) -> interop.Interface[Geometry]?:
+    if let geometry = value:
+        return geometry.clone()
+    return none
+
+func clone_material(value: interop.Interface[Material]?) -> interop.Interface[Material]?:
+    if let material = value:
+        return material.clone()
+    return none

@@ -1,0 +1,110 @@
+from three import Geometry, Material, Vertex, Bounds, Vector3, Color, Mesh, Scene, Renderer, PerspectiveCamera
+from three_ui import SceneView
+from ui import Application
+from gpu import Frame
+import gpu
+import window
+import three
+
+## Open interfaces are exercised by application-owned implementations. Their
+## failures must keep dynamically constructed messages alive across native cleanup.
+class Triangle: Geometry:
+    var failing: bool = false
+    var invalid_index: bool = false
+    var renderer: Renderer? = none
+    var scene: Scene? = none
+    var camera: PerspectiveCamera? = none
+    var target: gpu.RenderTarget? = none
+    var reenter: bool = false
+    var close_renderer: bool = false
+    var saw_reentry: bool = false
+
+    pub func vertex_count(self) -> int:
+        return 3
+
+    pub func index_count(self) -> int:
+        return 3
+
+    pub func vertex(self, index: int) -> Vertex!:
+        if self.failing:
+            error(three.invalid, "geometry vertex " + str(index))
+        if self.reenter:
+            self.reenter = false
+            let renderer = self.renderer else trap("missing renderer")
+            let scene = self.scene else trap("missing scene")
+            let camera = self.camera else trap("missing camera")
+            let target = self.target else trap("missing target")
+            renderer.render(scene, camera, target) catch failure:
+                assert(failure.code == three.busy)
+                self.saw_reentry = true
+        if self.close_renderer:
+            self.close_renderer = false
+            let renderer = self.renderer else trap("missing renderer")
+            renderer.close()
+        if index == 0:
+            return Vertex(Vector3(-1.0, -1.0, 0.0), Vector3(0.0, 0.0, 1.0))
+        if index == 1:
+            return Vertex(Vector3(1.0, -1.0, 0.0), Vector3(0.0, 0.0, 1.0))
+        return Vertex(Vector3(0.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0))
+
+    pub func index(self, offset: int) -> int!:
+        return 5 if self.invalid_index else offset
+
+    pub func bounds(self) -> Bounds:
+        return Bounds(Vector3(-1.0, -1.0, 0.0), Vector3(1.0, 1.0, 0.0))
+
+class Blue: Material:
+    pub func color(self) -> Color:
+        return Color(0.0, 0.0, 1.0)
+    pub func is_lit(self) -> bool:
+        return false
+
+pub func main(arguments: list[str]) -> int!:
+    let triangle = Triangle()
+    let mesh = try Mesh(triangle, Blue())
+    let scene = try Scene()
+    try scene.add(mesh)
+    let camera = try PerspectiveCamera()
+    let renderer = try Renderer()
+    let frame = try Frame(window.Size(100.0, 100.0, 100.0, 100.0, 1.0))
+    let target = try frame.target()
+    triangle.renderer = renderer
+    triangle.scene = scene
+    triangle.camera = camera
+    triangle.target = target
+    triangle.reenter = true
+    try renderer.render(scene, camera, target)
+    assert(triangle.saw_reentry)
+    triangle.failing = true
+    var rejected = false
+    renderer.render(scene, camera, target) catch failure:
+        assert(failure.message == "geometry vertex 0")
+        rejected = true
+    assert(rejected)
+    triangle.failing = false
+    triangle.invalid_index = true
+    rejected = false
+    renderer.render(scene, camera, target) catch failure:
+        assert(failure.code == three.invalid)
+        rejected = true
+    assert(rejected)
+    triangle.invalid_index = false
+    try renderer.render(scene, camera, target)
+    let view = try SceneView(scene, camera, renderer)
+    let app = try Application(view)
+    triangle.close_renderer = true
+    try app.render(target)
+    assert(renderer.is_closed())
+    rejected = false
+    app.render(target) catch failure:
+        rejected = true
+    assert(rejected)
+    frame.close()
+    # Break test references explicitly; the remaining scene/geometry ownership is
+    # also exercised by the compiler's zero-live-owners assertion at program exit.
+    triangle.renderer = none
+    triangle.scene = none
+    triangle.camera = none
+    triangle.target = none
+    print("ok custom geometry/material, dynamic errors, reentry and deferred close")
+    return 0

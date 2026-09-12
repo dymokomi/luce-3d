@@ -1,0 +1,221 @@
+import interop
+import math
+import memory
+import ownership
+import thread
+import luce_3d.errors as errors
+from luce_3d.math.vector import Vector3
+from luce_3d.math.matrix import Matrix4
+from luce_3d.core.geometry import Geometry
+from luce_3d.core.material import Material, Color
+
+pub enum LightKind as u8:
+    inactive = 0
+    ambient = 1
+    directional = 2
+
+pub struct Light:
+    pub let kind: LightKind
+    pub let color: Color = Color(1.0, 1.0, 1.0)
+    pub let intensity: f64 = 0.0
+    pub let direction: Vector3 = Vector3(0.0, 1.0, 0.0)
+
+## Open scene protocol. node returns one retained reference to stable transform
+## and child storage; geometry/material returns transfer optional retained edges.
+pub interface Object3D:
+    func node() -> interop.Reference[ObjectNode]
+    func geometry() -> interop.Interface[Geometry]?
+    func material() -> interop.Interface[Material]?
+    func light() -> Light
+
+struct Child:
+    let object: interop.Interface[Object3D]
+    let node: interop.Reference[ObjectNode]
+
+var serial: u64 = 0
+var revision: u64 = 0
+
+pub func epoch() -> u64:
+    return revision
+
+## Shared composition for scene objects, never a tagged bag of mesh/light state.
+## Parents own child objects and nodes; children store only their parent's identity.
+pub struct ObjectNode:
+    let identifier: u64
+    var parent: u64
+    var children: Child[]
+    var location: Vector3
+    var angles: Vector3
+    var scaling: Vector3
+    var visible: bool
+    var changing: bool
+
+    pub func init() -> !:
+        if not thread.is_main():
+            error(interop.wrong_thread, "scene objects require the main thread")
+        serial = serial +? 1 else error(errors.limit, "scene object identities exhausted")
+        self.identifier = serial
+        self.parent = 0
+        var empty: Child[]
+        self.children = empty
+        self.location = Vector3()
+        self.angles = Vector3()
+        self.scaling = Vector3(1.0, 1.0, 1.0)
+        self.visible = true
+        self.changing = false
+
+    pub func id() -> u64:
+        return self.identifier
+
+    pub func parent_id() -> u64:
+        return self.parent
+
+    pub func position() -> Vector3:
+        return self.location
+
+    pub func rotation() -> Vector3:
+        return self.angles
+
+    pub func scale() -> Vector3:
+        return self.scaling
+
+    pub mutating func set_position(position: Vector3) -> !:
+        try bounded(position)
+        self.location = position
+        self.invalidate()
+
+    pub mutating func set_rotation(rotation: Vector3) -> !:
+        try bounded(rotation)
+        self.angles = rotation
+        self.invalidate()
+
+    pub mutating func set_scale(scale: Vector3) -> !:
+        try bounded(scale)
+        if math.abs(scale.x) < 0.000001 or math.abs(scale.y) < 0.000001 or math.abs(scale.z) < 0.000001:
+            error(errors.invalid, "scale magnitudes must be at least 0.000001")
+        self.scaling = scale
+        self.invalidate()
+
+    pub func matrix() -> Matrix4:
+        return Matrix4.compose(self.location, self.angles, self.scaling)
+
+    pub func is_visible() -> bool:
+        return self.visible
+
+    pub mutating func set_visible(visible: bool):
+        self.visible = visible
+        self.invalidate()
+
+    func invalidate():
+        revision = revision +? 1 else trap("scene revision exhausted")
+
+    pub func child_count() -> i64:
+        return (i64)self.children.length
+
+    pub func child(index: i64) -> interop.Interface[Object3D]!:
+        if index < 0 or (usize)index >= self.children.length:
+            error(errors.invalid, "child index is outside this scene object")
+        return self.children[(usize)index].object.clone()
+
+    pub mutating func add(child: interop.Interface[Object3D]) -> !:
+        if self.changing:
+            error(errors.busy, "scene membership changes cannot reenter the same parent")
+        self.changing = true
+        defer self.finish_change()
+        let node = try object_node(child)
+        errdefer node.release()
+        let state = try node.get()
+        if state.parent != 0:
+            error(errors.busy, "remove an object from its current parent before adding it")
+        if self.children.length >= 1024 or try contains(state, self.identifier, 0):
+            error(errors.invalid, "scene membership would exceed its limit or create a cycle")
+        let replacement = try alloc Child[self.children.length + 1] in memory.heap
+        for index in 0..<self.children.length:
+            replacement[index] = self.children[index]
+        replacement[self.children.length] = Child(child.clone(), node)
+        let previous = self.children
+        self.children = replacement
+        state.parent = self.identifier
+        self.invalidate()
+        if previous.length > 0:
+            free(previous) in memory.heap
+
+    pub mutating func remove(child: interop.Interface[Object3D]) -> bool!:
+        if self.changing:
+            error(errors.busy, "scene membership changes cannot reenter the same parent")
+        self.changing = true
+        defer self.finish_change()
+        var index: usize = 0
+        while index < self.children.length:
+            if self.children[index].object.owner == child.owner:
+                let removed = self.children[index]
+                let previous = self.children
+                var replacement: Child[]
+                if previous.length > 1:
+                    replacement = try alloc Child[previous.length - 1] in memory.heap
+                    var destination: usize = 0
+                    for source in 0..<previous.length:
+                        if source != index:
+                            replacement[destination] = previous[source]
+                            destination += 1
+                self.children = replacement
+                removed.node.value().parent = 0
+                self.invalidate()
+                free(previous) in memory.heap
+                removed.object.release()
+                removed.node.release()
+                return true
+            index += 1
+        return false
+
+    pub mutating func clear():
+        if self.changing:
+            return
+        self.changing = true
+        defer self.finish_change()
+        let previous = self.children
+        var empty: Child[]
+        self.children = empty
+        for child in previous:
+            child.node.value().parent = 0
+        self.invalidate()
+        for child in previous:
+            child.object.release()
+            child.node.release()
+        if previous.length > 0:
+            free(previous) in memory.heap
+
+    mutating func finish_change():
+        self.changing = false
+
+    mutating func dispose():
+        self.clear()
+
+    func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
+        for child in self.children:
+            child.object.trace(visit, context)
+            child.node.trace(visit, context)
+
+pub let object_node_type: interop.Type[ObjectNode] = interop.Type[ObjectNode]("ObjectNode", ObjectNode.dispose, ObjectNode.trace, main_thread = true)
+
+pub func make_node() -> interop.Reference[ObjectNode]!:
+    return try interop.Reference[ObjectNode].adopt(try new ObjectNode() in memory.heap, object_node_type, memory.heap)
+
+pub func object_node(object: interop.Interface[Object3D]) -> interop.Reference[ObjectNode]!:
+    try object.enter()
+    defer object.leave()
+    return object.value().node()
+
+func contains(node: ObjectNode*, identifier: u64, depth: usize) -> bool!:
+    if depth >= 64:
+        error(errors.limit, "a scene supports at most 64 levels")
+    if node.identifier == identifier:
+        return true
+    for child in node.children:
+        if try contains(child.node.value(), identifier, depth + 1):
+            return true
+    return false
+
+func bounded(vector: Vector3) -> !:
+    if not vector.is_finite() or math.abs(vector.x) > 1000000.0 or math.abs(vector.y) > 1000000.0 or math.abs(vector.z) > 1000000.0:
+        error(errors.invalid, "transform components must be finite and at most 1000000 in magnitude")

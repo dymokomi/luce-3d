@@ -1,0 +1,64 @@
+import interop
+import math
+import memory
+import luce_3d.errors as errors
+from luce_3d.core.geometry import Geometry, Vertex, Bounds
+from luce_3d.math.vector import Vector3
+
+## Indexed triangles with owned copies of positions, normals, UVs and indices.
+## Validate all inputs before publishing the immutable geometry.
+pub struct BufferGeometry: Geometry:
+    let vertices: Vertex[]
+    let indices: i64[]
+    let extent: Bounds
+
+    pub func init(vertices: const Vertex[], indices: const i64[]) -> !:
+        if vertices.length == 0 or vertices.length > 65536 or indices.length == 0 or indices.length > 196608 or indices.length % 3 != 0:
+            error(errors.limit, "geometry needs 1..65536 vertices and 1..65536 indexed triangles")
+        var minimum = vertices[0].position
+        var maximum = minimum
+        for vertex in vertices:
+            if not vertex.position.is_finite() or not vertex.normal.is_finite() or not math.is_finite(vertex.u) or not math.is_finite(vertex.v):
+                error(errors.invalid, "geometry attributes must be finite")
+            if vertex.normal.length() <= 0.000000000001:
+                error(errors.invalid, "a geometry normal must be nonzero")
+            minimum = Vector3(math.min(minimum.x, vertex.position.x), math.min(minimum.y, vertex.position.y), math.min(minimum.z, vertex.position.z))
+            maximum = Vector3(math.max(maximum.x, vertex.position.x), math.max(maximum.y, vertex.position.y), math.max(maximum.z, vertex.position.z))
+        for index in indices:
+            if index < 0 or (usize)index >= vertices.length:
+                error(errors.invalid, "a geometry index is outside its vertex buffer")
+        let copied_vertices = try alloc Vertex[vertices.length] in memory.heap
+        errdefer free(copied_vertices) in memory.heap
+        let copied_indices = try alloc i64[indices.length] in memory.heap
+        for offset in 0..<vertices.length:
+            copied_vertices[offset] = vertices[offset]
+        for offset in 0..<indices.length:
+            copied_indices[offset] = indices[offset]
+        self.vertices = copied_vertices
+        self.indices = copied_indices
+        self.extent = Bounds(minimum, maximum)
+
+    pub func vertex_count() -> i64:
+        return (i64)self.vertices.length
+
+    pub func index_count() -> i64:
+        return (i64)self.indices.length
+
+    pub func vertex(index: i64) -> interop.Outcome[Vertex]:
+        if index < 0 or (usize)index >= self.vertices.length:
+            return errors.failure[Vertex](errors.invalid, "vertex index is outside the geometry")
+        return errors.success[Vertex](self.vertices[(usize)index])
+
+    pub func index(offset: i64) -> interop.Outcome[i64]:
+        if offset < 0 or (usize)offset >= self.indices.length:
+            return errors.failure[i64](errors.invalid, "triangle index is outside the geometry")
+        return errors.success[i64](self.indices[(usize)offset])
+
+    pub func bounds() -> Bounds:
+        return self.extent
+
+    pub mutating func close():
+        free(self.vertices) in memory.heap
+        free(self.indices) in memory.heap
+
+pub let buffer_geometry_type: interop.Type[BufferGeometry] = interop.Type[BufferGeometry]("BufferGeometry", BufferGeometry.close, closeable = true, main_thread = true)

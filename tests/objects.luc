@@ -1,0 +1,34 @@
+from three import Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
+from three_ui import SceneView
+from ui import Application
+from gpu import Frame
+import window
+
+pub func main(arguments: list[str]) -> int!:
+    let geometry = try SphereGeometry(1.0, 16, 8)
+    let material = try MeshLambertMaterial(Color(0.1, 0.4, 1.0))
+    let mesh = try Mesh(geometry, material)
+    try mesh.set_position(Vector3(0.2, 0.0, 0.0))
+    try mesh.set_rotation(Vector3(0.1, 0.2, 0.0))
+    let group = try Group()
+    try group.set_scale(Vector3(1.0, 0.8, 1.2))
+    try group.add(mesh)
+    let scene = try Scene()
+    try scene.add(group)
+    try scene.add(try AmbientLight(intensity = 0.2))
+    try scene.add(try DirectionalLight(intensity = 0.8))
+    let camera = try PerspectiveCamera(50.0, 1.0, 0.1, 100.0)
+    let renderer = try Renderer()
+    let frame = try Frame(window.Size(200.0, 160.0, 200.0, 160.0, 1.0))
+    let target = try frame.target()
+    try renderer.render(scene, camera, target)
+    let view = try SceneView(scene, camera, renderer, width = 80.0, height = 60.0)
+    let app = try Application(view)
+    try app.render(target)
+    assert(camera.aspect() == 1.0)
+    assert(try group.remove(mesh))
+    try scene.add(mesh)
+    assert(group.node().child_count() == 0 and scene.node().child_count() == 4)
+    frame.close()
+    print("ok Luce scene objects and UI composition")
+    return 0

@@ -1,0 +1,74 @@
+## UV sphere with duplicated seam vertices and no degenerate polar triangles.
+import interop
+import math
+import memory
+import ownership
+import luce_3d.errors as errors
+from luce_3d.core.geometry import Geometry, Vertex, Bounds
+from luce_3d.geometries.buffer import BufferGeometry, buffer_geometry_type
+from luce_3d.math.vector import Vector3
+
+pub struct SphereGeometry: Geometry:
+    let buffer: interop.Reference[BufferGeometry]
+
+    pub func init(radius: f64 = 1.0, width_segments: i64 = 32, height_segments: i64 = 16) -> !:
+        if not (radius > 0.0 and radius <= 1000000.0) or width_segments < 3 or width_segments > 256 or height_segments < 2 or height_segments > 128:
+            error(errors.invalid, "sphere radius must be in (0,1000000], segments in 3..256 by 2..128")
+        let columns = (usize)width_segments
+        let rows = (usize)height_segments
+        let vertices = try alloc Vertex[(columns + 1) * (rows + 1)] in memory.heap
+        defer free(vertices) in memory.heap
+        let indices = try alloc i64[columns * (rows - 1) * 6] in memory.heap
+        defer free(indices) in memory.heap
+        for y in 0..<rows + 1:
+            let v = (f64)y / (f64)rows
+            let theta = v * math.pi
+            for x in 0..<columns + 1:
+                let u = (f64)x / (f64)columns
+                # Make the seam and poles exact, independent of trig roundoff.
+                let phi = 0.0 if x == columns else u * 2.0 * math.pi
+                let radial = 0.0 if y == 0 or y == rows else math.sin(theta)
+                let normal = Vector3(-math.cos(phi) * radial, math.cos(theta), math.sin(phi) * radial)
+                vertices[y * (columns + 1) + x] = Vertex(normal.multiply_scalar(radius), normal, u, 1.0 - v)
+        var count: usize = 0
+        for y in 0..<rows:
+            for x in 0..<columns:
+                let a = (i64)(y * (columns + 1) + x + 1)
+                let b = a - 1
+                let c = b + (i64)columns + 1
+                let d = c + 1
+                if y != 0:
+                    indices[count] = a
+                    indices[count + 1] = b
+                    indices[count + 2] = d
+                    count += 3
+                if y != rows - 1:
+                    indices[count] = b
+                    indices[count + 1] = c
+                    indices[count + 2] = d
+                    count += 3
+        assert(count == indices.length)
+        self.buffer = try interop.Reference[BufferGeometry].adopt(try new BufferGeometry(vertices, indices) in memory.heap, buffer_geometry_type, memory.heap)
+
+    pub func vertex_count() -> i64:
+        return self.buffer.value().vertex_count()
+
+    pub func index_count() -> i64:
+        return self.buffer.value().index_count()
+
+    pub func vertex(index: i64) -> interop.Outcome[Vertex]:
+        return self.buffer.value().vertex(index)
+
+    pub func index(offset: i64) -> interop.Outcome[i64]:
+        return self.buffer.value().index(offset)
+
+    pub func bounds() -> Bounds:
+        return self.buffer.value().bounds()
+
+    pub mutating func close():
+        self.buffer.release()
+
+    func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
+        self.buffer.trace(visit, context)
+
+pub let sphere_geometry_type: interop.Type[SphereGeometry] = interop.Type[SphereGeometry]("SphereGeometry", SphereGeometry.close, SphereGeometry.trace, closeable = true, main_thread = true)

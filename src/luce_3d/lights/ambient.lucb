@@ -1,0 +1,69 @@
+import interop
+import ownership
+import luce_3d.errors as errors
+import luce_3d.core.object as object
+from luce_3d.core.object import Object3D, ObjectNode, Light, LightKind
+from luce_3d.core.geometry import Geometry
+from luce_3d.core.material import Material, Color, check_color
+from luce_3d.math.vector import Vector3
+
+pub struct AmbientLight: Object3D:
+    let transform: interop.Reference[ObjectNode]
+    var illumination: Light
+
+    pub func init(color: Color = Color(1.0, 1.0, 1.0), intensity: f64 = 1.0) -> !:
+        try check_color(color)
+        if not (intensity >= 0.0 and intensity <= 100.0):
+            error(errors.invalid, "light intensity must be finite and in 0..100")
+        self.transform = try object.make_node()
+        self.illumination = Light(LightKind.ambient, color, intensity)
+
+    pub func node() -> interop.Reference[ObjectNode]:
+        return self.transform.clone()
+
+    pub func position() -> Vector3:
+        return self.transform.value().position()
+
+    pub mutating func set_position(position: Vector3) -> !:
+        try self.transform.value().set_position(position)
+
+    pub func rotation() -> Vector3:
+        return self.transform.value().rotation()
+
+    pub mutating func set_rotation(rotation: Vector3) -> !:
+        try self.transform.value().set_rotation(rotation)
+
+    pub mutating func set_scale(scale: Vector3) -> !:
+        try self.transform.value().set_scale(scale)
+
+    pub mutating func add(child: interop.Interface[Object3D]) -> !:
+        try self.transform.value().add(child)
+
+    pub mutating func remove(child: interop.Interface[Object3D]) -> bool!:
+        return try self.transform.value().remove(child)
+
+    pub mutating func clear():
+        self.transform.value().clear()
+
+    pub func geometry() -> interop.Interface[Geometry]?:
+        return none
+
+    pub func material() -> interop.Interface[Material]?:
+        return none
+
+    pub func light() -> Light:
+        return self.illumination
+
+    pub mutating func set_intensity(intensity: f64) -> !:
+        if not (intensity >= 0.0 and intensity <= 100.0):
+            error(errors.invalid, "light intensity must be finite and in 0..100")
+        self.illumination = Light(self.illumination.kind, self.illumination.color, intensity, self.illumination.direction)
+
+    pub mutating func close():
+        self.transform.value().clear()
+        self.transform.release()
+
+    func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
+        self.transform.trace(visit, context)
+
+pub let ambient_type: interop.Type[AmbientLight] = interop.Type[AmbientLight]("AmbientLight", AmbientLight.close, AmbientLight.trace, closeable = true, main_thread = true)

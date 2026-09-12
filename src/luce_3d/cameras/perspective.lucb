@@ -1,0 +1,81 @@
+import interop
+import math
+import luce_3d.errors as errors
+from luce_3d.math.vector import Vector3
+
+pub struct Projection:
+    pub let position: Vector3
+    pub let right: Vector3
+    pub let up: Vector3
+    pub let backward: Vector3
+    pub let focal: f64
+    pub let aspect: f64
+    pub let near: f64
+    pub let far: f64
+
+## The initial camera uses world-space position and look-at target. It is separate
+## from scene membership; projection is rebuilt from validated lens parameters.
+pub struct PerspectiveCamera:
+    var field_of_view: f64
+    var ratio: f64
+    var near_plane: f64
+    var far_plane: f64
+    var location: Vector3
+    var target: Vector3
+
+    pub func init(fov: f64 = 50.0, aspect: f64 = 1.0, near: f64 = 0.1, far: f64 = 1000.0) -> !:
+        try lens(fov, aspect, near, far)
+        self.field_of_view = fov
+        self.ratio = aspect
+        self.near_plane = near
+        self.far_plane = far
+        self.location = Vector3(0.0, 0.0, 5.0)
+        self.target = Vector3()
+
+    pub func position() -> Vector3:
+        return self.location
+
+    pub mutating func set_position(position: Vector3) -> !:
+        if not position.is_finite():
+            error(errors.invalid, "camera position must be finite")
+        discard(try position.subtract(self.target).normalized())
+        self.location = position
+
+    pub mutating func look_at(target: Vector3) -> !:
+        if not target.is_finite():
+            error(errors.invalid, "camera target must be finite")
+        discard(try self.location.subtract(target).normalized())
+        self.target = target
+
+    pub func aspect() -> f64:
+        return self.ratio
+
+    pub mutating func set_aspect(aspect: f64) -> !:
+        try lens(self.field_of_view, aspect, self.near_plane, self.far_plane)
+        self.ratio = aspect
+
+    pub mutating func set_projection(fov: f64, near: f64, far: f64) -> !:
+        try lens(fov, self.ratio, near, far)
+        self.field_of_view = fov
+        self.near_plane = near
+        self.far_plane = far
+
+    pub func projection(aspect: f64? = none) -> Projection!:
+        let ratio = aspect else self.ratio
+        try lens(self.field_of_view, ratio, self.near_plane, self.far_plane)
+        let backward = try self.location.subtract(self.target).normalized()
+        var right = Vector3(0.0, 1.0, 0.0).cross(backward)
+        if right.length() < 0.000001:
+            right = Vector3(0.0, 0.0, 1.0).cross(backward)
+        right = try right.normalized()
+        return Projection(self.location, right, backward.cross(right), backward,
+            1.0 / math.tan(self.field_of_view * math.pi / 360.0), ratio, self.near_plane, self.far_plane)
+
+    pub mutating func close():
+        discard(self.location)
+
+pub let perspective_camera_type: interop.Type[PerspectiveCamera] = interop.Type[PerspectiveCamera]("PerspectiveCamera", PerspectiveCamera.close, closeable = true, main_thread = true)
+
+func lens(fov: f64, aspect: f64, near: f64, far: f64) -> !:
+    if not (fov > 0.0 and fov < 179.0 and aspect >= 0.000001 and aspect <= 1000000.0 and near > 0.0 and far > near and far <= 1000000000.0):
+        error(errors.invalid, "a perspective camera needs finite fov (0,179), positive aspect and 0 < near < far <= 1e9")
