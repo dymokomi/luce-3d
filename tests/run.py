@@ -8,8 +8,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--base", type=Path, default=ROOT.parent / "luce-base/build/luce-base")
-parser.add_argument("--luce", type=Path, default=ROOT.parent / "luce/build/luce")
+parser.add_argument("--base", type=Path, default=ROOT.parent / ("luce-base/build/luce-base.exe" if os.name == "nt" else "luce-base/build/luce-base"))
+parser.add_argument("--luce", type=Path, default=ROOT.parent / ("luce/build/luce.exe" if os.name == "nt" else "luce/build/luce"))
 parser.add_argument("--opt", type=int, choices=range(4))
 args = parser.parse_args()
 modes = [["--native", "--opt", str(level)] for level in ([args.opt] if args.opt is not None else range(4))]

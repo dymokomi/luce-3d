@@ -51,3 +51,8 @@ shadows, animation assets and asset loading are later work. This is development
 code with no compatibility commitment before its first release.
 
 Licensed under MIT or Apache-2.0, at your option.
+
+## Windows x64
+
+Build sibling `luce-base` and `luce` checkouts with `python tools/build_windows.py` in each compiler repository. Run `python tests/run.py` in this repository; the runner selects the sibling Windows executables.
+For real windows and rendering, install the Vulkan SDK and start a fresh terminal with `VULKAN_SDK` set. The sibling `luce-demos` UI and sphere applications exercise Win32/Vulkan presentation. CPU tests run in hosted Windows CI; GPU smoke tests require an interactive desktop and Vulkan hardware.
