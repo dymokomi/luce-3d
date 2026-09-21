@@ -8,6 +8,7 @@ jobs:
     timeout-minutes: 60
     env:
       CC: gcc
+      LIBRARY_PATH: /ucrt64/lib
     steps:
       - uses: actions/checkout@v7
         with:
@@ -55,6 +56,11 @@ jobs:
             mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-vulkan-devel
             mingw-w64-ucrt-x86_64-vulkan-loader
+      - name: Verify Vulkan loader
+        shell: msys2 {0}
+        run: |
+          test -f /ucrt64/lib/libvulkan-1.dll.a
+          test "$(gcc -print-file-name=libvulkan-1.dll.a)" != "libvulkan-1.dll.a"
       - name: Build Base
         working-directory: luce-base
         shell: msys2 {0}
