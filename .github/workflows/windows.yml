@@ -19,6 +19,8 @@ jobs:
           "base=$(Get-Content luce-3d/bootstrap/BASE)" >> $env:GITHUB_OUTPUT
           "luce=$(Get-Content luce-3d/bootstrap/LUCE)" >> $env:GITHUB_OUTPUT
           "ui=$(Get-Content luce-3d/bootstrap/UI)" >> $env:GITHUB_OUTPUT
+          "color=$(Get-Content luce-3d/bootstrap/COLOR)" >> $env:GITHUB_OUTPUT
+          "svg=$(Get-Content luce-3d/bootstrap/SVG)" >> $env:GITHUB_OUTPUT
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-base
@@ -34,6 +36,16 @@ jobs:
           repository: dymokomi/luce-ui
           ref: ${{ steps.pins.outputs.ui }}
           path: luce-ui
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-color
+          ref: ${{ steps.pins.outputs.color }}
+          path: luce-color
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-svg
+          ref: ${{ steps.pins.outputs.svg }}
+          path: luce-svg
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64

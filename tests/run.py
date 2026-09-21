@@ -15,7 +15,11 @@ args = parser.parse_args()
 modes = [["--native", "--opt", str(level)] for level in ([args.opt] if args.opt is not None else range(4))]
 if args.opt is None:
     modes += [["--backend=c"], ["--backend=c", "--release"]]
-env = dict(os.environ, LUCE_BASE=str(args.base.resolve()))
+cache = ROOT / "build/cache"
+cache.mkdir(parents=True, exist_ok=True)
+env = dict(os.environ, LUCE_BASE=str(args.base.resolve()),
+           LUCE_STD=str(ROOT.parent / "luce-base/src/std"),
+           LUCE_CACHE=str(cache))
 with tempfile.TemporaryDirectory(prefix="luce-3d-tests-") as temporary:
     binary = Path(temporary) / "test"
     for compiler, entry in [(args.base, "main.lucb"), (args.luce, "objects.luc"), (args.luce, "custom.luc")]:
