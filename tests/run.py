@@ -20,11 +20,12 @@ cache.mkdir(parents=True, exist_ok=True)
 env = dict(os.environ, LUCE_BASE=str(args.base.resolve()),
            LUCE_STD=str(ROOT.parent / "luce-base/src/std"),
            LUCE_CACHE=str(cache))
+compile_timeout = 600 if os.name == "nt" else 180
 with tempfile.TemporaryDirectory(prefix="luce-3d-tests-") as temporary:
     binary = Path(temporary) / "test"
     for compiler, entry in [(args.base, "main.lucb"), (args.luce, "objects.luc"), (args.luce, "custom.luc")]:
         for flags in modes:
             subprocess.run([str(compiler.resolve()), "build", str(ROOT / "tests" / entry),
-                            *flags, "-o", str(binary)], check=True, env=env, timeout=180)
+                            *flags, "-o", str(binary)], check=True, env=env, timeout=compile_timeout)
             subprocess.run([str(binary)], check=True, timeout=30)
 print("PASS 3D Base and Luce consumers, native and comparison modes")
