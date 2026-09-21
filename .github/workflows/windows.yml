@@ -8,7 +8,6 @@ jobs:
     timeout-minutes: 60
     env:
       CC: gcc
-      LIBRARY_PATH: /ucrt64/lib
     steps:
       - uses: actions/checkout@v7
         with:
@@ -56,6 +55,9 @@ jobs:
             mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-vulkan-devel
             mingw-w64-ucrt-x86_64-vulkan-loader
+      - name: Configure native library search
+        shell: msys2 {0}
+        run: echo "LIBRARY_PATH=$(cygpath -m /ucrt64/lib)" >> "$GITHUB_ENV"
       - name: Verify Vulkan loader
         shell: msys2 {0}
         run: |
