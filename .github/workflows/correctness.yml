@@ -41,6 +41,9 @@ jobs:
         with: {repository: dymokomi/luce-color, ref: "${{ steps.pins.outputs.color }}", path: luce-color}
       - uses: actions/checkout@v7
         with: {repository: dymokomi/luce-svg, ref: "${{ steps.pins.outputs.svg }}", path: luce-svg}
+      - name: Install Linux font backend
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcairo2-dev fonts-dejavu-core
       - name: Select Clang
         run: |
           mkdir -p "$RUNNER_TEMP/luce-bin"
