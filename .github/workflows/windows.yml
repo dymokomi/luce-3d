@@ -54,6 +54,7 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-vulkan-devel
+            mingw-w64-ucrt-x86_64-vulkan-loader
       - name: Build Base
         working-directory: luce-base
         shell: msys2 {0}
