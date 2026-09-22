@@ -1,0 +1,10 @@
+#prisma 4.0
+def package "luce_3d_tests" {
+    str source = "."
+    def dependency "luce_3d" {
+        str path = ".."
+    }
+    def dependency "luce_ui" {
+        str path = "../../luce-ui"
+    }
+}
