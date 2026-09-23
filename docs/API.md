@@ -49,6 +49,6 @@ Base consumers use explicit `interop.Reference`, `interop.Interface` and
 `scene_view_type` is exported by `three_ui`. Reference/interface return values
 transfer one retained edge. Outcome values own their results or error messages;
 release the carrier after use. The Luce compiler supplies the matching ARC and
-error conversion automatically. See `tests/main.lucb` and `tests/gpu.lucb` for
+error conversion automatically. See `tests/main.lucb` and `tests/gpu_pixels_main.lucb` for
 compiled direct Base consumers, and `tests/custom.luc` for application-defined
 geometry and materials.

@@ -19,7 +19,7 @@ if args.opt is None:
     modes += [["--backend=c"], ["--backend=c", "--release"]]
 with tempfile.TemporaryDirectory(prefix="luce-3d-gpu-") as temporary:
     project = Path(temporary)
-    shutil.copy2(ROOT / "tests/gpu.lucb", project / "main.lucb")
+    shutil.copy2(ROOT / "tests/gpu_pixels_main.lucb", project / "main.lucb")
     shutil.copy2(args.base_source / "tests/programs/gpu/native.lucb", project / "native.lucb")
     (project / "luce.toml").write_text('[package]\nname = "three_pixels"\nsource = "."\n\n[dependencies]\nluce_ui = ' + json.dumps(str(ROOT.parent / 'luce-ui')) + '\nluce_3d = ' + json.dumps(str(ROOT)) + '\n')
     for flags in modes:

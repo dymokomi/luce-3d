@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-3d" {
     str owner = "dymokomi"
-    str version = "0.1.3"
+    str version = "0.1.4"
     str kind = "package"
     str language = "luce-base"
     str description = "A Luce Base library for scenes, geometry, materials, cameras and rendering through standard gpu. The public names follow the shape of Three.js. It runs standalone or inside a luce-ui widget; all platform resources belong to the standard library."
@@ -19,5 +19,17 @@ def package "luce-3d" {
         str owner = "dymokomi"
         str version = "^0.1.0"
         str path = "../luce-ui"
+    }
+
+    def dependency "luce-std" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../luce-std"
+    }
+
+    def dependency "luce-gpu" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../luce-gpu"
     }
 }
