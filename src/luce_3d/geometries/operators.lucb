@@ -30,6 +30,7 @@ pub struct MeshOps:
                 try out.face(count, face)
                 for at in 0..<count:
                     try out.corner(mapping[(usize)(try mesh.face_point(face, at))], (try mesh.face_offset(face)) + at)
+                try out.copy_last_display(mesh,face)
         return try out.finish(mesh)
 
     ## Remove unused points without altering face connectivity or winding.
@@ -74,6 +75,7 @@ pub struct MeshOps:
                 try out.face(count, face)
                 for at in 0..<count:
                     try out.corner(try mesh.face_point(face, count - at - 1), offset + count - at - 1)
+                try out.copy_last_display(mesh,face,true)
             elif operation == 2:
                 for triangle in 0..<mesh.index_count() // 3:
                     if try mesh.triangle_face(triangle) != face:
@@ -98,6 +100,9 @@ pub struct MeshOps:
                 try out.face(count, face)
                 for at in 0..<count:
                     try out.corner(inner[(usize)at], offset + at)
+                # Inset, duplicate-offset and split all apply an affine map
+                # within this face, so its display triangulation stays valid.
+                try out.copy_last_display(mesh,face)
                 if operation == 3:
                     for at in 0..<count:
                         let next = (at + 1) % count

@@ -15,20 +15,39 @@ func segment(p: Vector3, a: Vector3, b: Vector3) -> f64:
     let d = p.subtract(a.add(ab.multiply_scalar(t)))
     return d.dot(d)
 
+## Squared distance using signed areas instead of a cancellation-prone Gram
+## solve. Degenerate triangles reduce to their point/segment boundary.
 pub func triangle_distance(p: Vector3, a: Vector3, b: Vector3, c: Vector3) -> f64:
     let ab = b.subtract(a)
     let ac = c.subtract(a)
-    let ap = p.subtract(a)
-    let aa = ab.dot(ab)
-    let bb = ab.dot(ac)
-    let cc = ac.dot(ac)
-    let u = ap.dot(ab)
-    let v = ap.dot(ac)
-    let det = aa * cc - bb * bb
-    if det > 0.0:
-        let s = (cc * u - bb * v) / det
-        let t = (aa * v - bb * u) / det
-        if s >= 0.0 and t >= 0.0 and s + t <= 1.0:
-            let delta = ap.subtract(ab.multiply_scalar(s)).subtract(ac.multiply_scalar(t))
-            return delta.dot(delta)
-    return math.min(segment(p, a, b), math.min(segment(p, b, c), segment(p, c, a)))
+    let bc = c.subtract(b)
+    let boundary = math.min(segment(p,a,b),math.min(segment(p,b,c),segment(p,c,a)))
+    # The Gram determinant |ab|²|ac|²-(ab.ac)² subtracts nearly equal
+    # numbers on thin ears. Its barycentrics can return a distant interior
+    # point even when p lies on an edge. Use oriented areas instead, anchored
+    # opposite the longest side (the two shortest incident vectors).
+    var origin = a
+    var first = ab
+    var second = ac
+    if ab.dot(ab) >= ac.dot(ac) and ab.dot(ab) >= bc.dot(bc):
+        origin = c
+        first = ac.multiply_scalar(-1.0)
+        second = bc.multiply_scalar(-1.0)
+    elif ac.dot(ac) >= bc.dot(bc):
+        origin = b
+        first = bc
+        second = ab.multiply_scalar(-1.0)
+    let relative = p.subtract(origin)
+    let normal = first.cross(second)
+    let area2 = normal.dot(normal)
+    if area2 > 0.0:
+        let s = relative.cross(second).dot(normal)
+        let t = first.cross(relative).dot(normal)
+        # Test all three signed subareas without subtracting s+t from area2.
+        let remaining = first.subtract(relative).cross(second.subtract(relative)).dot(normal)
+        if s >= 0.0 and t >= 0.0 and remaining >= 0.0:
+            let height = relative.dot(normal)
+            # The boundary is always a valid candidate, including when the
+            # projection is numerically ambiguous beside a very short side.
+            return math.min(boundary,height*height/area2)
+    return boundary

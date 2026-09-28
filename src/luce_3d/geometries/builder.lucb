@@ -1,9 +1,11 @@
 ## Bounded temporary topology with explicit output-to-input provenance.
 import interop
 import memory
+import math
 import luce_3d.errors as errors
 from luce_3d.math.vector import Vector3
 from luce_3d.geometries.polygon import PolygonMesh, polygon_mesh_type
+from luce_3d.geometries.polygon_triangulation import triangulate, area_normal
 
 pub struct MeshBuilder:
     pub var points: Vector3[]
@@ -12,6 +14,10 @@ pub struct MeshBuilder:
     pub var point_parents: i64[]
     pub var face_parents: i64[]
     pub var corner_parents: i64[]
+    # Lazy per-face display indices; -1 requests ordinary triangulation. The
+    # used length is always 3*(nc-2*nf), so transactional nf/nc rewinds also
+    # rewind display data. face() clears reused slots before another attempt.
+    pub var display: i64[]
     pub var np: usize
     pub var nf: usize
     pub var nc: usize
@@ -34,6 +40,8 @@ pub struct MeshBuilder:
         self.point_parents = pp
         self.face_parents = fp
         self.corner_parents = cp
+        var empty: i64[]
+        self.display = empty
         self.np = 0
         self.nf = 0
         self.nc = 0
@@ -52,6 +60,11 @@ pub struct MeshBuilder:
     pub mutating func face(count: i64, parent: i64 = -1) -> !:
         if count < 3 or count > 256:
             error(errors.limit, "operation exceeds face/corner limits")
+        if self.display.length > 0:
+            let start = (self.nc-self.nf*2)*3
+            let end = start+((usize)count-2)*3
+            try self.reserve_display(end)
+            for at in start..<end: self.display[at] = -1
         if self.nf == self.sizes.length:
             try grow[i64](&self.sizes, 8388608)
         if self.nf == self.face_parents.length:
@@ -77,13 +90,86 @@ pub struct MeshBuilder:
         let count = try mesh.face_size(id)
         let offset = try mesh.face_offset(id)
         try self.face(count, id)
+        var unchanged = true
         for at in 0..<count:
-            try self.corner(try mesh.face_point(id, at), offset + at)
+            let point = try mesh.face_point(id,at)
+            try self.corner(point, offset + at)
+            if point < 0 or (usize)point >= self.np: unchanged = false
+            else:
+                let a = self.points[(usize)point]
+                let b = try mesh.point(point)
+                unchanged = unchanged and a.x == b.x and a.y == b.y and a.z == b.z
+        # Subsets retain the surface tessellation; arbitrary point edits must
+        # rebuild it. Affine transforms preserve it explicitly in PolygonMesh.
+        if unchanged: try self.copy_last_display(mesh,id)
+
+    ## Supply local corner indices for the most recently completed polygon.
+    ## Full topology and geometric validation occurs in finish().
+    pub mutating func set_last_display(indices: const i64[]) -> !:
+        if self.nf == 0: error(errors.invalid,"display triangulation requires a polygon")
+        let count = (usize)self.sizes[self.nf-1]
+        if self.nc < count or indices.length != (count-2)*3: error(errors.invalid,"last polygon display size mismatch")
+        for index in indices:
+            if index < 0 or (usize)index >= count: error(errors.invalid,"display index leaves the last polygon")
+        let start = self.nc-count
+        let offset = (start-(self.nf-1)*2)*3
+        try self.reserve_display(offset+indices.length)
+        for at in 0..<indices.length: self.display[offset+at] = (i64)start+indices[at]
+
+    ## Compute the ordinary projected triangulation of the last completed face,
+    ## without installing it or allocating a mesh/BVH. Returned indices are local
+    ## corners, so geometry producers can compare it with a support-chart result.
+    pub func triangulate_last(indices: i64[]) -> !:
+        if self.nf == 0: error(errors.invalid,"triangulation requires a polygon")
+        let count = (usize)self.sizes[self.nf-1]
+        if self.nc < count or indices.length != (count-2)*3: error(errors.invalid,"last polygon display size mismatch")
+        let corners = self.corners[self.nc-count..<self.nc]
+        for corner in corners:
+            if corner < 0 or (usize)corner >= self.np: error(errors.invalid,"polygon point is out of range")
+        let origin = self.points[(usize)corners[0]]
+        var normal = Vector3()
+        var extent2: f64 = 0.0
+        for at in 0..<count:
+            let a = self.points[(usize)corners[at]].subtract(origin)
+            let b = self.points[(usize)corners[(at+1)%count]].subtract(origin)
+            normal = normal.add(a.cross(b))
+            extent2 = math.max(extent2,a.dot(a))
+        try triangulate(self.points[..<self.np],corners,0,count,try area_normal(normal,extent2),indices)
+
+    ## Copy triangles when polygon corner order is unchanged but point IDs may
+    ## have been remapped (worker assembly, subsets and CAD boundary stitching).
+    pub mutating func copy_last_display(mesh: const PolygonMesh*, face: i64, reversed: bool = false) -> !:
+        let count = try mesh.face_size(face)
+        if self.nf == 0 or self.sizes[self.nf-1] != count: error(errors.invalid,"display copy requires matching polygon sizes")
+        let offset = try mesh.face_offset(face)
+        let first = (offset-face*2)*3
+        var indices: i64[762]
+        for at in 0..<(count-2)*3:
+            let input = at//3*3+(2-at%3 if reversed else at%3)
+            let index = mesh.index(first+input)
+            defer index.release()
+            let corner = (try index.get())-offset
+            indices[(usize)at] = count-1-corner if reversed else corner
+        try self.set_last_display(indices[..<(usize)(count-2)*3])
+
+    mutating func reserve_display(required: usize) -> !:
+        if required <= self.display.length: return
+        if required > 100663296: error(errors.limit,"display triangulation exceeds geometry limits")
+        var capacity: usize = 1024 if self.display.length == 0 else self.display.length
+        while capacity < required: capacity *= 2
+        if capacity > 100663296: capacity = 100663296
+        let values = try alloc i64[capacity] in memory.heap
+        memory.copy(values,self.display,self.display.length)
+        for at in self.display.length..<capacity: values[at] = -1
+        if self.display.length > 0: free(self.display) in memory.heap
+        self.display = values
 
     pub func finish(source: const PolygonMesh*? = none) -> interop.Reference[PolygonMesh]!:
+        var triangles: const i64[]? = none
+        if self.display.length > 0: triangles = self.display[..<(self.nc-self.nf*2)*3]
         if let original = source:
-            return try original.remapped(self.points[..<self.np], self.sizes[..<self.nf], self.corners[..<self.nc], self.point_parents[..<self.np], self.face_parents[..<self.nf], self.corner_parents[..<self.nc])
-        return try interop.Reference[PolygonMesh].adopt(new PolygonMesh(self.points[..<self.np], self.sizes[..<self.nf], self.corners[..<self.nc]) in memory.heap, polygon_mesh_type, memory.heap)
+            return try original.remapped(self.points[..<self.np], self.sizes[..<self.nf], self.corners[..<self.nc], self.point_parents[..<self.np], self.face_parents[..<self.nf], self.corner_parents[..<self.nc], false, triangles)
+        return try interop.Reference[PolygonMesh].adopt(new PolygonMesh(self.points[..<self.np], self.sizes[..<self.nf], self.corners[..<self.nc], triangles) in memory.heap, polygon_mesh_type, memory.heap)
 
     pub mutating func close():
         free(self.points) in memory.heap
@@ -92,6 +178,7 @@ pub struct MeshBuilder:
         free(self.point_parents) in memory.heap
         free(self.face_parents) in memory.heap
         free(self.corner_parents) in memory.heap
+        if self.display.length > 0: free(self.display) in memory.heap
 
 ## Geometric growth keeps small operations small; the hard budget bounds runaway
 ## subdivision. Callers must not retain spans across point/face/corner appends.

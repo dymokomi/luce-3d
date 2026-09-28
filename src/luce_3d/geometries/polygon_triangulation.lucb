@@ -2,6 +2,14 @@ import luce_3d.errors as errors
 import math
 from luce_3d.math.vector import Vector3
 
+## Polygon area has squared-distance units. Normalize relative to its own
+## extent, not Vector3's world-space direction cutoff, exactly as ear tests do.
+pub func area_normal(area: Vector3, extent2: f64) -> Vector3!:
+    let length = area.length()
+    if not math.is_finite(length) or not math.is_finite(extent2) or length <= math.max(1e-30,extent2*1e-14):
+        error(errors.invalid,"polygon has degenerate area")
+    return area.multiply_scalar(1.0/length)
+
 ## Ear clipping in the face's normal plane supports concave polygons created
 ## by point editing. A self-intersecting/collapsed polygon is rejected atomically.
 pub func triangulate(points: const Vector3[], corners: const i64[], start: usize, count: usize, normal: Vector3, output: i64[]) -> !:
