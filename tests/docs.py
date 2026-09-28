@@ -16,6 +16,6 @@ with tempfile.TemporaryDirectory(prefix="luce-3d-docs-") as temporary:
     assert examples, 'missing documented example'
     for source in examples:
         (project / "main.luc").write_text(source)
-        subprocess.run([str(ROOT.parent / 'luce/build/luce'), 'build', str(project / 'main.luc'), '-o', str(project / 'example')], check=True,
-                       env=dict(os.environ, LUCE_BASE=str(ROOT.parent / 'luce-base/build/luce-base')), timeout=180)
+        subprocess.run([os.environ.get('LUCE', str(ROOT.parent / 'luce/build/luce')), 'build', str(project / 'main.luc'), '-o', str(project / 'example')], check=True,
+                       env=dict(os.environ, LUCE_BASE=os.environ.get('LUCE_BASE', str(ROOT.parent / 'luce-base/build/luce-base'))), timeout=180)
 print('PASS documented Luce sphere example')

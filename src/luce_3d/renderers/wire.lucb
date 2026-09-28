@@ -1,0 +1,87 @@
+## Screen-space-width, depth-tested world-space lines. No UI dependency.
+import gpu
+import interop
+import math
+import memory
+import luce_3d.errors as errors
+from luce_3d.math.vector import Vector3
+from luce_3d.cameras.perspective import PerspectiveCamera, Projection
+
+pub struct WireRenderer:
+    let reserved: u8 = 0
+
+    ## Independent endpoint pairs; width is in target logical pixels, not world units.
+    pub static func lines(points: const Vector3[], camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget],
+                          color: gpu.Color, width: f64 = 1.0, bias: f64 = 0.000001) -> !:
+        if points.length % 2 != 0 or points.length > 131072 or not math.is_finite(width) or width <= 0.0 or width > 32.0:
+            error(errors.invalid, "invalid wire segment count or pixel width")
+        let native = try target.get()
+        let size = try native.size()
+        if size.width <= 0.0 or size.height <= 0.0 or points.length == 0:
+            return
+        let projection = try camera.value().projection(size.width / size.height)
+        let vertices = try alloc gpu.Vertex[points.length * 3] in memory.heap
+        defer free(vertices) in memory.heap
+        var count: usize = 0
+        var index: usize = 0
+        while index < points.length:
+            var a = points[index]
+            var b = points[index + 1]
+            index += 2
+            if not a.is_finite() or not b.is_finite():
+                error(errors.invalid, "wire endpoints must be finite")
+            var da = -a.subtract(projection.position).dot(projection.backward)
+            var db = -b.subtract(projection.position).dot(projection.backward)
+            if (da < projection.near and db < projection.near) or (da > projection.far and db > projection.far):
+                continue
+            if da < projection.near:
+                a = a.add(b.subtract(a).multiply_scalar((projection.near - da) / (db - da)))
+                da = projection.near
+            if db < projection.near:
+                b = b.add(a.subtract(b).multiply_scalar((projection.near - db) / (da - db)))
+                db = projection.near
+            let av = projected(a, projection, color, bias)
+            let bv = projected(b, projection, color, bias)
+            let dx = ((f64)bv.x / db - (f64)av.x / da) * size.width
+            let dy = ((f64)bv.y / db - (f64)av.y / da) * size.height
+            let length = math.sqrt(dx * dx + dy * dy)
+            if length < 0.000001:
+                continue
+            let nx = -dy / length * width / size.width
+            let ny = dx / length * width / size.height
+            let a0 = offset(av, nx, ny)
+            let a1 = offset(av, -nx, -ny)
+            let b0 = offset(bv, nx, ny)
+            let b1 = offset(bv, -nx, -ny)
+            for vertex in [a0, b0, b1, a0, b1, a1]:
+                vertices[count] = vertex
+                count += 1
+        if count > 0:
+            try native.triangles(vertices[..<count], true)
+
+    ## Selection fills share the scene depth buffer, unlike 2D Painter triangles.
+    pub static func triangles(points: const Vector3[], camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color) -> !:
+        if points.length % 3 != 0 or points.length > 196608:
+            error(errors.invalid, "invalid overlay triangle count")
+        let native = try target.get()
+        let size = try native.size()
+        if points.length == 0 or size.width <= 0.0 or size.height <= 0.0:
+            return
+        let projection = try camera.value().projection(size.width / size.height)
+        let vertices = try alloc gpu.Vertex[points.length] in memory.heap
+        defer free(vertices) in memory.heap
+        for index in 0..<points.length:
+            vertices[index] = projected(points[index], projection, color, 0.0000005)
+        try native.triangles(vertices, true)
+
+func projected(point: Vector3, projection: Projection, color: gpu.Color, bias: f64) -> gpu.Vertex:
+    let relative = point.subtract(projection.position)
+    let distance = -relative.dot(projection.backward)
+    return gpu.Vertex(x = (f32)(relative.dot(projection.right) * projection.focal / projection.aspect),
+                      y = (f32)(relative.dot(projection.up) * projection.focal),
+                      z = (f32)(projection.far * (distance - projection.near) / (projection.far - projection.near) - bias * distance),
+                      w = (f32)distance, red = (f32)color.red, green = (f32)color.green, blue = (f32)color.blue)
+
+func offset(vertex: gpu.Vertex, x: f64, y: f64) -> gpu.Vertex:
+    return gpu.Vertex(x = vertex.x + (f32)x * vertex.w, y = vertex.y + (f32)y * vertex.w,
+                      z = vertex.z, w = vertex.w, red = vertex.red, green = vertex.green, blue = vertex.blue)

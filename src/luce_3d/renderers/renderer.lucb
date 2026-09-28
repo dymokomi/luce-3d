@@ -1,6 +1,7 @@
-## Transform and Lambert lighting currently run on the CPU. Standard gpu performs
-## homogeneous clipping, rasterization, interpolation and depth testing. Backend
-## selection, shader implementation and native resources remain entirely in gpu.
+## World transforms and Lambert lighting are cached on geometry invalidation.
+## Device frames retain GPU geometry and send only camera uniforms per redraw;
+## standalone frames keep a CPU projection fallback for portable recording/tests.
+## Backend resources and shaders remain entirely in luce-gpu.
 import gpu
 import interop
 import math
@@ -14,6 +15,8 @@ from luce_3d.core.material import Material, Color, check_color
 from luce_3d.math.vector import Vector3
 from luce_3d.math.matrix import Matrix4
 from luce_3d.cameras.perspective import PerspectiveCamera, Projection
+from luce_3d.renderers.projection import projection_matrix
+from luce_3d.renderers.retained import RetainedBatch
 
 struct Item:
     let object: interop.Interface[Object3D]
@@ -24,14 +27,41 @@ struct Item:
     let illumination: Light
     let visible: bool
 
+struct Prepared:
+    let points: Vector3[]
+    let colors: Color[]
+    let flat_colors: Color[]
+    var smooth_gpu: RetainedBatch
+    var flat_gpu: RetainedBatch
+
 pub struct Renderer:
     var items: Item[]
     var count: usize
     var vertices: gpu.Vertex[]
     var rendering: bool
+    let static_scene: bool
+    var prepared: Prepared[]
+    var prepared_count: usize
+    var prepared_epoch: u64
+    var lights: Light[]
+    var light_count: usize
+    var flat: bool = false
 
-    pub func init() -> !:
+    ## Display state only: switching normals never invalidates geometry buffers.
+    pub mutating func set_flat(value: bool):
+        self.flat = value
+
+    ## Opt-in immutable geometry/material cache. Scene transforms invalidate it
+    ## automatically; owners call invalidate after custom material/geometry edits.
+    pub func init(static_scene: bool = false) -> !:
         self.items = try alloc Item[1024] in memory.heap
+        self.prepared = try alloc Prepared[1024] in memory.heap
+        self.lights = try alloc Light[1024] in memory.heap
+        self.static_scene = static_scene
+        self.prepared_count = 0
+        self.prepared_epoch = 0
+        self.light_count = 0
+        self.flat = false
         self.count = 0
         var empty: gpu.Vertex[]
         self.vertices = empty
@@ -47,6 +77,8 @@ pub struct Renderer:
         defer self.finish()
         let native = target.get() catch failure:
             return errors.failure[unit](failure.code, failure.message)
+        native.allow_vertices(8388608) catch failure:
+            return errors.failure[unit](failure.code, failure.message)
         let extent = native.size() catch failure:
             return errors.failure[unit](failure.code, failure.message)
         let lens = camera.get() catch failure:
@@ -61,13 +93,26 @@ pub struct Renderer:
             return errors.failure[unit](failure.code, failure.message)
         if object.epoch() != version:
             return errors.failure[unit](errors.busy, "a scene changed during traversal")
+        if not self.static_scene or self.prepared_epoch != version:
+            self.invalidate()
+            self.prepared_epoch = version
+        self.light_count = 0
+        for item in self.items[..<self.count]:
+            let light = item.illumination
+            if item.visible and light.kind != LightKind.inactive:
+                let direction = item.world.transform_direction(light.direction).normalized() catch failure:
+                    return errors.failure[unit](failure.code, failure.message)
+                self.lights[self.light_count] = Light(light.kind, light.color, light.intensity, direction)
+                self.light_count += 1
+        var drawable: usize = 0
         for index in 0..<self.count:
             let item = &self.items[index]
             if not item.visible:
                 continue
             let geometry = item.geometry else continue
             let material = item.material else return errors.failure[unit](errors.invalid, "a renderable object has geometry without material")
-            let rendered = self.draw(item, geometry, material, projection, target)
+            let rendered = self.draw(item, geometry, material, projection, target, drawable)
+            drawable += 1
             if not rendered.is_success():
                 return rendered
             rendered.release()
@@ -120,7 +165,7 @@ pub struct Renderer:
         self.vertices = replacement
 
     mutating func draw(item: const Item*, geometry: interop.Interface[Geometry], material: interop.Interface[Material],
-                       projection: Projection, target: interop.View[gpu.RenderTarget]) -> interop.Outcome[unit]:
+                       projection: Projection, target: interop.View[gpu.RenderTarget], drawable: usize) -> interop.Outcome[unit]:
         geometry.enter() catch failure:
             return errors.failure[unit](failure.code, failure.message)
         defer geometry.leave()
@@ -131,7 +176,7 @@ pub struct Renderer:
         let appearance = material.value()
         let count = shape.index_count()
         let vertices = shape.vertex_count()
-        if count <= 0 or count > 196608 or count % 3 != 0 or vertices <= 0 or vertices > 65536:
+        if count <= 0 or count > 100663296 or count % 3 != 0 or vertices <= 0 or vertices > 33554432:
             return errors.failure[unit](errors.invalid, "a custom geometry returned invalid buffer counts")
         let tint = appearance.color()
         check_color(tint) catch failure:
@@ -139,7 +184,62 @@ pub struct Renderer:
         let lit = appearance.is_lit()
         self.reserve((usize)count) catch failure:
             return errors.failure[unit](failure.code, failure.message)
+        if drawable == self.prepared_count:
+            let points = alloc Vector3[(usize)count] in memory.heap catch failure:
+                return errors.failure[unit](failure.code, failure.message)
+            let colors = alloc Color[(usize)count] in memory.heap catch failure:
+                free(points) in memory.heap
+                return errors.failure[unit](failure.code, failure.message)
+            let flat_colors = alloc Color[(usize)count] in memory.heap catch failure:
+                free(points) in memory.heap
+                free(colors) in memory.heap
+                return errors.failure[unit](failure.code, failure.message)
+            self.prepared[drawable] = Prepared(points, colors, flat_colors, RetainedBatch(), RetainedBatch())
+            # On failure invalidate the partial cache before returning.
+            self.prepared_count += 1
+            let built = self.prepare(item, shape, tint, lit, vertices, &self.prepared[drawable])
+            if not built.is_success():
+                self.invalidate()
+                return built
+            built.release()
+        let native = target.get() catch failure:
+            return errors.failure[unit](failure.code, failure.message)
+        var device = gpu.device_of(native) catch failure:
+            if failure.code != gpu.unavailable: return errors.failure[unit](failure.code, failure.message)
+            recover gpu.Device()
+        defer device.destroy()
+        if device.is_open():
+            self.draw_retained(drawable, device, native, projection) catch failure:
+                return errors.failure[unit](failure.code, failure.message)
+            return errors.success[unit](())
+        let cached = self.prepared[drawable]
         for offset in 0..<count:
+            let relative = cached.points[(usize)offset].subtract(projection.position)
+            let distance = -relative.dot(projection.backward)
+            let color = cached.flat_colors[(usize)offset] if self.flat else cached.colors[(usize)offset]
+            self.vertices[(usize)offset] = gpu.Vertex(
+                x = (f32)(relative.dot(projection.right) * projection.focal / projection.aspect),
+                y = (f32)(relative.dot(projection.up) * projection.focal),
+                z = (f32)(projection.far * (distance - projection.near) / (projection.far - projection.near)),
+                w = (f32)distance, red = (f32)color.red, green = (f32)color.green, blue = (f32)color.blue)
+        native.triangles(self.vertices[..<(usize)count], true) catch failure:
+            return errors.failure[unit](failure.code, failure.message)
+        return errors.success[unit](())
+
+    mutating func draw_retained(drawable: usize, device: gpu.Device, target: const gpu.RenderTarget*, projection: Projection) -> !:
+        let cached = &self.prepared[drawable]
+        let retained = &cached.flat_gpu if self.flat else &cached.smooth_gpu
+        if not retained.is_open():
+            for at in 0..<cached.points.length:
+                let p = cached.points[at]
+                let color = cached.flat_colors[at] if self.flat else cached.colors[at]
+                self.vertices[at] = gpu.Vertex(x = (f32)p.x, y = (f32)p.y, z = (f32)p.z, red = (f32)color.red, green = (f32)color.green, blue = (f32)color.blue)
+            try retained.upload(device, self.vertices[..<cached.points.length])
+        let matrix = projection_matrix(projection)
+        try retained.draw(target, matrix)
+
+    func prepare(item: const Item*, shape: Geometry, tint: Color, lit: bool, vertices: i64, prepared: Prepared*) -> interop.Outcome[unit]:
+        for offset in 0..<(i64)prepared.points.length:
             let indexed = shape.index(offset)
             defer indexed.release()
             let index = indexed.get() catch failure:
@@ -153,35 +253,36 @@ pub struct Renderer:
             if not vertex.position.is_finite() or not vertex.normal.is_finite():
                 return errors.failure[unit](errors.invalid, "a custom geometry returned non-finite attributes")
             let world = item.world.transform_point(vertex.position)
-            let relative = world.subtract(projection.position)
-            let distance = -relative.dot(projection.backward)
-            var color = tint
+            let vertex_tint = Color(tint.red * vertex.color.x, tint.green * vertex.color.y, tint.blue * vertex.color.z)
+            check_color(vertex_tint) catch failure:
+                return errors.failure[unit](failure.code, failure.message)
+            var color = vertex_tint
             if lit:
                 let normal = item.world.transform_normal(vertex.normal) catch failure:
                     return errors.failure[unit](failure.code, failure.message)
-                color = self.illuminate(normal, tint) catch failure:
+                color = self.illuminate(normal, vertex_tint) catch failure:
                     return errors.failure[unit](failure.code, failure.message)
-            self.vertices[(usize)offset] = gpu.Vertex(
-                x = (f32)(relative.dot(projection.right) * projection.focal / projection.aspect),
-                y = (f32)(relative.dot(projection.up) * projection.focal),
-                z = (f32)(projection.far * (distance - projection.near) / (projection.far - projection.near)),
-                w = (f32)distance, red = (f32)color.red, green = (f32)color.green, blue = (f32)color.blue)
-        let native = target.get() catch failure:
-            return errors.failure[unit](failure.code, failure.message)
-        native.triangles(self.vertices[..<(usize)count], true) catch failure:
-            return errors.failure[unit](failure.code, failure.message)
+            prepared.points[(usize)offset] = world
+            prepared.colors[(usize)offset] = color
+            prepared.flat_colors[(usize)offset] = vertex_tint
+        if lit:
+            for triangle in 0..<prepared.points.length // 3:
+                let at = triangle * 3
+                let normal = prepared.points[at + 1].subtract(prepared.points[at]).cross(prepared.points[at + 2].subtract(prepared.points[at])).normalized() catch failure:
+                    # Custom geometry may intentionally contain zero-area
+                    # triangles. They produce no pixels; keep cached shading.
+                    continue
+                for corner in 0..<(usize)3:
+                    prepared.flat_colors[at + corner] = self.illuminate(normal, prepared.flat_colors[at + corner]) catch failure:
+                        return errors.failure[unit](failure.code, failure.message)
         return errors.success[unit](())
 
     func illuminate(normal: Vector3, tint: Color) -> Color!:
         var illumination = Vector3()
-        for item in self.items[..<self.count]:
-            let light = item.illumination
-            if not item.visible or light.kind == LightKind.inactive:
-                continue
+        for light in self.lights[..<self.light_count]:
             var intensity = light.intensity
             if light.kind == LightKind.directional:
-                let direction = try item.world.transform_direction(light.direction).normalized()
-                intensity *= math.max(0.0, normal.dot(direction))
+                intensity *= math.max(0.0, normal.dot(light.direction))
             illumination = illumination.add(Vector3(light.color.red, light.color.green, light.color.blue).multiply_scalar(intensity))
         return Color(math.min(1.0, tint.red * illumination.x), math.min(1.0, tint.green * illumination.y), math.min(1.0, tint.blue * illumination.z))
 
@@ -196,9 +297,25 @@ pub struct Renderer:
 
     pub mutating func close():
         self.finish()
+        self.invalidate()
+        free(self.prepared) in memory.heap
+        free(self.lights) in memory.heap
         free(self.items) in memory.heap
         if self.vertices.length > 0:
             free(self.vertices) in memory.heap
+
+    ## Drop immutable draw data after a geometry/material mutation.
+    pub mutating func invalidate():
+        for cached in self.prepared[..<self.prepared_count]:
+            var smooth = cached.smooth_gpu
+            var flat = cached.flat_gpu
+            smooth.close()
+            flat.close()
+            free(cached.flat_colors) in memory.heap
+            free(cached.points) in memory.heap
+            free(cached.colors) in memory.heap
+        self.prepared_count = 0
+        self.prepared_epoch = 0
 
     func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
         for item in self.items[..<self.count]:

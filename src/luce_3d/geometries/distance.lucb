@@ -1,0 +1,34 @@
+## Squared Euclidean distances, including degenerate reference triangles.
+import math
+from luce_3d.math.vector import Vector3
+
+pub func bounds_distance(p: Vector3, lo: Vector3, hi: Vector3) -> f64:
+    let x = math.max(math.max(lo.x - p.x, p.x - hi.x), 0.0)
+    let y = math.max(math.max(lo.y - p.y, p.y - hi.y), 0.0)
+    let z = math.max(math.max(lo.z - p.z, p.z - hi.z), 0.0)
+    return x * x + y * y + z * z
+
+func segment(p: Vector3, a: Vector3, b: Vector3) -> f64:
+    let ab = b.subtract(a)
+    let length = ab.dot(ab)
+    let t = math.clamp(p.subtract(a).dot(ab) / length, 0.0, 1.0) if length > 0.0 else 0.0
+    let d = p.subtract(a.add(ab.multiply_scalar(t)))
+    return d.dot(d)
+
+pub func triangle_distance(p: Vector3, a: Vector3, b: Vector3, c: Vector3) -> f64:
+    let ab = b.subtract(a)
+    let ac = c.subtract(a)
+    let ap = p.subtract(a)
+    let aa = ab.dot(ab)
+    let bb = ab.dot(ac)
+    let cc = ac.dot(ac)
+    let u = ap.dot(ab)
+    let v = ap.dot(ac)
+    let det = aa * cc - bb * bb
+    if det > 0.0:
+        let s = (cc * u - bb * v) / det
+        let t = (aa * v - bb * u) / det
+        if s >= 0.0 and t >= 0.0 and s + t <= 1.0:
+            let delta = ap.subtract(ab.multiply_scalar(s)).subtract(ac.multiply_scalar(t))
+            return delta.dot(delta)
+    return math.min(segment(p, a, b), math.min(segment(p, b, c), segment(p, c, a)))

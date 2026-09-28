@@ -1,0 +1,49 @@
+## Retained native line endpoints avoid rebuilding Luce lists on camera frames.
+import gpu
+import interop
+import memory
+from luce_3d.math.vector import Vector3
+from luce_3d.cameras.perspective import PerspectiveCamera
+from luce_3d.renderers.wire import WireRenderer
+from luce_3d.renderers.projection import projection_matrix
+from luce_3d.renderers.retained import RetainedBatch
+
+pub struct WireBatch:
+    let points: Vector3[]
+    var retained: RetainedBatch
+    pub func init(points: const Vector3[]) -> !:
+        self.points = try alloc Vector3[points.length] in memory.heap
+        self.retained = RetainedBatch()
+        for index in 0..<points.length:
+            self.points[index] = points[index]
+    pub func count() -> i64:
+        return (i64)self.points.length // 2
+    pub mutating func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color, width: f64 = 1.0) -> !:
+        let native = try target.get()
+        var device = gpu.device_of(native) catch failure:
+            if failure.code != gpu.unavailable: error(failure.code, failure.message)
+            recover gpu.Device()
+        defer device.destroy()
+        if device.is_open() and self.points.length > 0:
+            if not self.retained.is_open():
+                let vertices = try alloc gpu.Vertex[self.points.length // 2] in memory.heap
+                defer free(vertices) in memory.heap
+                for at in 0..<vertices.length:
+                    let a = self.points[at * 2]
+                    let b = self.points[at * 2 + 1]
+                    vertices[at] = gpu.Vertex(x = (f32)a.x, y = (f32)a.y, z = (f32)a.z, red = (f32)b.x, green = (f32)b.y, blue = (f32)b.z)
+                try self.retained.upload(device, vertices, true)
+            let size = try native.size()
+            let matrix = projection_matrix(try camera.value().projection(size.width / size.height))
+            try self.retained.draw(native, matrix, color, width)
+            return
+        var offset: usize = 0
+        while offset < self.points.length:
+            let end = offset + 131072 if self.points.length - offset > 131072 else self.points.length
+            try WireRenderer.lines(self.points[offset..<end], camera, target, color, width)
+            offset = end
+    pub mutating func close():
+        self.retained.close()
+        free(self.points) in memory.heap
+
+pub let wire_batch_type: interop.Type[WireBatch] = interop.Type[WireBatch]("WireBatch", WireBatch.close)

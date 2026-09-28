@@ -5,6 +5,7 @@ import memory
 import ownership
 import window
 import three
+import polygon_checks
 from three import SphereGeometry, BufferGeometry, Vertex, Vector3, Matrix4, MeshLambertMaterial, Color, Scene, Group, Mesh, Object3D, Geometry, Material, PerspectiveCamera, Renderer
 
 struct Tracker: memory.Allocator:
@@ -13,6 +14,7 @@ struct Tracker: memory.Allocator:
     var remaining: usize?
 
     pub mutating func allocate(size: usize, alignment: usize) -> u8[]?:
+        if size == 0: return self.upstream.allocate(size, alignment)
         if let remaining = self.remaining:
             if remaining == 0:
                 return none
@@ -25,6 +27,7 @@ struct Tracker: memory.Allocator:
         return self.upstream.resize(block, size)
 
     pub mutating func release(block: u8[]):
+        if block.length == 0: return
         assert(self.live > 0)
         self.live -= 1
         self.upstream.release(block)
@@ -213,6 +216,18 @@ pub func main(arguments: str[]) -> i32!:
     ownership.collect()
     assert(tracker.live == 0)
     try allocations(&tracker)
+    for stage in 0..<96:
+        tracker.remaining = (usize)stage
+        polygon_checks.exercise() catch failure:
+            assert(failure.code == memory.exhausted)
+        tracker.remaining = none
+        ownership.collect()
+        discard(ownership.finish_run(0))
+        assert(tracker.live == 0)
+    try polygon_checks.exercise()
+    ownership.collect()
+    discard(ownership.finish_run(0))
+    assert(tracker.live == 0)
     try scene_membership(&tracker)
     ownership.collect()
     discard(ownership.finish_run(0))

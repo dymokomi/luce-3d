@@ -41,3 +41,7 @@ pub struct Matrix4:
 
     pub func is_finite() -> bool:
         return self.x.is_finite() and self.y.is_finite() and self.z.is_finite() and self.translation.is_finite()
+
+    ## Exact identity, for preserving immutable geometry on no-op placements.
+    pub func is_identity() -> bool:
+        return self.x == Vector3(1.0, 0.0, 0.0) and self.y == Vector3(0.0, 1.0, 0.0) and self.z == Vector3(0.0, 0.0, 1.0) and self.translation == Vector3()

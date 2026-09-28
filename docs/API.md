@@ -4,15 +4,25 @@ The package exports `three` and optional `three_ui`. Public objects use `init`
 and methods in Base, and existing `Type(args)` construction in Luce. Mutating or
 allocating operations can fail; Luce callers handle or propagate those errors.
 
+See [immutable mesh modeling](MESH_MODELING.md) for numeric attribute domains,
+topology operators, primitive generators and BVH picking contracts.
+
 | Type | Responsibility and principal methods |
 | --- | --- |
 | `Vector3(x=0,y=0,z=0)` | Immutable operations `add`, `subtract`, `multiply_scalar`, `dot`, `cross`, `length`, `normalized`, `rotated`; public coordinates are values. |
 | `Matrix4` | Affine column vectors and translation, implicit final row `(0,0,0,1)`; `compose`, `multiply`, `transform_point`, `transform_direction`, `transform_normal`. |
-| `Vertex(position,normal,u=0,v=0)` | Position, nonzero normal and UV coordinates. |
+| `Vertex(position,normal,u=0,v=0,color=Vector3(1,1,1))` | Position, nonzero normal, UV coordinates and multiplicative RGB tint. |
 | `Bounds(minimum,maximum)` | Axis-aligned local-space bounds. |
 | `Geometry` | Open interface: `vertex_count`, `index_count`, `vertex`, `index`, `bounds`. |
 | `BufferGeometry(vertices,indices)` | Copies and validates indexed triangle data; subsequent caller mutations do not change it. |
 | `SphereGeometry(radius=1,width_segments=32,height_segments=16)` | Shared immutable UV sphere; duplicates the seam, omits degenerate polar triangles. |
+| `BoxGeometry(width=1,height=1,depth=1)` | Origin-centred box: 24 hard-normal, face-local UV vertices and 12 outward-wound triangles. Dimensions must be finite and in `(0,1e6]`. |
+| `PolygonMesh(points,sizes,corners)` | Immutable shared-point polygon topology implementing Geometry. `cube(size=2)` builds a grounded cube; `empty()` builds an empty result. `point_count`, `point`, `face_count`, `face_size`, `face_point`, `face_normal`, `face_center`, `edge_count`, `edge_point`, `triangle_face` expose topology. |
+| `PolygonMesh.transformed(translation,rotation,scale)` | Returns a new mesh with transformed points and regenerated normals. Rotation is XYZ radians; scale must be nonsingular. Reflections reverse winding. |
+| `PolygonMesh.moved_points(selection,delta)` / `merged(other)` | Return a new displaced or concatenated mesh without modifying either input. |
+| `PolygonMesh.extruded_faces(selection,distance)` | Extrudes a face region along averaged selected-face normals. Shares new points across selected faces and adds walls only on boundary edges; cap face IDs remain stable. Requires a nonzero distance and a region boundary. |
+| `PolygonMesh.ray_face(origin,direction)` / `ray_distance(origin,direction)` | Nearest two-sided intersection, or `-1`. Normalize direction for world-space distances. |
+| `PolygonMesh.surface_distance(point)` / `closest_face(point)` | BVH nearest surface distance / primitive ID; `-1` for empty geometry. Points must be finite. |
 | `Material` | Open interface: linear RGB `color()` and `is_lit()`. |
 | `MeshBasicMaterial(color=white)` | Unlit linear color, mutable with `set_color`. |
 | `MeshLambertMaterial(color=white)` | Ambient plus directional Lambert lighting, mutable with `set_color`. |
@@ -24,6 +34,8 @@ allocating operations can fail; Luce callers handle or propagate those errors.
 | `DirectionalLight(color=white,intensity=1,direction=(1,1,1))` | Direction points toward the light and is transformed with its scene node. |
 | `PerspectiveCamera(fov=50,aspect=1,near=0.1,far=1000)` | World-space camera initially at `(0,0,5)` looking at the origin; `set_position`, `look_at`, `set_aspect`, `set_projection`. FOV is vertical degrees. |
 | `Renderer()` | `render(scene,camera,target,fit_aspect=false)` appends checked triangles to a standard GPU target. |
+| `WireRenderer` | `lines(points,camera,target,color,width=1,bias=0.000001)` draws independent world endpoint pairs at constant logical-pixel width; near clipped and depth tested. `triangles(points,camera,target,color)` draws depth-tested selection fills. Uses the existing target depth buffer; current GPU API also writes depth. |
+| `MeshBuilder` | Bounded Base topology staging: `point`, `face`, `corner`, `finish`, `close`. Importers and operators share the same mesh limits. |
 | `SceneView(scene,camera,renderer=none,width=320,height=240)` | UI widget retaining the scene, camera and renderer; provides `layout`, `scene`, `camera`, `renderer`. Creates a renderer when omitted. |
 
 Rotations are intrinsic XYZ radians, applied as Z, Y, X to column vectors. A world
@@ -31,12 +43,25 @@ matrix is `parent * local`; normals use the inverse transpose, including
 nonuniform scale. Negative scale is permitted, zero or near-zero scale is rejected.
 The initial GPU pipeline draws both triangle faces.
 
+Polygon meshes allow 8,388,608 points/faces, 33,554,432 corners, and 3–256 corners per
+face. Their topology and triangulation are copied/owned; concave faces use ear
+clipping, and degenerate input is rejected. A corner indexes a shared point;
+`sizes` partitions the flattened `corners` array into ordered polygons. Empty
+results are valid data but should not be submitted as renderable meshes. These
+operators are CPU geometry operations. Face UVs are provisional local coordinates;
+attribute contracts are detailed in MESH_MODELING.md; cross-face self-intersection
+cleanup is not implemented. Attribute-only edits share immutable topology/BVH on
+one thread; detached worker transfers remain independent copies.
+`polygon_mesh_type` is the Base ownership descriptor.
+
 Node transform components are finite and bounded to magnitude 1e6; scale
-magnitudes must be at least 1e-6. Geometry supports up to 65536 vertices and 65536
-triangles. Sphere segments are 3–256 by 2–128, with radius in `(0,1e6]`. The renderer
+magnitudes must be at least 1e-6. BufferGeometry retains its separate small-buffer
+limits; PolygonMesh and the renderer support the larger budgets above.
+Sphere segments are 3–256 by 2–128, with radius in `(0,1e6]`. The renderer
 accepts up to 1024 objects and 64 levels per frame. Standard GPU command and vertex
 budgets apply to the whole frame as well. Invalid custom interface results fail
-before indexing or copying their data.
+before indexing or copying their data. Device frames retain GPU batches (split
+below 128 MiB); standalone CPU recordings still use the dynamic frame budget.
 
 Camera aspect is positive and bounded to `[1e-6,1e6]`; `0 < near < far <= 1e9`,
 `0 < fov < 179`. Camera position and target must be finite and distinct. The initial

@@ -8,20 +8,18 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--base", type=Path, default=ROOT.parent / ("luce-base/build/luce-base.exe" if os.name == "nt" else "luce-base/build/luce-base"))
+parser.add_argument("--base", type=Path, default=Path(os.environ.get("LUCE_BASE", str(ROOT.parent / ("luce-base/build/luce-base.exe" if os.name == "nt" else "luce-base/build/luce-base")))))
 parser.add_argument("--luce", type=Path, default=ROOT.parent / ("luce/build/luce.exe" if os.name == "nt" else "luce/build/luce"))
 parser.add_argument("--opt", type=int, choices=range(4))
 args = parser.parse_args()
 modes = [["--native", "--opt", str(level)] for level in ([args.opt] if args.opt is not None else range(4))]
 if args.opt is None:
     modes += [["--backend=c"], ["--backend=c", "--release"]]
-cache = ROOT / "build/cache"
-cache.mkdir(parents=True, exist_ok=True)
-env = dict(os.environ, LUCE_BASE=str(args.base.resolve()),
-           LUCE_STD=str(ROOT.parent / "luce-base/src/std"),
-           LUCE_CACHE=str(cache))
+env = dict(os.environ, LUCE_BASE=str(args.base.resolve()))
 compile_timeout = 600 if os.name == "nt" else 180
 with tempfile.TemporaryDirectory(prefix="luce-3d-tests-") as temporary:
+    # Do not reuse cached package descriptions across compiler/dependency edits.
+    env["LUCE_CACHE"] = str(Path(temporary) / "cache")
     binary = Path(temporary) / "test"
     for compiler, entry in [(args.base, "main.lucb"), (args.luce, "objects.luc"), (args.luce, "custom.luc")]:
         for flags in modes:

@@ -6,6 +6,8 @@ pub struct Vertex:
     pub let normal: Vector3
     pub let u: f64
     pub let v: f64
+    ## Optional linear RGB multiplier; white preserves existing materials.
+    pub let color: Vector3 = Vector3(1.0, 1.0, 1.0)
 
 pub struct Bounds:
     pub let minimum: Vector3
