@@ -153,6 +153,30 @@ pub struct TopologyTools:
         for at in 0..<nb - 1:
             try out.corner(try mesh.corner_point(current), current)
             current = try next_corner(mesh, current)
+        # Dissolving an edge changes polygon topology, not the surface. The
+        # two validated triangulations already tile the union, including thin
+        # collinear boundary pieces that a new greedy ear order can strand.
+        # Retain them as display diagonals, never as polygon/wireframe edges.
+        let count = (usize)(na+nb-2)
+        for at in 0..<count:
+            for before in 0..<at:
+                if out.corners[out.nc-count+at] == out.corners[out.nc-count+before]:
+                    error(errors.invalid,"dissolve requires a simple polygon union")
+        var indices: i64[762]
+        var written: usize = 0
+        for face in [a,b]:
+            let offset = try mesh.face_offset(face)
+            let first_triangle = (offset-face*2)*3
+            for at in 0..<(try mesh.face_size(face)-2)*3:
+                let index = mesh.index(first_triangle+at)
+                defer index.release()
+                let point = try mesh.corner_point(try index.get())
+                var mapped: usize = 0
+                while mapped < count and out.corners[out.nc-count+mapped] != point: mapped += 1
+                if mapped == count: error(errors.invalid,"dissolve lost a source triangle corner")
+                indices[written] = (i64)mapped
+                written += 1
+        try out.set_last_display(indices[..<written])
         return try out.finish(mesh)
 
 func next_corner(mesh: const PolygonMesh*, corner: i64) -> i64!:

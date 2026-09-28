@@ -1,0 +1,30 @@
+## One lazy spatial index per immutable topology, shared by attribute snapshots.
+## Concurrent borrowed queries may initialize it; owners still change on their
+## owning thread, and all readers must finish before the last owner closes.
+import sync
+import memory
+from luce_3d.math.vector import Vector3
+from luce_3d.geometries.triangle_index import TriangleIndex
+
+pub struct QueryCache:
+    pub var owners: usize = 1
+    var lock: sync.Mutex
+    var ready: @u32
+    var index: TriangleIndex*? = none
+
+    ## Publish only a fully built index. Allocation failure unlocks without
+    ## poisoning the cache, so a later query can retry. Published data is immutable.
+    pub mutating func get(points: const Vector3[], corners: const i64[], triangles: const i64[], faces: const usize[]) -> const TriangleIndex*!:
+        if self.ready.load(.acquire) == 0:
+            self.lock.lock()
+            defer self.lock.unlock()
+            if self.ready.load(.acquire) == 0:
+                self.index = try new TriangleIndex(points, corners, triangles, faces) in memory.heap
+                self.ready.store(1, .release)
+        return self.index else trap("unpublished polygon query index")
+
+    ## Called only after the final topology owner and all borrowed readers end.
+    pub mutating func close():
+        if let index = self.index:
+            index.close()
+            free(index) in memory.heap

@@ -5,13 +5,15 @@ import math
 import memory
 import luce_3d.errors as errors
 from luce_3d.core.geometry import Geometry, Vertex, Bounds
+from luce_3d.core.polygon_topology import PolygonTopology
 from luce_3d.math.vector import Vector3
 from luce_3d.math.matrix import Matrix4
 from luce_3d.geometries.attributes import AttributeSet
-from luce_3d.geometries.triangle_index import TriangleIndex
-from luce_3d.geometries.polygon_triangulation import triangulate
+from luce_3d.geometries.query_cache import QueryCache
+from luce_3d.geometries.polygon_triangulation import triangulate, area_normal
+import luce_3d.geometries.display_triangulation as display_triangles
 
-pub struct PolygonMesh: Geometry:
+pub struct PolygonMesh: Geometry, PolygonTopology:
     let points: Vector3[]
     let sizes: i64[]
     let corners: i64[]
@@ -25,12 +27,14 @@ pub struct PolygonMesh: Geometry:
     let edges: usize
     let extent: Bounds
     var attributes: AttributeSet
-    var acceleration: TriangleIndex
     # Same-thread immutable snapshots share topology, never mutable attributes.
     # Worker transfer still takes an independent native copy.
-    let topology_owners: usize[]
+    let queries: QueryCache[]
 
-    pub func init(points: const Vector3[], sizes: const i64[], corners: const i64[]) -> !:
+    ## Optional display indices are grouped by polygon, 3*(size-2) entries each.
+    ## A wholly -1 face requests ordinary triangulation. Explicit triangles are
+    ## validated and affect rendering/picking, never the polygon edge topology.
+    pub func init(points: const Vector3[], sizes: const i64[], corners: const i64[], display: const i64[]? = none) -> !:
         if points.length > 8388608 or sizes.length > 8388608 or corners.length > 33554432:
             error(errors.limit, "polygon mesh exceeds 8M points/faces or 32M corners")
         var used: usize = 0
@@ -42,6 +46,8 @@ pub struct PolygonMesh: Geometry:
             triangle_count += (usize)(size - 2)
         if used != corners.length or triangle_count > 33554432:
             error(errors.invalid, "polygon sizes must describe every corner")
+        if let supplied = display:
+            if supplied.length != triangle_count*3: error(errors.invalid,"display indices must cover every polygon")
         var minimum = Vector3()
         var maximum = Vector3()
         for index in 0..<points.length:
@@ -94,13 +100,16 @@ pub struct PolygonMesh: Geometry:
             copied_sizes[face] = sizes[face]
             offsets[face] = start
             var normal = Vector3()
+            var extent2: f64 = 0.0
             let origin = points[(usize)corners[start]]
             for at in 0..<count:
                 let a = corners[start + at]
                 let b = corners[start + (at + 1) % count]
                 if a == b:
                     error(errors.invalid, "polygon has a collapsed edge")
-                normal = normal.add(points[(usize)a].subtract(origin).cross(points[(usize)b].subtract(origin)))
+                let delta = points[(usize)a].subtract(origin)
+                extent2 = math.max(extent2,delta.dot(delta))
+                normal = normal.add(delta.cross(points[(usize)b].subtract(origin)))
                 corner_faces[start + at] = face
                 let low = a if a < b else b
                 let high = b if a < b else a
@@ -113,19 +122,27 @@ pub struct PolygonMesh: Geometry:
                     edge_b[edges] = high
                     edges += 1
                 corner_edges[start + at] = (usize)table[slot]
-            normals[face] = try normal.normalized()
-            try triangulate(points, corners, start, count, normals[face], triangles[triangle..<triangle + (count - 2) * 3])
+            normals[face] = try area_normal(normal,extent2)
+            let output = triangles[triangle..<triangle + (count - 2) * 3]
+            var provided = false
+            if let supplied = display:
+                let part = supplied[triangle..<triangle + (count - 2) * 3]
+                if part[0] >= 0:
+                    try display_triangles.validate(points,corners,start,count,part)
+                    memory.copy(output,part,part.length)
+                    provided = true
+                else:
+                    for index in part:
+                        if index != -1: error(errors.invalid,"partial display triangulation is not valid")
+            if not provided: try triangulate(points, corners, start, count, normals[face], output)
             triangle += (count - 2) * 3
             start += count
         offsets[sizes.length] = start
-        var acceleration = try TriangleIndex(copied_points, copied_corners, triangles, corner_faces)
-        errdefer acceleration.close()
-        let owners = try alloc usize[1] in memory.heap
-        errdefer free(owners) in memory.heap
-        owners[0] = 1
+        let queries = try alloc QueryCache[1] in memory.heap
+        errdefer free(queries) in memory.heap
+        queries[0] = QueryCache()
         self.attributes = try AttributeSet()
-        self.topology_owners = owners
-        self.acceleration = acceleration
+        self.queries = queries
         self.points = copied_points
         self.sizes = copied_sizes
         self.corners = copied_corners
@@ -146,7 +163,7 @@ pub struct PolygonMesh: Geometry:
         let attributes = try AttributeSet()
         storage[0] = self
         storage[0].attributes = attributes
-        storage[0].topology_owners[0] += 1
+        storage[0].queries[0].owners += 1
         return storage.data
 
     func snapshot() -> interop.Reference[PolygonMesh]!:
@@ -213,11 +230,11 @@ pub struct PolygonMesh: Geometry:
     ## -1 means a genuinely new element (zero-valued attributes). Empty maps mean
     ## unchanged indexing, valid only when domain cardinality is unchanged.
     pub func remapped(points: const Vector3[], sizes: const i64[], corners: const i64[],
-                      point_parents: const i64[], face_parents: const i64[], corner_parents: const i64[], preserve_normals: bool = false) -> interop.Reference[PolygonMesh]!:
+                      point_parents: const i64[], face_parents: const i64[], corner_parents: const i64[], preserve_normals: bool = false, display: const i64[]? = none) -> interop.Reference[PolygonMesh]!:
         try validate_map(point_parents, points.length, self.points.length)
         try validate_map(face_parents, sizes.length, self.sizes.length)
         try validate_map(corner_parents, corners.length, self.corners.length)
-        let result = try make_mesh(points, sizes, corners)
+        let result = try make_mesh(points, sizes, corners, display)
         errdefer result.release()
         var unchanged_geometry = points.length == self.points.length and sizes.length == self.sizes.length and corners.length == self.corners.length
         if unchanged_geometry and not preserve_normals:
@@ -263,12 +280,17 @@ pub struct PolygonMesh: Geometry:
     ## Nearest Euclidean distance to the mesh surface; -1 for an empty mesh.
     pub func surface_distance(point: Vector3) -> f64!:
         if not point.is_finite(): error(errors.invalid, "distance query requires a finite point")
-        return self.acceleration.distance(point)
+        return (try self.queries[0].get(self.points, self.corners, self.triangles, self.corner_faces)).distance(point)
 
     ## Primitive containing the closest surface point, or -1 for empty geometry.
     pub func closest_face(point: Vector3) -> i64!:
         if not point.is_finite(): error(errors.invalid, "distance query requires a finite point")
-        return self.acceleration.nearest(point).face
+        return (try self.queries[0].get(self.points, self.corners, self.triangles, self.corner_faces)).nearest(point).face
+
+    ## Build the shared query index now, for example before worker-to-UI transfer.
+    ## Otherwise the first ray/distance query builds it. Failure is retryable.
+    pub func prepare_queries() -> !:
+        discard(try self.queries[0].get(self.points, self.corners, self.triangles, self.corner_faces))
 
     ## Construct topology and its imported corner data once, without rebuilding
     ## triangulation, edge tables and BVH for each attribute. Empty spans omit it.
@@ -284,7 +306,7 @@ pub struct PolygonMesh: Geometry:
     ## Deep-owned native copy for a worker mailbox. No ARC owners, callbacks or
     ## borrowed spans cross threads. The receiver adopts this copy on its thread.
     func detached_copy() -> PolygonMesh*!:
-        let result = try new PolygonMesh(self.points, self.sizes, self.corners) in memory.heap
+        let result = try new PolygonMesh(self.points, self.sizes, self.corners, self.triangles) in memory.heap
         errdefer dispose_detached(result)
         for entry in self.attributes.entries[..<self.attributes.count]:
             try result.attributes.put(entry.name.value, entry.domain, entry.width, entry.values, entry.integer)
@@ -452,7 +474,14 @@ pub struct PolygonMesh: Geometry:
                 corners[start + at] = self.corners[start + (count - 1 - at if matrix.determinant() < 0.0 else at)]
                 parents[start + at] = (i64)(start + (count - 1 - at if matrix.determinant() < 0.0 else at))
         var unchanged: i64[]
-        let result = try self.remapped(points, self.sizes, corners, unchanged, unchanged, parents, true)
+        let display = try alloc i64[self.triangles.length] in memory.heap
+        defer free(display) in memory.heap
+        let reflected = matrix.determinant() < 0.0
+        for triangle in 0..<display.length//3:
+            for at in 0..<(usize)3:
+                let old = (usize)self.triangles[triangle*3+(2-at if reflected else at)]
+                display[triangle*3+at] = parents[old]
+        let result = try self.remapped(points, self.sizes, corners, unchanged, unchanged, parents, true, display)
         errdefer result.release()
         for entry in result.value().attributes.entries[..<result.value().attributes.count]:
             if entry.name.value != "N" or entry.width != 3:
@@ -499,7 +528,11 @@ pub struct PolygonMesh: Geometry:
             sizes[index] = self.sizes[index] if index < self.sizes.length else rhs.sizes[index - self.sizes.length]
         for index in 0..<corners.length:
             corners[index] = self.corners[index] if index < self.corners.length else rhs.corners[index - self.corners.length] + (i64)self.points.length
-        let result = try make_mesh(points, sizes, corners)
+        let display = try alloc i64[self.triangles.length+rhs.triangles.length] in memory.heap
+        defer free(display) in memory.heap
+        for at in 0..<display.length:
+            display[at] = self.triangles[at] if at < self.triangles.length else rhs.triangles[at-self.triangles.length]+(i64)self.corners.length
+        let result = try make_mesh(points, sizes, corners, display)
         errdefer result.release()
         try merge_attributes(&self.attributes, &rhs.attributes, &self, rhs, result.value())
         return result
@@ -599,18 +632,18 @@ pub struct PolygonMesh: Geometry:
 
     ## Nearest two-sided face intersection. -1 means no hit; direction must be
     ## normalized for the returned distance to be world-space distance.
-    pub func ray_face(origin: Vector3, direction: Vector3) -> i64:
-        return self.acceleration.ray(origin, direction).face
+    pub func ray_face(origin: Vector3, direction: Vector3) -> i64!:
+        return (try self.queries[0].get(self.points, self.corners, self.triangles, self.corner_faces)).ray(origin, direction).face
 
-    pub func ray_distance(origin: Vector3, direction: Vector3) -> f64:
-        return self.acceleration.ray(origin, direction).distance
+    pub func ray_distance(origin: Vector3, direction: Vector3) -> f64!:
+        return (try self.queries[0].get(self.points, self.corners, self.triangles, self.corner_faces)).ray(origin, direction).distance
 
     pub mutating func close():
         self.attributes.close()
-        self.topology_owners[0] -= 1
-        if self.topology_owners[0] > 0: return
-        free(self.topology_owners) in memory.heap
-        self.acceleration.close()
+        self.queries[0].owners -= 1
+        if self.queries[0].owners > 0: return
+        self.queries[0].close()
+        free(self.queries) in memory.heap
         free(self.points) in memory.heap
         free(self.sizes) in memory.heap
         free(self.corners) in memory.heap
@@ -632,8 +665,8 @@ func dispose_detached(mesh: PolygonMesh*):
     mesh.close()
     free(mesh) in memory.heap
 
-func make_mesh(points: const Vector3[], sizes: const i64[], corners: const i64[]) -> interop.Reference[PolygonMesh]!:
-    return try interop.Reference[PolygonMesh].adopt(new PolygonMesh(points, sizes, corners) in memory.heap, polygon_mesh_type, memory.heap)
+func make_mesh(points: const Vector3[], sizes: const i64[], corners: const i64[], display: const i64[]? = none) -> interop.Reference[PolygonMesh]!:
+    return try interop.Reference[PolygonMesh].adopt(new PolygonMesh(points, sizes, corners, display) in memory.heap, polygon_mesh_type, memory.heap)
 
 func checked(index: i64, length: usize) -> !:
     if index < 0 or (usize)index >= length:

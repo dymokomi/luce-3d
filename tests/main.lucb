@@ -6,6 +6,12 @@ import ownership
 import window
 import three
 import polygon_checks
+import scale_checks
+import display_checks
+import distance_checks
+import partition_checks
+import query_checks
+import dissolve_checks
 from three import SphereGeometry, BufferGeometry, Vertex, Vector3, Matrix4, MeshLambertMaterial, Color, Scene, Group, Mesh, Object3D, Geometry, Material, PerspectiveCamera, Renderer
 
 struct Tracker: memory.Allocator:
@@ -207,6 +213,7 @@ func scene_membership(tracker: Tracker*) -> !:
     assert(parent_node.value().child_count() == 0 and remaining_node.value().parent_id() == 0)
 
 pub func main(arguments: str[]) -> i32!:
+    try query_checks.exercise()
     let previous = memory.heap
     var tracker = Tracker(previous, 0, none)
     memory.heap = &tracker
@@ -225,6 +232,40 @@ pub func main(arguments: str[]) -> i32!:
         discard(ownership.finish_run(0))
         assert(tracker.live == 0)
     try polygon_checks.exercise()
+    for stage in 0..<192:
+        tracker.remaining = (usize)stage
+        dissolve_checks.allocations() catch failure:
+            assert(failure.code == memory.exhausted)
+        tracker.remaining = none
+        ownership.collect()
+        discard(ownership.finish_run(0))
+        assert(tracker.live == 0)
+    try dissolve_checks.exercise()
+    try partition_checks.exercise()
+    ownership.collect()
+    discard(ownership.finish_run(0))
+    for stage in 0..<96:
+        tracker.remaining = (usize)stage
+        partition_checks.single() catch failure:
+            assert(failure.code == memory.exhausted)
+        tracker.remaining = none
+        ownership.collect()
+        discard(ownership.finish_run(0))
+        assert(tracker.live == 0)
+    try scale_checks.exercise()
+    distance_checks.exercise()
+    ownership.collect()
+    discard(ownership.finish_run(0))
+    assert(tracker.live == 0)
+    for stage in 0..<256:
+        tracker.remaining = (usize)stage
+        display_checks.exercise() catch failure:
+            assert(failure.code == memory.exhausted)
+        tracker.remaining = none
+        ownership.collect()
+        discard(ownership.finish_run(0))
+        assert(tracker.live == 0)
+    try display_checks.exercise()
     ownership.collect()
     discard(ownership.finish_run(0))
     assert(tracker.live == 0)

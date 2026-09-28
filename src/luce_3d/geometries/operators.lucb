@@ -30,25 +30,32 @@ pub struct MeshOps:
                 try out.face(count, face)
                 for at in 0..<count:
                     try out.corner(mapping[(usize)(try mesh.face_point(face, at))], (try mesh.face_offset(face)) + at)
+                try out.copy_last_display(mesh,face)
         return try out.finish(mesh)
 
-    ## Remove unused points without altering face connectivity or winding.
+    ## Remove unused points without altering faces, display triangles or normals.
     pub static func compact(source: interop.Reference[PolygonMesh]) -> interop.Reference[PolygonMesh]!:
         let mesh = try source.get()
         let used = try alloc bool[(usize)mesh.point_count()] in memory.heap
         defer free(used) in memory.heap
-        let remove = try alloc i64[(usize)mesh.point_count()] in memory.heap
-        defer free(remove) in memory.heap
+        let mapping = try alloc i64[(usize)mesh.point_count()] in memory.heap
+        defer free(mapping) in memory.heap
         for id in 0..<used.length:
             used[id] = false
         for corner in 0..<mesh.vertex_count():
             used[(usize)(try mesh.corner_point(corner))] = true
-        var count: usize = 0
+        var out = try MeshBuilder()
+        defer out.close()
         for id in 0..<used.length:
-            if not used[id]:
-                remove[count] = (i64)id
-                count += 1
-        return try MeshOps.delete_points(source, remove[..<count])
+            mapping[id] = (try out.point(try mesh.point((i64)id),(i64)id)) if used[id] else -1
+        for face in 0..<mesh.face_count():
+            let count = try mesh.face_size(face)
+            let first = try mesh.face_offset(face)
+            try out.face(count,face)
+            for at in 0..<count:
+                try out.corner(mapping[(usize)(try mesh.face_point(face,at))],first+at)
+            try out.copy_last_display(mesh,face)
+        return try out.finish(mesh,true)
     ## 0 delete faces, 1 reverse, 2 triangulate, 3 individual-face inset,
     ## 4 duplicate faces with normal offset, 5 split selected faces apart.
     pub static func faces(source: interop.Reference[PolygonMesh], selection: const i64[], operation: i64, amount: f64 = 0.2) -> interop.Reference[PolygonMesh]!:
@@ -74,6 +81,7 @@ pub struct MeshOps:
                 try out.face(count, face)
                 for at in 0..<count:
                     try out.corner(try mesh.face_point(face, count - at - 1), offset + count - at - 1)
+                try out.copy_last_display(mesh,face,true)
             elif operation == 2:
                 for triangle in 0..<mesh.index_count() // 3:
                     if try mesh.triangle_face(triangle) != face:
@@ -98,6 +106,9 @@ pub struct MeshOps:
                 try out.face(count, face)
                 for at in 0..<count:
                     try out.corner(inner[(usize)at], offset + at)
+                # Inset, duplicate-offset and split all apply an affine map
+                # within this face, so its display triangulation stays valid.
+                try out.copy_last_display(mesh,face)
                 if operation == 3:
                     for at in 0..<count:
                         let next = (at + 1) % count
@@ -106,7 +117,10 @@ pub struct MeshOps:
                         try out.corner(try mesh.face_point(face, next), offset + next)
                         try out.corner(inner[(usize)next], offset + next)
                         try out.corner(inner[(usize)at], offset + at)
-        return try out.finish(mesh)
+        # Face filtering (including Blast) retains exactly the original corners,
+        # so authored CAD/import normals remain valid. Geometric edits below
+        # still invalidate them rather than retaining stale shading.
+        return try out.finish(mesh,operation == 0)
 
     ## 0 Laplacian relax; 1 deterministic noise; 2 normal offset; 3 flatten Y;
     ## 4 rotate around selection centroid (radians); 5 scale; 6 grid snap.

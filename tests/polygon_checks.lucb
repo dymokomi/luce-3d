@@ -19,7 +19,7 @@ pub func exercise() -> !:
     assert((try tagged.value().surface_distance(Vector3(1.0, 1.0, 0.0))) == 0.0)
     tagged.close()
     assert(stripped.value().face_count() == 6 and stripped.value().attribute_count() == 0)
-    assert(stripped.value().ray_face(Vector3(0.0, 3.0, 0.0), Vector3(0.0, -1.0, 0.0)) == 2)
+    assert((try stripped.value().ray_face(Vector3(0.0, 3.0, 0.0), Vector3(0.0, -1.0, 0.0))) == 2)
     let empty = try PolygonMesh.empty()
     defer empty.release()
     assert((try empty.value().surface_distance(Vector3())) == -1.0)

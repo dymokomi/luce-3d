@@ -27,6 +27,8 @@ pub type SphereGeometry = sphere.SphereGeometry
 pub type BoxGeometry = box.BoxGeometry
 pub let box_geometry_type = box.box_geometry_type
 pub type PolygonMesh = polygon.PolygonMesh
+import luce_3d.core.polygon_topology as polygon_topology
+pub type PolygonTopology = polygon_topology.PolygonTopology
 pub let polygon_mesh_type = polygon.polygon_mesh_type
 pub let detached_mesh = polygon.detached_mesh
 import luce_3d.geometries.builder as builder
@@ -44,6 +46,8 @@ import luce_3d.geometries.primitives as primitives
 pub type MeshPrimitives = primitives.MeshPrimitives
 import luce_3d.geometries.topology_tools as topology_tools
 pub type TopologyTools = topology_tools.TopologyTools
+import luce_3d.geometries.dissolve_workspace as dissolve_workspace
+pub type DissolveWorkspace = dissolve_workspace.DissolveWorkspace
 pub type MeshLambertMaterial = lambert.MeshLambertMaterial
 pub type MeshBasicMaterial = basic.MeshBasicMaterial
 pub let invalid: ErrorCode = errors.invalid
