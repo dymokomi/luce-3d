@@ -3,7 +3,8 @@
 `PolygonMesh` supports point clouds and indexed polygon surfaces. A polygon's
 vertices are face corners, distinct from shared spatial points. Mesh results
 own topology, derived triangulation/edges/normals, numeric attributes and a
-triangle BVH. Algorithms return new meshes; callers retain ownership of inputs.
+lazy triangle-BVH cache. Algorithms return new meshes; callers retain ownership
+of inputs.
 
 ## Attributes
 
@@ -53,3 +54,7 @@ cardinality and capacity violations return checked errors.
 
 `ray_face` and `ray_distance` use the immutable triangle BVH. They accept world
 geometry-space rays; callers should normalize directions for metric distances.
+Ray and distance queries can fail when first building the index. Call
+`prepare_queries()` on a worker to warm a final mesh before UI handoff. Attribute
+snapshots share the cache; intermediate unqueried meshes never build it. See
+API.md for concurrent borrowed-reader and ownership constraints.

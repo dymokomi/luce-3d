@@ -46,10 +46,17 @@ pub struct Renderer:
     var lights: Light[]
     var light_count: usize
     var flat: bool = false
+    var wire_width: f64 = 0.0
 
     ## Display state only: switching normals never invalidates geometry buffers.
     pub mutating func set_flat(value: bool):
         self.flat = value
+
+    ## Reserve the depth footprint of a coplanar screen-width wire overlay.
+    ## Zero disables it. This is draw state; retained geometry stays unchanged.
+    pub mutating func set_wire_overlay(width: f64 = 0.0) -> !:
+        if not (width >= 0.0 and width <= 32.0): error(errors.invalid,"wire overlay width must be finite and in 0..32")
+        self.wire_width = width
 
     ## Opt-in immutable geometry/material cache. Scene transforms invalidate it
     ## automatically; owners call invalidate after custom material/geometry edits.
@@ -62,6 +69,7 @@ pub struct Renderer:
         self.prepared_epoch = 0
         self.light_count = 0
         self.flat = false
+        self.wire_width = 0.0
         self.count = 0
         var empty: gpu.Vertex[]
         self.vertices = empty
@@ -222,7 +230,7 @@ pub struct Renderer:
                 y = (f32)(relative.dot(projection.up) * projection.focal),
                 z = (f32)(projection.far * (distance - projection.near) / (projection.far - projection.near)),
                 w = (f32)distance, red = (f32)color.red, green = (f32)color.green, blue = (f32)color.blue)
-        native.triangles(self.vertices[..<(usize)count], true) catch failure:
+        native.triangles(self.vertices[..<(usize)count], true, self.wire_width * 0.7071067811865476) catch failure:
             return errors.failure[unit](failure.code, failure.message)
         return errors.success[unit](())
 
@@ -236,7 +244,9 @@ pub struct Renderer:
                 self.vertices[at] = gpu.Vertex(x = (f32)p.x, y = (f32)p.y, z = (f32)p.z, red = (f32)color.red, green = (f32)color.green, blue = (f32)color.blue)
             try retained.upload(device, self.vertices[..<cached.points.length])
         let matrix = projection_matrix(projection)
-        try retained.draw(target, matrix)
+        # Hardware slope is max(abs(dz/dx),abs(dz/dy)); sqrt(2) times
+        # half the line width covers its perpendicular pixel footprint.
+        try retained.draw(target, matrix, slope_bias = self.wire_width * 0.7071067811865476)
 
     func prepare(item: const Item*, shape: Geometry, tint: Color, lit: bool, vertices: i64, prepared: Prepared*) -> interop.Outcome[unit]:
         for offset in 0..<(i64)prepared.points.length:
