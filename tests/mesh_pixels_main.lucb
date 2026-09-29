@@ -8,7 +8,7 @@ import math
 import memory
 import three
 from geocore import PolygonMesh, polygon_mesh_type, MeshNormals, MeshPrimitives, AttributeKernels, Vector3
-from three import Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer, Color
+from three import Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer, Color, WireRenderer
 
 let width: u32 = 160
 let height: u32 = 120
@@ -78,13 +78,20 @@ struct View:
         self.shown_object = none
 
     mutating func draw(image: u8[]) -> !:
+        var none_lines: Vector3[]
+        try self.draw_lines(image, none_lines)
+
+    ## Draw the scene, then depth-tested `lines` in red, as the viewport draws
+    ## its grid after the meshes.
+    mutating func draw_lines(image: u8[], lines: const Vector3[]) -> !:
         let recording = try self.texture.frame()
         defer recording.release()
         let target = try recording.value().target()
+        defer target.release()
         let result = self.renderer.value().render(self.root, self.camera, target, true)
-        target.release()
         defer result.release()
         try result.get()
+        if lines.length > 0: try WireRenderer.lines(lines, self.camera, target, gpu.Color(1.0, 0.0, 0.0), 2.0, 0.0)
         discard(try recording.value().present(gpu.Color(0.0, 0.0, 0.0)))
         try self.texture.read(image)
 
@@ -122,6 +129,27 @@ func equivalence(view: View*, mesh: interop.Reference[PolygonMesh], flat: bool, 
     assert(covered > 1000)
     assert(differing * 200 < covered)
     view.renderer.value().set_flat(false)
+
+## Lines drawn after the meshes (the viewport's grid) are hidden behind them.
+func occlusion(view: View*, cube: interop.Reference[PolygonMesh], image: u8[]) -> !:
+    var lines: Vector3[6] = ---
+    for at in 0..<(usize)3:
+        let y = 0.5 + (f64)at * 0.25
+        lines[at * 2] = Vector3(-3.0, y, -2.0)
+        lines[at * 2 + 1] = Vector3(3.0, y, -2.0)
+    view.hide()
+    try view.draw_lines(image, lines)
+    let alone = red_pixels(image)
+    try view.show(cube, false)
+    try view.draw_lines(image, lines)
+    let behind = red_pixels(image)
+    assert(alone > 100 and behind * 4 < alone * 3)
+
+func red_pixels(image: const u8[]) -> usize:
+    var count: usize = 0
+    for at in 0..<(usize)(width * height):
+        if image[at * 4] > 200 and image[at * 4 + 1] < 60 and image[at * 4 + 2] < 60: count += 1
+    return count
 
 ## Dark-to-light and light-to-dark changes along row `y` between x0 and x1.
 func transitions(image: const u8[], y: u32, x0: u32, x1: u32) -> usize:
@@ -244,5 +272,6 @@ pub func main(arguments: str[]) -> i32!:
     try view.draw(image)
     assert(view.renderer.value().uploads() == before + 2)
     try zebra(&view, image)
-    print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow")
+    try occlusion(&view, cube, image)
+    print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded")
     return 0
