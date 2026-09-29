@@ -7,7 +7,7 @@ import interop
 import gpu
 import three
 import geocore_parallel
-from geocore import Vector3, PolygonMesh, polygon_mesh_type, detached_mesh
+from geocore import Vector3, Mesh, mesh_type, detached_mesh
 from three import EditOverlay
 from fixtures import Counter, GridArrays, make_mesh, chosen_faces, face_points, since, report, report_bytes, side
 from display import Viewport
@@ -62,7 +62,7 @@ func baselines(grid: const GridArrays*) -> !:
     report("baseline: pack f32x3 positions", since(start))
 
 ## Adding an attribute should cost that attribute alone, not every other one.
-func attributes(mesh: interop.Reference[PolygonMesh], counter: const Counter*) -> !:
+func attributes(mesh: interop.Reference[Mesh], counter: const Counter*) -> !:
     let m = mesh.value()
     let weights = try alloc f64[(usize)m.point_count()] in memory.heap
     defer free(weights) in memory.heap
@@ -86,7 +86,7 @@ func attributes(mesh: interop.Reference[PolygonMesh], counter: const Counter*) -
     report("attribute add: face on a mesh with uv + weight", since(start))
 
 ## Selecting 1k faces: the overlay's selection batch and the gizmo centre.
-func selection(mesh: interop.Reference[PolygonMesh], faces: const i64[]) -> !:
+func selection(mesh: interop.Reference[Mesh], faces: const i64[]) -> !:
     var overlay = EditOverlay()
     defer overlay.close()
     let start = time.now()
@@ -96,7 +96,7 @@ func selection(mesh: interop.Reference[PolygonMesh], faces: const i64[]) -> !:
 
 ## A Move of 1k faces (4k points), bare and with attributes, and the worker
 ## to UI hand-off of its result.
-func moves(mesh: interop.Reference[PolygonMesh], points: const i64[]) -> !:
+func moves(mesh: interop.Reference[Mesh], points: const i64[]) -> !:
     let m = mesh.value()
     let delta = Vector3(0.0, 0.1, 0.0)
     var start = time.now()
@@ -123,7 +123,7 @@ func moves(mesh: interop.Reference[PolygonMesh], points: const i64[]) -> !:
     free(handed) in memory.heap
 
 ## CPU spatial queries: the BVH build, picks, and the index after a Move.
-func queries(mesh: interop.Reference[PolygonMesh], points: const i64[]) -> !:
+func queries(mesh: interop.Reference[Mesh], points: const i64[]) -> !:
     let m = mesh.value()
     var start = time.now()
     try m.prepare_queries()
@@ -144,7 +144,7 @@ func queries(mesh: interop.Reference[PolygonMesh], points: const i64[]) -> !:
 
 ## First display, a camera-only redraw, and the redraw of a moved mesh; the
 ## Move round trip adds the cook and hand-off measured the same way.
-func display(mesh: interop.Reference[PolygonMesh], points: const i64[]) -> !:
+func display(mesh: interop.Reference[Mesh], points: const i64[]) -> !:
     var view = Viewport() catch failure:
         print(f"# display skipped: {failure.message}")
         return
@@ -157,7 +157,7 @@ func display(mesh: interop.Reference[PolygonMesh], points: const i64[]) -> !:
     let moved = try mesh.value().moved_points(points, Vector3(0.0, 0.1, 0.0))
     defer moved.release()
     let handed = try detached_mesh(moved)
-    let owner = try interop.Reference[PolygonMesh].adopt(handed, polygon_mesh_type, memory.heap)
+    let owner = try interop.Reference[Mesh].adopt(handed, mesh_type, memory.heap)
     defer owner.release()
     let cooked = since(start)
     try view.show(owner)

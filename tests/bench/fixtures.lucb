@@ -6,7 +6,7 @@ import memory
 import time
 import interop
 import sync
-from geocore import Vector3, PolygonMesh, polygon_mesh_type
+from geocore import Vector3, Mesh, mesh_type
 
 ## Grid side in quads: 702,244 points, 700,569 faces, 2,802,276 corners.
 pub let side: usize = 837
@@ -80,8 +80,8 @@ pub struct GridArrays:
         free(self.sizes) in memory.heap
         free(self.corners) in memory.heap
 
-pub func make_mesh(grid: const GridArrays*) -> interop.Reference[PolygonMesh]!:
-    return try interop.Reference[PolygonMesh].adopt(new PolygonMesh(grid.points, grid.sizes, grid.corners) in memory.heap, polygon_mesh_type, memory.heap)
+pub func make_mesh(grid: const GridArrays*) -> interop.Reference[Mesh]!:
+    return try interop.Reference[Mesh].adopt(new Mesh(grid.points, grid.sizes, grid.corners) in memory.heap, mesh_type, memory.heap)
 
 ## 1,000 faces spread over the grid, as the design's Move and select cases.
 pub func chosen_faces() -> i64[]!:
@@ -91,7 +91,7 @@ pub func chosen_faces() -> i64[]!:
     return faces
 
 ## The distinct points of `faces` (4,000 for the grid), ascending.
-pub func face_points(mesh: const PolygonMesh*, faces: const i64[]) -> i64[]!:
+pub func face_points(mesh: const Mesh*, faces: const i64[]) -> i64[]!:
     let marked = try alloc bool[(usize)mesh.point_count()] in memory.heap
     defer free(marked) in memory.heap
     for at in 0..<marked.length: marked[at] = false

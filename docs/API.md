@@ -9,7 +9,7 @@ handle or propagate those errors.
 Polygon meshes, their builders and modeling kernels live in
 [luce-geocore](https://github.com/dymokomi/luce-geocore) (export `geocore`); `three`
 re-exports its `Vector3`, `Matrix4`, `Vertex`, `Bounds` and `Geometry`. A
-`PolygonMesh` implements `Geometry`, so a scene `Mesh` draws it directly.
+geocore `Mesh` implements `Geometry`, so a scene `Mesh` draws it directly.
 
 | Type | Responsibility and principal methods |
 | --- | --- |
@@ -28,7 +28,8 @@ re-exports its `Vector3`, `Matrix4`, `Vertex`, `Bounds` and `Geometry`. A
 | `ObjectNode` | Transform, visibility and child membership shared through composition; `position`, `rotation`, `scale`, corresponding setters, `matrix`, `set_visible`, `add`, `remove`, `clear`, `child_count`. |
 | `Scene`, `Group` | Own a node and child objects; expose `node`, transform methods, `add`, `remove`, `clear`. |
 | `Mesh(geometry,material)` | Owns shared geometry/material interfaces and its own node. |
-| `Mesh.of(mesh,material)` | A scene object for a geocore `PolygonMesh`, drawn from GPU arrays retained by the mesh's change ids (per-vertex fallback on deviceless frames). |
+| `Mesh.of(mesh,material)` | A scene object for a geocore `Mesh`, drawn from GPU arrays retained by the mesh's change ids (per-vertex fallback on deviceless frames). |
+| `MeshGeometry(mesh)` | The per-vertex `Geometry` of a geocore `Mesh`: its corners as vertices. `Mesh.of` uses it without a device. |
 | `AmbientLight(color=white,intensity=1)` | Scene light; `set_intensity` updates its contribution. |
 | `DirectionalLight(color=white,intensity=1,direction=(1,1,1))` | Direction points toward the light and is transformed with its scene node. |
 | `PerspectiveCamera(fov=50,aspect=1,near=0.1,far=1000)` | World-space camera initially at `(0,0,5)` looking at the origin; `set_position`, `look_at`, `set_aspect`, `set_projection`. FOV is vertical degrees. |

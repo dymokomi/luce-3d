@@ -1,4 +1,4 @@
-from geocore import PolygonMesh
+import geocore
 from three import EditOverlay, Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
 from gpu import Frame
 import gpu
@@ -45,7 +45,7 @@ func screen(camera: PerspectiveCamera, point: Vector3) -> list[float]!:
 ## Edit overlays keep selection batches in Base and pick through the retained
 ## screen projection, confirming the nearest candidate with one ray.
 func edit_overlays(target: gpu.RenderTarget) -> unit!:
-    let cube = PolygonMesh.cube(2.0)
+    let cube = geocore.Mesh.cube(2.0)
     let camera = PerspectiveCamera(50.0, 1.0, 0.1, 100.0)
     camera.set_position(Vector3(3.0, 4.0, 5.0))
     camera.look_at(Vector3(0.0, 1.0, 0.0))
@@ -96,8 +96,8 @@ func edit_overlays(target: gpu.RenderTarget) -> unit!:
 func static_reuse(target: gpu.RenderTarget) -> unit!:
     let renderer = Renderer(true)
     let scene = Scene()
-    let first = Mesh(PolygonMesh.cube(2.0), MeshLambertMaterial(Color(0.6, 0.6, 0.6)))
-    let second = Mesh(PolygonMesh.cube(1.0), MeshLambertMaterial(Color(0.9, 0.5, 0.1)))
+    let first = Mesh.of(geocore.Mesh.cube(2.0), MeshLambertMaterial(Color(0.6, 0.6, 0.6)))
+    let second = Mesh.of(geocore.Mesh.cube(1.0), MeshLambertMaterial(Color(0.9, 0.5, 0.1)))
     scene.add(first)
     scene.add(DirectionalLight(intensity = 0.8))
     let camera = PerspectiveCamera(50.0, 1.0, 0.1, 100.0)

@@ -8,7 +8,7 @@ import math
 import memory
 import ownership
 import luce_3d.errors as errors
-from geocore import Vector3, PolygonMesh
+from geocore import Vector3, Mesh
 from luce_3d.cameras.perspective import PerspectiveCamera, Projection
 from luce_3d.renderers.wire import WireRenderer
 from luce_3d.renderers.projection import projection_matrix
@@ -20,7 +20,7 @@ from geocore_growing import Growing, same_ids
 
 ## Component modes: 0 points, 1 edges, 2 faces.
 pub struct EditOverlay:
-    var mesh: interop.Reference[PolygonMesh]?
+    var mesh: interop.Reference[Mesh]?
     var mode: i64
     var selection: Growing[i64]
     var hovered: i64
@@ -59,7 +59,7 @@ pub struct EditOverlay:
 
     ## Cheap when nothing changed: an identity compare and one pass over the
     ## selection list. The mesh is retained, so its address cannot be reused.
-    pub mutating func update(mesh: interop.Reference[PolygonMesh], mode: i64, selection: const i64[], hovered: i64) -> !:
+    pub mutating func update(mesh: interop.Reference[Mesh], mode: i64, selection: const i64[], hovered: i64) -> !:
         if mode < 0 or mode > 2: error(errors.invalid, "edit component mode must be 0, 1 or 2")
         let geometry = try mesh.get()
         var changed_mesh = true
@@ -107,7 +107,7 @@ pub struct EditOverlay:
 
     ## Mean of the distinct points under a selection, or the bounds center when
     ## nothing is selected: the Move gizmo's origin, without Luce list scans.
-    pub static func center(mesh: interop.Reference[PolygonMesh], mode: i64, selection: const i64[]) -> Vector3!:
+    pub static func center(mesh: interop.Reference[Mesh], mode: i64, selection: const i64[]) -> Vector3!:
         let geometry = try mesh.get()
         let marked = try alloc bool[(usize)geometry.point_count()] in memory.heap
         defer free(marked) in memory.heap
@@ -147,7 +147,7 @@ pub struct EditOverlay:
         let projection = try camera.value().projection(math.max(1.0, width) / math.max(1.0, height))
         return try screens.pick(try current.get(), self.mode == 1, projection, x, y, width, height)
 
-    mutating func draw_wires(mesh: const PolygonMesh*, camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color) -> !:
+    mutating func draw_wires(mesh: const Mesh*, camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color) -> !:
         let native = try target.get()
         var device = gpu.device_of(native) catch failure:
             if failure.code != gpu.unavailable: error(failure.code, failure.message)
@@ -181,7 +181,7 @@ pub struct EditOverlay:
     ## Selection geometry costs O(selection), never O(mesh): selected faces add
     ## their triangles (a contiguous range per face) and edges; selected points
     ## light the edges whose ends are both selected, found by adjacency.
-    mutating func rebuild_selection(mesh: const PolygonMesh*) -> !:
+    mutating func rebuild_selection(mesh: const Mesh*) -> !:
         self.accent.clear()
         self.faces.clear()
         let points = (usize)mesh.point_count()
@@ -221,7 +221,7 @@ pub struct EditOverlay:
                 defer value.release()
                 try self.faces.push(try mesh.point(try mesh.corner_point(try value.get())))
 
-    mutating func adjacency(mesh: const PolygonMesh*) -> !:
+    mutating func adjacency(mesh: const Mesh*) -> !:
         if self.edge_starts.count > 0: return
         let points = (usize)mesh.point_count()
         let edges = (try mesh.edge_count())
@@ -241,7 +241,7 @@ pub struct EditOverlay:
                 cursor[point] += 1
 
     ## The hovered edge, or the outline of a hovered unselected face.
-    mutating func rebuild_hover(mesh: const PolygonMesh*) -> !:
+    mutating func rebuild_hover(mesh: const Mesh*) -> !:
         self.hover.clear()
         let id = self.hovered
         if id < 0: return

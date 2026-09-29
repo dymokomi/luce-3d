@@ -11,6 +11,9 @@ import luce_3d.core.material as material
 import luce_3d.geometries.buffer as buffer
 import luce_3d.geometries.sphere as sphere
 import luce_3d.geometries.box as box
+import luce_3d.geometries.mesh_geometry as mesh_geometry
+pub type MeshGeometry = mesh_geometry.MeshGeometry
+pub let mesh_geometry_type = mesh_geometry.mesh_geometry_type
 import luce_3d.materials.lambert as lambert
 import luce_3d.materials.basic as basic
 import luce_3d.errors as errors

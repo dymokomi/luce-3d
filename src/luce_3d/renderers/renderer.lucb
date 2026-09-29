@@ -14,7 +14,8 @@ import ownership
 import luce_3d.core.object as object
 import luce_3d.errors as errors
 from luce_3d.core.object import Object3D, ObjectNode, Light, LightKind
-from geocore import Geometry, Vector3, Matrix4, PolygonMesh
+import geocore
+from geocore import Geometry, Vector3, Matrix4
 from luce_3d.core.material import Material, Color, check_color
 from luce_3d.cameras.perspective import PerspectiveCamera, Projection
 from luce_3d.renderers.projection import projection_matrix
@@ -27,7 +28,7 @@ struct Item:
     let node: interop.Reference[ObjectNode]
     let world: Matrix4
     let geometry: interop.Interface[Geometry]?
-    let polygon: interop.Reference[PolygonMesh]?
+    let polygon: interop.Reference[geocore.Mesh]?
     let material: interop.Interface[Material]?
     let illumination: Light
     let visible: bool
@@ -217,7 +218,7 @@ pub struct Renderer:
         if device.is_open(): self.arrays.trim()
         return errors.success[unit](())
 
-    mutating func draw_mesh(item: const Item*, polygon: interop.Reference[PolygonMesh], material: interop.Interface[Material], projection: Projection,
+    mutating func draw_mesh(item: const Item*, polygon: interop.Reference[geocore.Mesh], material: interop.Interface[Material], projection: Projection,
                             lighting: const FrameLighting*, target: const gpu.RenderTarget*) -> !:
         try material.enter()
         defer material.leave()
@@ -534,11 +535,11 @@ func clone_geometry(value: interop.Interface[Geometry]?) -> interop.Interface[Ge
         return geometry.clone()
     return none
 
-func release_polygon(value: interop.Reference[PolygonMesh]?):
+func release_polygon(value: interop.Reference[geocore.Mesh]?):
     if let mesh = value:
         mesh.release()
 
-func clone_polygon(value: interop.Reference[PolygonMesh]?) -> interop.Reference[PolygonMesh]?:
+func clone_polygon(value: interop.Reference[geocore.Mesh]?) -> interop.Reference[geocore.Mesh]?:
     if let mesh = value:
         return mesh.clone()
     return none

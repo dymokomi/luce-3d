@@ -27,7 +27,7 @@ Differences below about 10 % are noise.
 
 | Operation | Target | Step 0 | Step 1 | Step 2 |
 |---|---|---:|---:|---:|
-| construct `PolygonMesh` | — | 358.6 ms | 356.5 ms | 353.9 ms |
+| construct geocore `Mesh` | — | 358.6 ms | 356.5 ms | 353.9 ms |
 | mesh core, CPU bytes | 106 MB with caches and uv | 181.8 MB | 160.4 MB | 160.4 MB |
 | uv attribute, CPU bytes (includes the copied weight) | 22.4 MB | 48.1 MB | 42.8 MB | 42.8 MB |
 | attribute add: point f64 | ~0.3 ms, that column only | 1.45 ms | 0.74 ms | 0.77 ms |

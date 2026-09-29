@@ -6,7 +6,7 @@ import interop
 import memory
 import time
 import three
-from geocore import PolygonMesh
+import geocore
 from three import Vector3, Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer
 from fixtures import since
 
@@ -50,7 +50,7 @@ pub struct Viewport:
 
     ## Display `mesh` instead of the previous one, as the editor does when a
     ## cook publishes a new result.
-    pub mutating func show(mesh: interop.Reference[PolygonMesh]) -> !:
+    pub mutating func show(mesh: interop.Reference[geocore.Mesh]) -> !:
         self.hide()
         let material = try interop.Reference[MeshLambertMaterial].adopt(new MeshLambertMaterial(gpu.Color(0.7, 0.7, 0.7)) in memory.heap, three.lambert_material_type, memory.heap)
         defer material.release()

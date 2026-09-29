@@ -7,8 +7,9 @@ import interop
 import math
 import memory
 import three
-from geocore import PolygonMesh, polygon_mesh_type, MeshOps, MeshNormals, MeshPrimitives, AttributeKernels, Vector3
-from three import Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer, Color, WireRenderer
+import geocore
+from geocore import MeshOps, MeshNormals, MeshPrimitives, AttributeKernels, Vector3
+from three import Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer, Color, WireRenderer, MeshGeometry
 
 let width: u32 = 160
 let height: u32 = 120
@@ -50,7 +51,7 @@ struct View:
         self.shown_object = none
 
     ## Show `mesh` through the per-vertex interface (`legacy`) or its GPU arrays.
-    mutating func show(mesh: interop.Reference[PolygonMesh], legacy: bool) -> !:
+    mutating func show(mesh: interop.Reference[geocore.Mesh], legacy: bool) -> !:
         self.hide()
         let material = try interop.Reference[MeshLambertMaterial].adopt(new MeshLambertMaterial(gpu.Color(0.8, 0.7, 0.6)) in memory.heap, three.lambert_material_type, memory.heap)
         defer material.release()
@@ -58,7 +59,9 @@ struct View:
         defer appearance.release()
         var object: interop.Reference[Mesh]? = none
         if legacy:
-            let geometry = mesh.as_interface[Geometry](mesh.value())
+            let wrapped = try interop.Reference[MeshGeometry].adopt(new MeshGeometry(mesh) in memory.heap, three.mesh_geometry_type, memory.heap)
+            defer wrapped.release()
+            let geometry = wrapped.as_interface[Geometry](wrapped.value())
             defer geometry.release()
             object = try interop.Reference[Mesh].adopt(new Mesh(geometry, appearance) in memory.heap, three.mesh_type, memory.heap)
         else:
@@ -111,7 +114,7 @@ func luminance(image: const u8[], x: u32, y: u32) -> i64:
 ## The GPU-array path draws what the per-vertex path draws, lit and flat,
 ## within `tolerance` per channel: it lights per fragment, the per-vertex path
 ## per vertex, which differ across curved faces.
-func equivalence(view: View*, mesh: interop.Reference[PolygonMesh], flat: bool, legacy_image: u8[], image: u8[], tolerance: i64 = 3) -> !:
+func equivalence(view: View*, mesh: interop.Reference[geocore.Mesh], flat: bool, legacy_image: u8[], image: u8[], tolerance: i64 = 3) -> !:
     view.renderer.value().set_flat(flat)
     try view.show(mesh, true)
     try view.draw(legacy_image)
@@ -134,7 +137,7 @@ func equivalence(view: View*, mesh: interop.Reference[PolygonMesh], flat: bool, 
 
 ## An inside-out mesh (every face reversed) lights like the outward one: the
 ## side facing the eye is shaded.
-func two_sided(view: View*, cube: interop.Reference[PolygonMesh], outward: u8[], image: u8[]) -> !:
+func two_sided(view: View*, cube: interop.Reference[geocore.Mesh], outward: u8[], image: u8[]) -> !:
     try view.show(cube, false)
     try view.draw(outward)
     let everything: i64[6] = [0, 1, 2, 3, 4, 5]
@@ -151,7 +154,7 @@ func two_sided(view: View*, cube: interop.Reference[PolygonMesh], outward: u8[],
     assert(covered > 1000 and differing * 200 < covered)
 
 ## Lines drawn after the meshes (the viewport's grid) are hidden behind them.
-func occlusion(view: View*, cube: interop.Reference[PolygonMesh], image: u8[]) -> !:
+func occlusion(view: View*, cube: interop.Reference[geocore.Mesh], image: u8[]) -> !:
     var lines: Vector3[6] = ---
     for at in 0..<(usize)3:
         let y = 0.5 + (f64)at * 0.25
@@ -195,11 +198,11 @@ func seam_breaks(image: const u8[], seam: u32, y0: u32, y1: u32) -> usize:
     return breaks
 
 ## A roof: two quads meeting at a ridge along z at x = 0.
-func roof() -> interop.Reference[PolygonMesh]!:
+func roof() -> interop.Reference[geocore.Mesh]!:
     let points: Vector3[6] = [Vector3(-1.0, 0.0, -1.0), Vector3(0.0, 0.35, -1.0), Vector3(0.0, 0.35, 1.0), Vector3(-1.0, 0.0, 1.0), Vector3(1.0, 0.0, -1.0), Vector3(1.0, 0.0, 1.0)]
     let sizes: i64[2] = [4, 4]
     let corners: i64[8] = [0, 3, 2, 1, 1, 2, 5, 4]
-    return try interop.Reference[PolygonMesh].adopt(new PolygonMesh(points, sizes, corners) in memory.heap, polygon_mesh_type, memory.heap)
+    return try interop.Reference[geocore.Mesh].adopt(new geocore.Mesh(points, sizes, corners) in memory.heap, geocore.mesh_type, memory.heap)
 
 func zebra(view: View*, image: u8[]) -> !:
     # A cylinder with smooth normals, seen from the side: twice the stripes,
@@ -304,7 +307,7 @@ pub func main(arguments: str[]) -> i32!:
     defer free(legacy_image) in memory.heap
     let image = try alloc u8[(usize)(width * height * 4)] in memory.heap
     defer free(image) in memory.heap
-    let cube = try PolygonMesh.cube(1.5)
+    let cube = try geocore.Mesh.cube(1.5)
     defer cube.release()
     try equivalence(&view, cube, false, legacy_image, image)
     try equivalence(&view, cube, true, legacy_image, image)

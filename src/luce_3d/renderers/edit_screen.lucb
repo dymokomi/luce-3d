@@ -1,7 +1,7 @@
 ## Screen projection for Edit overlays: every point once per camera, for the
 ## point markers, and single points for picking.
 import math
-from geocore import Vector3, PolygonMesh
+from geocore import Vector3, Mesh
 from luce_3d.cameras.perspective import Projection
 from geocore_growing import Growing
 
@@ -29,7 +29,7 @@ pub struct Screen:
     pub mutating func invalidate():
         self.key[0] = math.nan
 
-    pub mutating func update(mesh: const PolygonMesh*, p: Projection, width: f64, height: f64) -> !:
+    pub mutating func update(mesh: const Mesh*, p: Projection, width: f64, height: f64) -> !:
         let key: f64[20] = [p.position.x, p.position.y, p.position.z, p.right.x, p.right.y, p.right.z, p.up.x, p.up.y, p.up.z,
                             p.backward.x, p.backward.y, p.backward.z, p.focal, p.aspect, p.near, p.far, width, height, (f64)mesh.point_count(), 0.0]
         var same = true
@@ -66,7 +66,7 @@ pub func project(point: Vector3, p: Projection, width: f64, height: f64) -> Vect
 ## screen, within `reach` pixels. The face comes from one BVH ray, so it is
 ## the visible one; the nearest edge to a point inside a visible polygon is
 ## one of its own edges. -1 when the cursor is off the mesh or too far.
-pub func pick(mesh: const PolygonMesh*, edges: bool, p: Projection, x: f64, y: f64, width: f64, height: f64) -> i64!:
+pub func pick(mesh: const Mesh*, edges: bool, p: Projection, x: f64, y: f64, width: f64, height: f64) -> i64!:
     let direction = p.right.multiply_scalar((x / width * 2.0 - 1.0) * p.aspect / p.focal).add(
         p.up.multiply_scalar((1.0 - y / height * 2.0) / p.focal)).subtract(p.backward)
     let face = try mesh.ray_face(p.position, try direction.normalized())

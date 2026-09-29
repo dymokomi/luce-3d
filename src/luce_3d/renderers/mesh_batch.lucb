@@ -6,7 +6,7 @@
 import gpu
 import memory
 import geocore_native as native
-from geocore import PolygonMesh, Matrix4, Vector3
+from geocore import Mesh, Matrix4, Vector3
 from luce_3d.core.material import Color
 from luce_3d.cameras.perspective import Projection
 from luce_3d.renderers.projection import projection_matrix
@@ -52,7 +52,7 @@ pub struct FrameLighting:
 
 ## Draw `mesh` placed by `world`: its surfaces (unless `surfaces` is false)
 ## and, when `wire_width` > 0, its edges in `wire_color`.
-pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh: const PolygonMesh*, world: Matrix4, projection: Projection,
+pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh: const Mesh*, world: Matrix4, projection: Projection,
                       lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*, slope_bias: f64,
                       surfaces: bool, wire_width: f64, wire_color: Color) -> !:
     if mesh.face_count() == 0: return
@@ -98,7 +98,7 @@ pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh:
         try gpu.draw_mesh(target, &wires, (usize)(try mesh.edge_count()) * 6, line, gpu.MeshKind.wires)
 
 ## Face ids of `mesh` from `base` + 1, into an rgba8_linear target (picking).
-pub func draw_polygon_ids(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh: const PolygonMesh*, world: Matrix4, projection: Projection, base: u32) -> !:
+pub func draw_polygon_ids(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh: const Mesh*, world: Matrix4, projection: Projection, base: u32) -> !:
     if mesh.face_count() == 0: return
     let lighting = FrameLighting()
     let shading = MeshShading(mode = gpu.Shading.unlit)
@@ -118,7 +118,7 @@ pub func draw_polygon_ids(arrays: GpuArrays*, target: const gpu.RenderTarget*, m
         first += count
         part += 1
 
-func parameters(mesh: const PolygonMesh*, world: Matrix4, projection: Projection, lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*) -> f32[124]:
+func parameters(mesh: const Mesh*, world: Matrix4, projection: Projection, lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*) -> f32[124]:
     var block: f32[124]
     let view = projection_matrix(projection)
     # Positions are f32 offsets from the mesh's f64 origin; the origin joins
@@ -184,21 +184,21 @@ func parameters(mesh: const PolygonMesh*, world: Matrix4, projection: Projection
 
 # mark: Arrays ================================================================================
 
-func positions(arrays: GpuArrays*, mesh: const PolygonMesh*) -> gpu.Buffer!:
+func positions(arrays: GpuArrays*, mesh: const Mesh*) -> gpu.Buffer!:
     let key = ArrayKey(mesh.points_id(), tag_positions, 0)
     if let found = arrays.find(key): return found
     let bytes = try arrays.staging((usize)mesh.point_count() * 12)
     try native.pack_positions(mesh, as_f32(bytes))
     return try arrays.store(key, bytes, native.points_parent(mesh))
 
-func corner_points(arrays: GpuArrays*, mesh: const PolygonMesh*) -> gpu.Buffer!:
+func corner_points(arrays: GpuArrays*, mesh: const Mesh*) -> gpu.Buffer!:
     let key = ArrayKey(mesh.corners_id(), tag_corners, 0)
     if let found = arrays.find(key): return found
     let bytes = try arrays.staging((usize)mesh.vertex_count() * 4)
     try native.pack_corner_points(mesh, as_u32(bytes))
     return try arrays.store(key, bytes)
 
-func triangles(arrays: GpuArrays*, mesh: const PolygonMesh*, first: usize, count: usize, part: u32) -> gpu.Buffer!:
+func triangles(arrays: GpuArrays*, mesh: const Mesh*, first: usize, count: usize, part: u32) -> gpu.Buffer!:
     let key = ArrayKey(mesh.triangles_id(), tag_triangles, part)
     if let found = arrays.find(key): return found
     let bytes = try arrays.staging(count * 12)
@@ -206,14 +206,14 @@ func triangles(arrays: GpuArrays*, mesh: const PolygonMesh*, first: usize, count
     return try arrays.store(key, bytes)
 
 ## Faces follow triangles and corners: keyed by both ids.
-func triangle_faces(arrays: GpuArrays*, mesh: const PolygonMesh*, first: usize, count: usize, part: u32) -> gpu.Buffer!:
+func triangle_faces(arrays: GpuArrays*, mesh: const Mesh*, first: usize, count: usize, part: u32) -> gpu.Buffer!:
     let key = ArrayKey(mesh.triangles_id() *% 0x9E3779B97F4A7C15 ^ mesh.corners_id(), tag_faces, part)
     if let found = arrays.find(key): return found
     let bytes = try arrays.staging(count * 4)
     try native.pack_triangle_faces(mesh, first, as_u32(bytes))
     return try arrays.store(key, bytes)
 
-func edges(arrays: GpuArrays*, mesh: const PolygonMesh*) -> gpu.Buffer!:
+func edges(arrays: GpuArrays*, mesh: const Mesh*) -> gpu.Buffer!:
     let key = ArrayKey(mesh.edges_id(), tag_edges, 0)
     if let found = arrays.find(key): return found
     let bytes = try arrays.staging((usize)(try mesh.edge_count()) * 8)
@@ -223,7 +223,7 @@ func edges(arrays: GpuArrays*, mesh: const PolygonMesh*) -> gpu.Buffer!:
 ## The shading normals and their domain: an authored N (corner, then point,
 ## face and detail), else the mesh's smooth normals (per point, or per corner
 ## where a 60-degree cusp splits a point). Flat shading reads neither.
-func normal_buffer(arrays: GpuArrays*, mesh: const PolygonMesh*) -> (gpu.Buffer, i64)!:
+func normal_buffer(arrays: GpuArrays*, mesh: const Mesh*) -> (gpu.Buffer, i64)!:
     let found = try preferred(mesh, "N", 3)
     if found.0 >= 0:
         return (try attribute_buffer(arrays, mesh, found.0, tag_normals), found.1)
@@ -238,7 +238,7 @@ func normal_buffer(arrays: GpuArrays*, mesh: const PolygonMesh*) -> (gpu.Buffer,
 ## Principal curvatures (k1, k2) for the curvature map: the CAD analytic
 ## attributes (corners), else the discrete estimate (points); their domain;
 ## and the range the map spans.
-func curvature_buffer(arrays: GpuArrays*, mesh: const PolygonMesh*, shading: const MeshShading*) -> (gpu.Buffer, i64, f64)!:
+func curvature_buffer(arrays: GpuArrays*, mesh: const Mesh*, shading: const MeshShading*) -> (gpu.Buffer, i64, f64)!:
     let source = try native.curvature_source(mesh)
     var range = shading.curvature_range
     if range <= 0.0:
@@ -254,22 +254,23 @@ func curvature_buffer(arrays: GpuArrays*, mesh: const PolygonMesh*, shading: con
     return (try arrays.store(key, bytes), source.domain, range)
 
 ## Cd by the same precedence, or none.
-func color_buffer(arrays: GpuArrays*, mesh: const PolygonMesh*) -> (gpu.Buffer?, i64)!:
+func color_buffer(arrays: GpuArrays*, mesh: const Mesh*) -> (gpu.Buffer?, i64)!:
     let found = try preferred(mesh, "Cd", 3)
     if found.0 < 0: return (none, -1)
     return (try attribute_buffer(arrays, mesh, found.0, tag_colors), found.1)
 
-func attribute_buffer(arrays: GpuArrays*, mesh: const PolygonMesh*, index: i64, tag: u8) -> gpu.Buffer!:
+func attribute_buffer(arrays: GpuArrays*, mesh: const Mesh*, index: i64, tag: u8) -> gpu.Buffer!:
     let key = ArrayKey(try mesh.attribute_id(index), tag, 0)
     if let found = arrays.find(key): return found
     let bytes = try arrays.staging(try native.attribute_tuples(mesh, index) * 12)
     try native.pack_attribute3(mesh, index, as_f32(bytes))
-    return try arrays.store(key, bytes)
+    # An edited column (N after a Move) rewrites its predecessor's buffer.
+    return try arrays.store(key, bytes, try native.attribute_parent(mesh, index))
 
 ## The attribute `name` of at least `width` components on the highest-priority
 ## domain (corner, point, face, detail) and the domain the shader indexes by;
 ## a single-storage attribute reads as detail.
-func preferred(mesh: const PolygonMesh*, name: str, width: i64) -> (i64, i64)!:
+func preferred(mesh: const Mesh*, name: str, width: i64) -> (i64, i64)!:
     let domains: i64[4] = [1, 0, 2, 3]
     for domain in domains:
         let index = mesh.find_attribute(name, domain)

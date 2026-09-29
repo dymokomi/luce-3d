@@ -4,8 +4,10 @@ import ownership
 import luce_3d.errors as errors
 import luce_3d.core.object as object
 from luce_3d.core.object import Object3D, ObjectNode, Light, LightKind
-from geocore import Geometry, Vector3, PolygonMesh
+import geocore
+from geocore import Geometry, Vector3
 from luce_3d.core.material import Material, Color, check_color
+from luce_3d.geometries.mesh_geometry import MeshGeometry, mesh_geometry_type
 
 ## A scene object drawing a geometry with a material. `Mesh.of` wraps a
 ## polygon mesh, which the renderer draws from retained GPU arrays keyed by
@@ -14,9 +16,9 @@ pub struct Mesh: Object3D:
     let transform: interop.Reference[ObjectNode]
     let shape: interop.Interface[Geometry]
     let appearance: interop.Interface[Material]
-    let source: interop.Reference[PolygonMesh]?
+    let source: interop.Reference[geocore.Mesh]?
 
-    pub func init(geometry: interop.Interface[Geometry], material: interop.Interface[Material], polygon: interop.Reference[PolygonMesh]? = none) -> !:
+    pub func init(geometry: interop.Interface[Geometry], material: interop.Interface[Material], polygon: interop.Reference[geocore.Mesh]? = none) -> !:
         try geometry.enter()
         defer geometry.leave()
         try material.enter()
@@ -24,17 +26,19 @@ pub struct Mesh: Object3D:
         self.transform = try object.make_node()
         self.shape = geometry.clone()
         self.appearance = material.clone()
-        var retained: interop.Reference[PolygonMesh]? = none
+        var retained: interop.Reference[geocore.Mesh]? = none
         if let mesh = polygon: retained = mesh.clone()
         self.source = retained
 
     ## A scene object for a polygon mesh.
-    pub static func of(mesh: interop.Reference[PolygonMesh], material: interop.Interface[Material]) -> interop.Reference[Mesh]!:
-        let geometry = mesh.as_interface[Geometry](try mesh.get())
+    pub static func of(mesh: interop.Reference[geocore.Mesh], material: interop.Interface[Material]) -> interop.Reference[Mesh]!:
+        let wrapped = try interop.Reference[MeshGeometry].adopt(new MeshGeometry(mesh) in memory.heap, mesh_geometry_type, memory.heap)
+        defer wrapped.release()
+        let geometry = wrapped.as_interface[Geometry](wrapped.value())
         defer geometry.release()
         return try interop.Reference[Mesh].adopt(new Mesh(geometry, material, mesh) in memory.heap, mesh_type, memory.heap)
 
-    pub func polygon() -> interop.Reference[PolygonMesh]?:
+    pub func polygon() -> interop.Reference[geocore.Mesh]?:
         let mesh = self.source else return none
         return mesh.clone()
 
