@@ -19,9 +19,6 @@ jobs:
         run: |
           echo "base=$(cat luce-3d/bootstrap/BASE)" >> "$GITHUB_OUTPUT"
           echo "luce=$(cat luce-3d/bootstrap/LUCE)" >> "$GITHUB_OUTPUT"
-          echo "ui=$(cat luce-3d/bootstrap/UI)" >> "$GITHUB_OUTPUT"
-          echo "color=$(cat luce-3d/bootstrap/COLOR)" >> "$GITHUB_OUTPUT"
-          echo "svg=$(cat luce-3d/bootstrap/SVG)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-base
@@ -43,18 +40,6 @@ jobs:
           repository: dymokomi/luce
           ref: ${{ steps.pins.outputs.luce }}
           path: luce
-      - uses: actions/checkout@v7
-        with:
-          repository: dymokomi/luce-ui
-          ref: ${{ steps.pins.outputs.ui }}
-          path: luce-ui
-      - uses: actions/checkout@v7
-        with: {repository: dymokomi/luce-color, ref: "${{ steps.pins.outputs.color }}", path: luce-color}
-      - uses: actions/checkout@v7
-        with: {repository: dymokomi/luce-svg, ref: "${{ steps.pins.outputs.svg }}", path: luce-svg}
-      - name: Install Linux font backend
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libcairo2-dev fonts-dejavu-core
       - name: Select Clang
         run: |
           mkdir -p "$RUNNER_TEMP/luce-bin"

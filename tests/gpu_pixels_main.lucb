@@ -1,15 +1,11 @@
-## Independent Metal readback checks depth, clipping and the UI's viewport scope.
+## Independent Metal readback checks depth, clipping and a host view's region scope.
 import gpu
 import interop
 import memory
 import window
 import native
 import three
-import three_ui
-import ui
 from three import Scene, Mesh, BufferGeometry, Geometry, Material, Object3D, Vertex, Vector3, Color, MeshBasicMaterial, PerspectiveCamera, Renderer
-from three_ui import SceneView
-from ui import Application, Widget, HStack, Alignment
 
 func rendered(result: interop.Outcome[unit]) -> !:
     defer result.release()
@@ -89,26 +85,16 @@ pub func main(arguments: str[]) -> i32!:
     try host.resize(200, 120)
     try frame(scene_object, camera, renderer, host, surface, true)
 
-    let view = try interop.Reference[SceneView].adopt(new SceneView(scene_object, camera, renderer, 64.0, 64.0) in memory.heap, three_ui.scene_view_type, memory.heap)
-    defer view.release()
-    let box = view.value().layout()
-    defer box.release()
-    try box.value().set_size(64.0, 64.0)
-    let widget = view.as_interface[Widget](view.value())
-    defer widget.release()
-    let row = try interop.Reference[HStack].adopt(new HStack([widget], 8.0, 8.0, Alignment.start) in memory.heap, ui.hstack_type, memory.heap)
-    defer row.release()
-    let root = row.as_interface[Widget](row.value())
-    defer root.release()
-    let app = try interop.Reference[Application].adopt(new Application(root) in memory.heap, ui.application_type, memory.heap)
-    defer app.release()
     native.begin("3D pixel contracts")
     defer native.end()
     let recording = try surface.frame()
     defer recording.release()
     let target = try recording.value().target()
     defer target.release()
-    try rendered(app.value().render(target))
+    # A host view (a luce-ui Viewport in an 8-point-padded row) hands the renderer a 64-point region.
+    let region = try (try target.get()).region(gpu.Rect(8.0, 8.0, 64.0, 64.0))
+    defer region.release()
+    try rendered(renderer.value().render(scene_object, camera, region, true))
     discard(try recording.value().present())
     try surface.wait_idle()
     let size = try host.size()
@@ -116,5 +102,5 @@ pub func main(arguments: str[]) -> i32!:
     native.pixel((u64)(4.0 * size.scale), (u64)(40.0 * size.scale), 0, 0, 0)
     native.pixel((u64)(76.0 * size.scale), (u64)(40.0 * size.scale), 0, 0, 0)
     assert(camera.value().aspect() == 1.0)
-    print("ok 3D Metal depth, near-plane/behind-camera clipping, resize and UI composition")
+    print("ok 3D Metal depth, near-plane/behind-camera clipping, resize and region scope")
     return 0

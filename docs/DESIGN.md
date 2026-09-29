@@ -4,8 +4,8 @@
 scene interfaces. `geometries` owns buffers and sphere construction, `objects`
 owns meshes and groups, `scenes` owns roots, `lights` owns illumination values,
 `cameras` owns lens/view calculations, and `renderers` owns traversal and reusable
-command storage. Only the optional `ui` adapter depends on the public UI package.
-The core contains no window, UI, native framework or backend-specific calls.
+command storage. The package contains no window, UI, native framework or
+backend-specific calls; a host view passes the renderer its render target.
 
 A node belongs to at most one parent. Parents retain their child objects and
 stable nodes; children keep only a parent identity. Add rejects duplicates,

@@ -4,9 +4,6 @@ def package "luce_3d_tests" {
     def dependency "luce_3d" {
         str path = ".."
     }
-    def dependency "luce_ui" {
-        str path = "../../luce-ui"
-    }
     def dependency "luce-gpu" {
         str owner = "dymokomi"
         str version = "^0.1.0"

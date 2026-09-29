@@ -1,6 +1,4 @@
 from three import Geometry, Material, Vertex, Bounds, Vector3, Color, Mesh, Scene, Renderer, PerspectiveCamera
-from three_ui import SceneView
-from ui import Application
 from gpu import Frame
 import gpu
 import window
@@ -90,13 +88,12 @@ pub func main(arguments: list[str]) -> int!:
     assert(rejected)
     triangle.invalid_index = false
     renderer.render(scene, camera, target)
-    let view = SceneView(scene, camera, renderer)
-    let app = Application(view)
+    # Closing the renderer from inside its own render defers until the call returns.
     triangle.close_renderer = true
-    app.render(target)
+    renderer.render(scene, camera, target)
     assert(renderer.is_closed())
     rejected = false
-    app.render(target) catch failure:
+    renderer.render(scene, camera, target) catch failure:
         rejected = true
     assert(rejected)
     frame.close()

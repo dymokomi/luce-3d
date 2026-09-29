@@ -1,8 +1,10 @@
 # API
 
-The package exports `three` and optional `three_ui`. Public objects use `init`
-and methods in Base, and existing `Type(args)` construction in Luce. Mutating or
-allocating operations can fail; Luce callers handle or propagate those errors.
+The package exports `three`. It has no UI dependency: an application's view hands
+the renderer a render target (luced-3d's `SceneView` is a `luce-ui` example).
+Public objects use `init` and methods in Base, and existing `Type(args)`
+construction in Luce. Mutating or allocating operations can fail; Luce callers
+handle or propagate those errors.
 
 See [immutable mesh modeling](MESH_MODELING.md) for numeric attribute domains,
 topology operators, primitive generators and BVH picking contracts.
@@ -39,7 +41,6 @@ topology operators, primitive generators and BVH picking contracts.
 | `MeshBuilder` | Bounded Base topology staging: `point`, `face`, `corner`, `finish`, `close`. Importers and operators share the same mesh limits. |
 | `PolygonTopology` | Borrowed read interface for points, polygon corners and edge endpoints. Numbering/lifetime are defined by the implementation. |
 | `DissolveWorkspace(source,edits=128)` | Base-only local edge-dissolve staging over a borrowed immutable `PolygonMesh*`. `face_slots`, `active`, `neighbor`, `dissolve`, `finish`, `close`; see lifetime and ordering below. |
-| `SceneView(scene,camera,renderer=none,width=320,height=240)` | UI widget retaining the scene, camera and renderer; provides `layout`, `scene`, `camera`, `renderer`. Creates a renderer when omitted. |
 
 Rotations are intrinsic XYZ radians, applied as Z, Y, X to column vectors. A world
 matrix is `parent * local`; normals use the inverse transpose, including
@@ -125,8 +126,7 @@ allocated viewport without mutating the shared camera's configured aspect.
 
 Base consumers use explicit `interop.Reference`, `interop.Interface` and
 `interop.Outcome` carriers. Descriptor constants such as `mesh_type`,
-`sphere_geometry_type` and `renderer_type` are available from `three`;
-`scene_view_type` is exported by `three_ui`. Reference/interface return values
+`sphere_geometry_type` and `renderer_type` are available from `three`. Reference/interface return values
 transfer one retained edge. Outcome values own their results or error messages;
 release the carrier after use. The Luce compiler supplies the matching ARC and
 error conversion automatically. See `tests/main.lucb` and `tests/gpu_pixels_main.lucb` for

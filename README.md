@@ -1,13 +1,14 @@
 # Luce 3D
 
 A Luce Base library for scenes, geometry, materials, cameras and rendering through
-standard `gpu`. The public names follow the shape of Three.js. It runs standalone
-or inside a `luce-ui` widget; all platform resources belong to the standard library.
+standard `gpu`. The public names follow the shape of Three.js. It has no UI
+dependency: an application's view hands the renderer a render target. All
+platform resources belong to the standard library.
 
 ```luce
-from ui import Application
-from three import Scene, Mesh, SphereGeometry, MeshLambertMaterial, Color, PerspectiveCamera, AmbientLight, DirectionalLight
-from three_ui import SceneView
+from three import Scene, Mesh, SphereGeometry, MeshLambertMaterial, Color, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
+from gpu import Frame
+import window
 
 pub func main(arguments: list[str]) -> int!:
     let scene = Scene()
@@ -16,26 +17,27 @@ pub func main(arguments: list[str]) -> int!:
     scene.add(Mesh(geometry, material))
     scene.add(AmbientLight(intensity = 0.25))
     scene.add(DirectionalLight(intensity = 0.8))
-    let view = SceneView(scene, PerspectiveCamera())
-    let app = Application(view, title = "A sphere")
-    app.run()
+    let frame = Frame(window.Size(320.0, 240.0, 320.0, 240.0, 1.0))
+    Renderer().render(scene, PerspectiveCamera(), frame.target())
+    frame.close()
     return 0
 ```
 
-Declare local dependencies in the consumer's `luce.toml`:
+Declare the dependency in the consumer's `package.prisma`:
 
-```toml
-[dependencies]
-luce_3d = "../luce-3d"
-luce_ui = "../luce-ui"
+```prisma
+def dependency "luce-3d" {
+    str owner = "dymokomi"
+    str version = "^0.2.0"
+}
 ```
 
-Import `three` for the core and `three_ui` for `SceneView`. Direct UI imports also
-require the consumer's UI dependency. These are real package exports: no copied
-package sources or demo-specific aliases are needed.
+Import `three`. A window or widget toolkit hosts the renderer: luced-3d's
+`SceneView` shows how a `luce-ui` Viewport passes its region to
+`Renderer.render(scene, camera, target, fit_aspect = true)`.
 
-Use the exact compiler/UI revisions in `bootstrap/BASE`, `bootstrap/LUCE` and
-`bootstrap/UI`, checked out alongside this repository. Run `./test.sh` for Base
+Use the exact compiler and library revisions in `bootstrap/BASE`, `bootstrap/LUCE`
+and `bootstrap/PACKAGES`, checked out alongside this repository. Run `./test.sh` for Base
 and Luce tests at native optimization levels 0–3 and both C comparison modes.
 `python3 tests/gpu.py` additionally requires a macOS Metal desktop. Build a Base
 consumer with `python3 tools/build.py tests/main.lucb -o build/test`.
@@ -55,4 +57,4 @@ Licensed under MIT or Apache-2.0, at your option.
 ## Windows x64
 
 Build sibling `luce-base` and `luce` checkouts with `python tools/build_windows.py` in each compiler repository. Run `python tests/run.py` in this repository; the runner selects the sibling Windows executables.
-For real windows and rendering, install the Vulkan SDK and start a fresh terminal with `VULKAN_SDK` set. The sibling `luce-demos` UI and sphere applications exercise Win32/Vulkan presentation. CPU tests run in hosted Windows CI; GPU smoke tests require an interactive desktop and Vulkan hardware.
+For real windows and rendering, install the Vulkan SDK and start a fresh terminal with `VULKAN_SDK` set. luced-3d and the sibling `luce-demos` applications exercise Win32/Vulkan presentation. CPU tests run in hosted Windows CI; GPU smoke tests require an interactive desktop and Vulkan hardware.

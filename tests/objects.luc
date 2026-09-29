@@ -1,6 +1,4 @@
 from three import PolygonMesh, EditOverlay, Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
-from three_ui import SceneView
-from ui import Application
 from gpu import Frame
 import gpu
 import window
@@ -25,9 +23,8 @@ pub func main(arguments: list[str]) -> int!:
     renderer.set_wire_overlay(1.0)
     renderer.render(scene, camera, target)
     renderer.set_wire_overlay(0.0)
-    let view = SceneView(scene, camera, renderer, width = 80.0, height = 60.0)
-    let app = Application(view)
-    app.render(target)
+    # A host view renders into its own region; fitting its aspect leaves the camera's alone.
+    renderer.render(scene, camera, target.region(gpu.Rect(8.0, 8.0, 80.0, 60.0)), fit_aspect = true)
     assert(camera.aspect() == 1.0)
     assert(group.remove(mesh))
     scene.add(mesh)
@@ -35,7 +32,7 @@ pub func main(arguments: list[str]) -> int!:
     edit_overlays(target)
     static_reuse(target)
     frame.close()
-    print("ok Luce scene objects and UI composition")
+    print("ok Luce scene objects and region rendering")
     return 0
 
 func screen(camera: PerspectiveCamera, point: Vector3) -> list[float]!:
