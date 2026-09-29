@@ -225,9 +225,17 @@ func parameters(mesh: const Mesh*, world: Matrix4, projection: Projection, light
 func positions(arrays: GpuArrays*, mesh: const Mesh*) -> gpu.Buffer!:
     let key = ArrayKey(mesh.points_id(), tag_positions, 0)
     if let found = arrays.find(key): return found
-    let bytes = try arrays.staging((usize)mesh.point_count() * 12)
+    let count = (usize)mesh.point_count()
+    let parent = native.points_parent(mesh)
+    let changed = native.points_changed(mesh)
+    # A Move rewrites only its neighbourhood of the previous buffer.
+    if parent != 0 and changed.1 - changed.0 < count:
+        let part = try arrays.staging((changed.1 - changed.0) * 12)
+        try native.pack_positions_range(mesh, changed.0, changed.1, as_f32(part))
+        if let patched = try arrays.patch(key, parent, count * 12, changed.0 * 12, part): return patched
+    let bytes = try arrays.staging(count * 12)
     try native.pack_positions(mesh, as_f32(bytes))
-    return try arrays.store(key, bytes, native.points_parent(mesh))
+    return try arrays.store(key, bytes, parent)
 
 func corner_points(arrays: GpuArrays*, mesh: const Mesh*) -> gpu.Buffer!:
     let key = ArrayKey(mesh.corners_id(), tag_corners, 0)
@@ -269,7 +277,13 @@ func normal_buffer(arrays: GpuArrays*, mesh: const Mesh*) -> (gpu.Buffer, i64)!:
     let domain = try native.smooth_domain(mesh)
     let key = ArrayKey(ids.0, tag_smooth_normals, 0)
     if let buffer = arrays.find(key): return (buffer, domain)
-    let bytes = try arrays.staging((usize)(mesh.vertex_count() if domain == 1 else mesh.point_count()) * 12)
+    let count = (usize)(mesh.vertex_count() if domain == 1 else mesh.point_count())
+    let changed = try native.smooth_changed(mesh)
+    if ids.1 != 0 and changed.1 - changed.0 < count:
+        let part = try arrays.staging((changed.1 - changed.0) * 12)
+        try native.pack_smooth_range(mesh, changed.0, changed.1, as_f32(part))
+        if let patched = try arrays.patch(key, ids.1, count * 12, changed.0 * 12, part): return (patched, domain)
+    let bytes = try arrays.staging(count * 12)
     try native.pack_smooth_normals(mesh, as_f32(bytes))
     return (try arrays.store(key, bytes, ids.1), domain)
 
@@ -309,10 +323,19 @@ func color_buffer(arrays: GpuArrays*, mesh: const Mesh*) -> (gpu.Buffer?, i64)!:
 func attribute_buffer(arrays: GpuArrays*, mesh: const Mesh*, index: i64, tag: u8) -> gpu.Buffer!:
     let key = ArrayKey(try mesh.attribute_id(index), tag, 0)
     if let found = arrays.find(key): return found
-    let bytes = try arrays.staging(try native.attribute_tuples(mesh, index) * 12)
+    let tuples = try native.attribute_tuples(mesh, index)
+    let parent = try native.attribute_parent(mesh, index)
+    # An edited column (N after a Move) rewrites its predecessor's buffer:
+    # just the edited range when the attribute is plain float triples.
+    if parent != 0 and (try mesh.attribute_width(index)) == 3 and (try mesh.attribute_storage(index)) == 0 and not (try mesh.attribute_integer(index)):
+        let changed = try native.attribute_changed(mesh, index)
+        if changed.1 - changed.0 < tuples:
+            let part = try arrays.staging((changed.1 - changed.0) * 12)
+            try native.pack_attribute3_range(mesh, index, changed.0, changed.1, as_f32(part))
+            if let patched = try arrays.patch(key, parent, tuples * 12, changed.0 * 12, part): return patched
+    let bytes = try arrays.staging(tuples * 12)
     try native.pack_attribute3(mesh, index, as_f32(bytes))
-    # An edited column (N after a Move) rewrites its predecessor's buffer.
-    return try arrays.store(key, bytes, try native.attribute_parent(mesh, index))
+    return try arrays.store(key, bytes, parent)
 
 ## The attribute `name` of at least `width` components on the highest-priority
 ## domain (corner, point, face, detail) and the domain the shader indexes by;

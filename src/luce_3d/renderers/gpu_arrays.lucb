@@ -97,6 +97,21 @@ pub struct GpuArrays:
     ## array `key`'s was derived from) has the same size and no draw of this
     ## frame reads it, it is rewritten in place: the device orders the copy
     ## after earlier frames, which keep the old contents.
+    ## Rewrite bytes `offset`.. of the copy of `parent` (same tag and part,
+    ## `total` bytes, unused this frame) with `data` and rename it `key`: a
+    ## local edit uploads its neighbourhood. None when there is no such copy.
+    pub mutating func patch(key: ArrayKey, parent: u64, total: usize, offset: usize, data: const u8[]) -> gpu.Buffer?!:
+        for at in 0..<self.entries.count:
+            let entry = &self.entries.items[at]
+            if entry.key.id == parent and entry.key.tag == key.tag and entry.key.part == key.part and entry.bytes == total and entry.used != self.frame:
+                if data.length > 0: try entry.buffer.upload(offset, data)
+                self.uploads += 1
+                self.uploaded += (u64)data.length
+                entry.key = key
+                entry.used = self.frame
+                return entry.buffer
+        return none
+
     pub mutating func store(key: ArrayKey, data: const u8[], parent: u64 = 0) -> gpu.Buffer!:
         self.uploads += 1
         self.uploaded += (u64)data.length

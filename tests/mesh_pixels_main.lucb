@@ -345,13 +345,18 @@ pub func main(arguments: str[]) -> i32!:
     let colored = try AttributeKernels.filled(smooth, "Cd", 0, [0.9, 0.3, 0.2], false, true, 5.0)
     defer colored.release()
     try equivalence(&view, colored, false, legacy_image, image, 24)
-    # A moved mesh uploads its positions and face normals only.
+    # A moved mesh uploads its positions and normals only.
     let before = view.renderer.value().uploads()
-    let moved = try colored.value().moved_points([1, 2, 3], Vector3(0.0, 0.1, 0.0))
+    let bytes = view.renderer.value().uploaded_bytes()
+    let moved = try colored.value().moved_points([130, 131, 132], Vector3(0.0, 0.1, 0.0))
     defer moved.release()
     try view.show(moved, false)
     try view.draw(image)
     assert(view.renderer.value().uploads() == before + 2)
+    # Only the moved neighbourhood uploads, and it draws what a whole upload
+    # would (the per-vertex path over the moved mesh).
+    assert(view.renderer.value().uploaded_bytes() - bytes < (colored.value().point_count() + colored.value().vertex_count()) * 12 // 4)
+    try equivalence(&view, moved, false, legacy_image, image, 24)
     try zebra(&view, image)
     try curvature_map(&view, image)
     try picking(&view, cube, image)
