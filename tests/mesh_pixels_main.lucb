@@ -7,7 +7,7 @@ import interop
 import math
 import memory
 import three
-from geocore import PolygonMesh, polygon_mesh_type, MeshNormals, MeshPrimitives, AttributeKernels, Vector3
+from geocore import PolygonMesh, polygon_mesh_type, MeshOps, MeshNormals, MeshPrimitives, AttributeKernels, Vector3
 from three import Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer, Color, WireRenderer
 
 let width: u32 = 160
@@ -108,8 +108,10 @@ func luminance(image: const u8[], x: u32, y: u32) -> i64:
     let at = (usize)((y * width + x) * 4)
     return ((i64)image[at] + (i64)image[at + 1] + (i64)image[at + 2]) // 3
 
-## The GPU-array path draws what the per-vertex path draws, lit and flat.
-func equivalence(view: View*, mesh: interop.Reference[PolygonMesh], flat: bool, legacy_image: u8[], image: u8[]) -> !:
+## The GPU-array path draws what the per-vertex path draws, lit and flat,
+## within `tolerance` per channel: it lights per fragment, the per-vertex path
+## per vertex, which differ across curved faces.
+func equivalence(view: View*, mesh: interop.Reference[PolygonMesh], flat: bool, legacy_image: u8[], image: u8[], tolerance: i64 = 3) -> !:
     view.renderer.value().set_flat(flat)
     try view.show(mesh, true)
     try view.draw(legacy_image)
@@ -123,12 +125,30 @@ func equivalence(view: View*, mesh: interop.Reference[PolygonMesh], flat: bool, 
         if a[0] != 0 or a[1] != 0 or a[2] != 0: covered += 1
         for channel in 0..<(usize)3:
             let difference = (i64)a[channel] - (i64)b[channel]
-            if difference > 3 or difference < -3:
+            if difference > tolerance or difference < -tolerance:
                 differing += 1
                 break
     assert(covered > 1000)
     assert(differing * 200 < covered)
     view.renderer.value().set_flat(false)
+
+## An inside-out mesh (every face reversed) lights like the outward one: the
+## side facing the eye is shaded.
+func two_sided(view: View*, cube: interop.Reference[PolygonMesh], outward: u8[], image: u8[]) -> !:
+    try view.show(cube, false)
+    try view.draw(outward)
+    let everything: i64[6] = [0, 1, 2, 3, 4, 5]
+    let reversed = try MeshOps.faces(cube, everything, 1)
+    defer reversed.release()
+    try view.show(reversed, false)
+    try view.draw(image)
+    var covered: usize = 0
+    var differing: usize = 0
+    for at in 0..<(usize)(width * height):
+        if outward[at * 4] != 0: covered += 1
+        let difference = (i64)outward[at * 4] - (i64)image[at * 4]
+        if difference > 3 or difference < -3: differing += 1
+    assert(covered > 1000 and differing * 200 < covered)
 
 ## Lines drawn after the meshes (the viewport's grid) are hidden behind them.
 func occlusion(view: View*, cube: interop.Reference[PolygonMesh], image: u8[]) -> !:
@@ -199,16 +219,19 @@ func zebra(view: View*, image: u8[]) -> !:
     let many = transitions(image, height // 2, 45, 115)
     assert(few >= 3 and many >= few * 3 // 2 and many <= few * 3)
     # A crease (a normal per face) breaks the stripes at the ridge; point
-    # normals shared across it keep them flowing.
+    # normals shared across it keep them flowing. (Without N the 39-degree
+    # ridge is within the cusp angle, so it would shade smooth.)
     try view.camera.value().set_position(Vector3(0.0, 3.0, 0.3))
     try view.camera.value().look_at(Vector3(0.0, 0.0, 0.0))
     try view.renderer.value().set_shading(2, 24.0, 0.5, Vector3(1.0, 0.0, 1.0), planar = true)
-    let creased = try roof()
+    let ridge = try roof()
+    defer ridge.release()
+    let creased = try AttributeKernels.normals(ridge, 2)
     defer creased.release()
     try view.show(creased, false)
     try view.draw(image)
     let broken = seam_breaks(image, width // 2, height // 2 - 40, height // 2 + 40)
-    let blended = try AttributeKernels.normals(creased, 0)
+    let blended = try AttributeKernels.normals(ridge, 0)
     defer blended.release()
     try view.show(blended, false)
     try view.draw(image)
@@ -263,7 +286,7 @@ pub func main(arguments: str[]) -> i32!:
     defer smooth.release()
     let colored = try AttributeKernels.filled(smooth, "Cd", 0, [0.9, 0.3, 0.2], false, true, 5.0)
     defer colored.release()
-    try equivalence(&view, colored, false, legacy_image, image)
+    try equivalence(&view, colored, false, legacy_image, image, 24)
     # A moved mesh uploads its positions and face normals only.
     let before = view.renderer.value().uploads()
     let moved = try colored.value().moved_points([1, 2, 3], Vector3(0.0, 0.1, 0.0))
@@ -273,5 +296,6 @@ pub func main(arguments: str[]) -> i32!:
     assert(view.renderer.value().uploads() == before + 2)
     try zebra(&view, image)
     try occlusion(&view, cube, image)
-    print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded")
+    try two_sided(&view, cube, legacy_image, image)
+    print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded; inside-out meshes light on the eye's side")
     return 0

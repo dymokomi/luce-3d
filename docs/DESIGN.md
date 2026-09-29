@@ -35,8 +35,9 @@ defers disposal until the outer invocation returns.
 A polygon mesh object (`Mesh.of`) draws from GPU buffers the renderer retains
 in `GpuArrays`, keyed by the change ids of the mesh arrays they came from:
 positions, corner points, triangles and their faces, normals (an authored N,
-else face normals), colors (Cd) and edges. A moved mesh finds its topology and
-attribute buffers there and uploads positions and face normals; when no draw of
+else the mesh's smooth corner normals, hard past a 60-degree cusp), colors (Cd)
+and edges. A moved mesh finds its topology and attribute buffers there and
+uploads positions and normals; when no draw of
 the frame reads the previous positions, it rewrites that buffer in place.
 World transforms, Lambert lighting and the analysis shadings are shader work;
 lights and shading are parameters. Custom `Geometry` implementations keep the
