@@ -16,12 +16,13 @@ optimization modes 0, 1, 2, 3 and supplemental C debug/release modes.
 - Application-defined geometry and material interfaces, dynamic error messages,
   invalid indices, successful reuse after failed rendering, reentrant rendering
   rejection and deferred renderer closure from inside a callback.
+- Edit overlays (`tests/objects.luc`): selection geometry rebuilt only when
+  the selection changes (never for hover or camera), see-through drawing,
+  point and edge picks on a known face, point-cloud picks, a new mesh
+  replacing every retained batch, knife planes, the faces under a stroke and
+  15-degree snapping, and soft-selection weights in point and face modes.
 - Mesh construction, operators, display triangulations, dissolves and
   spatial queries are validated in luce-geocore (its docs/VALIDATION.md).
-  Two observed cancellation cases have independent 100-digit reference checks;
-  the previous implementation fails the new near-edge regression. All native
-  optimization and C modes execute these checks. This is floating-point
-  geometry, not an exact-predicate guarantee for arbitrary input magnitudes.
 
 `python3 tests/gpu.py` uses the pinned Base standard GPU test observer solely in
 a temporary test consumer. The package itself has no native framework imports.

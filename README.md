@@ -30,7 +30,7 @@ Declare the dependency in the consumer's `package.prisma`:
 ```prisma
 def dependency "luce-3d" {
     str owner = "dymokomi"
-    str version = "^0.2.0"
+    str version = "^0.3.0"
 }
 ```
 
