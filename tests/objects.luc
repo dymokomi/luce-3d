@@ -33,6 +33,7 @@ pub func main(arguments: list[str]) -> int!:
     scene.add(mesh)
     assert(group.node().child_count() == 0 and scene.node().child_count() == 4)
     edit_overlays(target)
+    static_reuse(target)
     frame.close()
     print("ok Luce scene objects and UI composition")
     return 0
@@ -91,3 +92,25 @@ func edit_overlays(target: gpu.RenderTarget) -> unit!:
     let raised = screen(camera, moved.point(6).add(moved.point(7)).multiply_scalar(0.5))
     assert(overlay.pick(camera, raised[0], raised[1] + 1.0, 200.0, 160.0) == top_edge)
     assert(overlay.pick(camera, middle[0], middle[1] + 1.0, 200.0, 160.0) != top_edge)
+
+## A static scene re-prepares only changed objects: adding a mesh keeps the
+## other's data, and a hidden mesh shown again right away reuses its own.
+func static_reuse(target: gpu.RenderTarget) -> unit!:
+    let renderer = Renderer(true)
+    let scene = Scene()
+    let first = Mesh(PolygonMesh.cube(2.0), MeshLambertMaterial(Color(0.6, 0.6, 0.6)))
+    let second = Mesh(PolygonMesh.cube(1.0), MeshLambertMaterial(Color(0.9, 0.5, 0.1)))
+    scene.add(first)
+    scene.add(DirectionalLight(intensity = 0.8))
+    let camera = PerspectiveCamera(50.0, 1.0, 0.1, 100.0)
+    camera.set_position(Vector3(3.0, 4.0, 5.0))
+    camera.look_at(Vector3(0.0, 1.0, 0.0))
+    renderer.render(scene, camera, target)
+    scene.add(second)
+    renderer.render(scene, camera, target)
+    assert(renderer.reused_count() == 1)
+    assert(scene.remove(first))
+    renderer.render(scene, camera, target)
+    scene.add(first)
+    renderer.render(scene, camera, target)
+    assert(renderer.reused_count() == 4)

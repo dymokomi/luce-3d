@@ -1,4 +1,6 @@
-## World transforms and Lambert lighting are cached on geometry invalidation.
+## World transforms and Lambert lighting are cached per drawn geometry: a scene
+## change keeps the prepared data of every object whose geometry, material,
+## world transform and lights are unchanged, and prepares only the others.
 ## Device frames retain GPU geometry and send only camera uniforms per redraw;
 ## standalone frames keep a CPU projection fallback for portable recording/tests.
 ## Backend resources and shaders remain entirely in luce-gpu.
@@ -33,6 +35,15 @@ struct Prepared:
     let flat_colors: Color[]
     var smooth_gpu: RetainedBatch
     var flat_gpu: RetainedBatch
+    # Retained, so its identity cannot be recycled while cached. Materials
+    # match by value: scene rebuilds create equal ones.
+    var geometry: interop.Interface[Geometry]? = none
+    var tint: Color = Color(1.0, 1.0, 1.0)
+    var lit: bool = false
+    var world: Matrix4 = Matrix4()
+    var lighting: u64 = 0
+    # Scene changes survived unused; data outlives one change (a hide/show).
+    var age: u32 = 0
 
 pub struct Renderer:
     var items: Item[]
@@ -43,10 +54,19 @@ pub struct Renderer:
     var prepared: Prepared[]
     var prepared_count: usize
     var prepared_epoch: u64
+    # Prepared data from before the last scene change, reusable by identity.
+    var spare: Prepared[]
+    var spare_count: usize
+    var lighting: u64
+    var reuses: u64
     var lights: Light[]
     var light_count: usize
     var flat: bool = false
     var wire_width: f64 = 0.0
+
+    ## Objects whose prepared data survived a scene change (tests, profiling).
+    pub func reused_count() -> i64:
+        return (i64)self.reuses
 
     ## Display state only: switching normals never invalidates geometry buffers.
     pub mutating func set_flat(value: bool):
@@ -63,6 +83,10 @@ pub struct Renderer:
     pub func init(static_scene: bool = false) -> !:
         self.items = try alloc Item[1024] in memory.heap
         self.prepared = try alloc Prepared[1024] in memory.heap
+        self.spare = try alloc Prepared[1024] in memory.heap
+        self.spare_count = 0
+        self.lighting = 0
+        self.reuses = 0
         self.lights = try alloc Light[1024] in memory.heap
         self.static_scene = static_scene
         self.prepared_count = 0
@@ -101,8 +125,10 @@ pub struct Renderer:
             return errors.failure[unit](failure.code, failure.message)
         if object.epoch() != version:
             return errors.failure[unit](errors.busy, "a scene changed during traversal")
-        if not self.static_scene or self.prepared_epoch != version:
+        if not self.static_scene:
             self.invalidate()
+        elif self.prepared_epoch != version:
+            self.retire()
             self.prepared_epoch = version
         self.light_count = 0
         for item in self.items[..<self.count]:
@@ -112,6 +138,7 @@ pub struct Renderer:
                     return errors.failure[unit](failure.code, failure.message)
                 self.lights[self.light_count] = Light(light.kind, light.color, light.intensity, direction)
                 self.light_count += 1
+        self.lighting = self.light_signature()
         var drawable: usize = 0
         for index in 0..<self.count:
             let item = &self.items[index]
@@ -192,7 +219,9 @@ pub struct Renderer:
         let lit = appearance.is_lit()
         self.reserve((usize)count) catch failure:
             return errors.failure[unit](failure.code, failure.message)
-        if drawable == self.prepared_count:
+        if drawable == self.prepared_count and self.reuse(item, geometry, tint, lit, drawable):
+            self.prepared_count += 1
+        elif drawable == self.prepared_count:
             let points = alloc Vector3[(usize)count] in memory.heap catch failure:
                 return errors.failure[unit](failure.code, failure.message)
             let colors = alloc Color[(usize)count] in memory.heap catch failure:
@@ -202,7 +231,7 @@ pub struct Renderer:
                 free(points) in memory.heap
                 free(colors) in memory.heap
                 return errors.failure[unit](failure.code, failure.message)
-            self.prepared[drawable] = Prepared(points, colors, flat_colors, RetainedBatch(), RetainedBatch())
+            self.prepared[drawable] = Prepared(points, colors, flat_colors, RetainedBatch(), RetainedBatch(), geometry.clone(), tint, lit, item.world, self.lighting)
             # On failure invalidate the partial cache before returning.
             self.prepared_count += 1
             let built = self.prepare(item, shape, tint, lit, vertices, &self.prepared[drawable])
@@ -309,6 +338,7 @@ pub struct Renderer:
         self.finish()
         self.invalidate()
         free(self.prepared) in memory.heap
+        free(self.spare) in memory.heap
         free(self.lights) in memory.heap
         free(self.items) in memory.heap
         if self.vertices.length > 0:
@@ -317,17 +347,70 @@ pub struct Renderer:
     ## Drop immutable draw data after a geometry/material mutation.
     pub mutating func invalidate():
         for cached in self.prepared[..<self.prepared_count]:
-            var smooth = cached.smooth_gpu
-            var flat = cached.flat_gpu
-            smooth.close()
-            flat.close()
-            free(cached.flat_colors) in memory.heap
-            free(cached.points) in memory.heap
-            free(cached.colors) in memory.heap
+            dispose(cached)
         self.prepared_count = 0
         self.prepared_epoch = 0
+        self.drop_spare()
+
+    ## After a scene change, keep prepared data aside for reuse by identity.
+    ## Data unused across two changes is freed.
+    mutating func retire():
+        var kept: usize = 0
+        for index in 0..<self.spare_count:
+            var cached = self.spare[index]
+            cached.age += 1
+            if cached.age >= 2:
+                dispose(cached)
+            else:
+                self.spare[kept] = cached
+                kept += 1
+        self.spare_count = kept
+        for cached in self.prepared[..<self.prepared_count]:
+            if self.spare_count == self.spare.length:
+                dispose(cached)
+                continue
+            var entry = cached
+            entry.age = 0
+            self.spare[self.spare_count] = entry
+            self.spare_count += 1
+        self.prepared_count = 0
+
+    ## Adopt a spare entry drawn from the same geometry object with an equal
+    ## material under the same world transform and lights.
+    mutating func reuse(item: const Item*, geometry: interop.Interface[Geometry], tint: Color, lit: bool, drawable: usize) -> bool:
+        for index in 0..<self.spare_count:
+            let cached = self.spare[index]
+            let shape = cached.geometry else continue
+            let same_tint = cached.tint.red == tint.red and cached.tint.green == tint.green and cached.tint.blue == tint.blue
+            if shape.owner != geometry.owner or not same_tint or cached.lit != lit or cached.lighting != self.lighting or not same_matrix(cached.world, item.world):
+                continue
+            self.prepared[drawable] = cached
+            self.spare_count -= 1
+            self.spare[index] = self.spare[self.spare_count]
+            self.reuses += 1
+            return true
+        return false
+
+    mutating func drop_spare():
+        for cached in self.spare[..<self.spare_count]:
+            dispose(cached)
+        self.spare_count = 0
+
+    ## Prepared colors bake the lights in; a different set invalidates them.
+    func light_signature() -> u64:
+        var state: u64 = 0x9E3779B97F4A7C15
+        for light in self.lights[..<self.light_count]:
+            state = fold(state, (f64)(u8)light.kind)
+            state = fold(fold(fold(state, light.color.red), light.color.green), light.color.blue)
+            state = fold(state, light.intensity)
+            state = fold(fold(fold(state, light.direction.x), light.direction.y), light.direction.z)
+        return state
 
     func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
+        for cached in self.prepared[..<self.prepared_count]:
+            trace_prepared(cached, visit, context)
+        for cached in self.spare[..<self.spare_count]:
+            trace_prepared(cached, visit, context)
         for item in self.items[..<self.count]:
             item.object.trace(visit, context)
             item.node.trace(visit, context)
@@ -355,3 +438,24 @@ func clone_material(value: interop.Interface[Material]?) -> interop.Interface[Ma
     if let material = value:
         return material.clone()
     return none
+
+func dispose(cached: Prepared):
+    var smooth = cached.smooth_gpu
+    var flat = cached.flat_gpu
+    smooth.close()
+    flat.close()
+    free(cached.flat_colors) in memory.heap
+    free(cached.points) in memory.heap
+    free(cached.colors) in memory.heap
+    release_geometry(cached.geometry)
+
+func trace_prepared(cached: const Prepared, visit: func(ownership.Object*, void*) -> unit, context: void*):
+    if let geometry = cached.geometry:
+        geometry.trace(visit, context)
+
+func same_matrix(a: Matrix4, b: Matrix4) -> bool:
+    return a.x == b.x and a.y == b.y and a.z == b.z and a.translation == b.translation
+
+func fold(state: u64, value: f64) -> u64:
+    var bits = value
+    return (state ^ memory.read[u64](&bits)) *% 0x100000001B3
