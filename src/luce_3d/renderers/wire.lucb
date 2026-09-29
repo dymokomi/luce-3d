@@ -12,8 +12,9 @@ pub struct WireRenderer:
 
     ## Independent endpoint pairs; width is in target logical pixels, not world units.
     ## Any count is accepted; vertices are generated in bounded chunks.
+    ## `depth` false draws them over everything (a see-through pass).
     pub static func lines(points: const Vector3[], camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget],
-                          color: gpu.Color, width: f64 = 1.0, bias: f64 = 0.000001) -> !:
+                          color: gpu.Color, width: f64 = 1.0, bias: f64 = 0.000001, depth: bool = true) -> !:
         if points.length % 2 != 0 or not math.is_finite(width) or width <= 0.0 or width > 32.0:
             error(errors.invalid, "invalid wire segment count or pixel width")
         let native = try target.get()
@@ -26,7 +27,7 @@ pub struct WireRenderer:
         var start: usize = 0
         while start < points.length:
             let end = start + chunk if points.length - start > chunk else points.length
-            try segments(points[start..<end], projection, native, vertices, color, width, bias, size.width, size.height)
+            try segments(points[start..<end], projection, native, vertices, color, width, bias, size.width, size.height, depth)
             start = end
 
     ## Selection fills share the scene depth buffer, unlike 2D Painter triangles.
@@ -52,7 +53,7 @@ pub struct WireRenderer:
 let chunk: usize = 131070
 
 func segments(points: const Vector3[], projection: Projection, native: const gpu.RenderTarget*, vertices: gpu.Vertex[],
-              color: gpu.Color, width: f64, bias: f64, target_width: f64, target_height: f64) -> !:
+              color: gpu.Color, width: f64, bias: f64, target_width: f64, target_height: f64, depth: bool) -> !:
     var count: usize = 0
     var index: usize = 0
     while index < points.length:
@@ -88,7 +89,7 @@ func segments(points: const Vector3[], projection: Projection, native: const gpu
             vertices[count] = vertex
             count += 1
     if count > 0:
-        try native.triangles(vertices[..<count], true)
+        try native.triangles(vertices[..<count], depth)
 
 func projected(point: Vector3, projection: Projection, color: gpu.Color, bias: f64) -> gpu.Vertex:
     let relative = point.subtract(projection.position)

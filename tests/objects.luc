@@ -65,6 +65,10 @@ func edit_overlays(target: gpu.RenderTarget) -> unit!:
     overlay.update(cube, 2, [0, 5], -1)
     assert(overlay.selection_builds() == builds + 1 and overlay.selected_triangles() == 4)
     overlay.draw(camera, target, grey, accent, grey)
+    # A see-through pass (pick geometry inside a surface, such as SDF
+    # proxies) draws the selection over everything first, rebuilding nothing.
+    overlay.draw(camera, target, grey, accent, grey, hidden = grey)
+    assert(overlay.selection_builds() == builds + 1)
     overlay.update(cube, 1, [0, 1], 3)
     assert(overlay.accent_segments() == 2 and overlay.selected_triangles() == 0)
     overlay.update(cube, 0, [2, 3, 6, 7], -1)

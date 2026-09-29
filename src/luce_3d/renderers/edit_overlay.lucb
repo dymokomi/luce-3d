@@ -121,14 +121,20 @@ pub struct EditOverlay:
 
     ## `wires` false leaves the full wireframe to the renderer, which draws it
     ## from the mesh's GPU arrays (Renderer.set_edges).
+    ## `hidden`, when given, first draws the selection's lines over
+    ## everything in that color, so a selection behind or inside a surface
+    ## (a pick mesh the viewport does not draw, such as SDF proxies) still
+    ## shows; the visible parts then draw in `accent` over it.
     pub mutating func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget],
-                           wire: gpu.Color, accent: gpu.Color, point: gpu.Color, wires: bool = true) -> !:
+                           wire: gpu.Color, accent: gpu.Color, point: gpu.Color, wires: bool = true, hidden: gpu.Color? = none) -> !:
         let current = self.mesh else return
         let mesh = try current.get()
         let native = try target.get()
         let size = try native.size()
         if size.width <= 0.0 or size.height <= 0.0: return
         if wires: try self.draw_wires(mesh, camera, target, wire)
+        if let dim = hidden:
+            if self.accent.count > 0: try WireRenderer.lines(self.accent.view(), camera, target, dim, 1.5, 0.000001, false)
         if self.faces.count > 0:
             try WireRenderer.triangles(self.faces.view(), camera, target, accent)
         if self.accent.count > 0:
