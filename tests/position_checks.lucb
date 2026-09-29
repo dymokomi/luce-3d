@@ -67,6 +67,7 @@ pub func exercise() -> !:
     let again = try moved.value().moved_points([3], Vector3(0.0, 0.0, -0.05))
     defer again.release()
     try same_triangles(again.value(), display)
+    assert(again.value().topology_hash() == moved.value().topology_hash())
     assert(math.abs(try again.value().surface_distance(Vector3(math.cos(3.0 * 300.0 / 7.0 * math.pi / 180.0), math.sin(3.0 * 300.0 / 7.0 * math.pi / 180.0), 0.0))) < 1e-9)
     let placed = try moved.value().placed(Matrix4.compose(Vector3(1.0, 2.0, 3.0), Vector3(0.1, 0.2, 0.3), Vector3(2.0, 2.0, 2.0)))
     defer placed.release()
