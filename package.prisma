@@ -11,6 +11,12 @@ def package "luce-3d" {
         str module = "luce_3d.graphics"
     }
 
+    def dependency "luce-geocore" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../luce-geocore"
+    }
+
     def dependency "luce-std" {
         str owner = "dymokomi"
         str version = "^0.1.0"

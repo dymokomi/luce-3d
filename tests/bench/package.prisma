@@ -4,6 +4,11 @@ def package "luce_3d_bench" {
     def dependency "luce_3d" {
         str path = "../.."
     }
+    def dependency "luce-geocore" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../../../luce-geocore"
+    }
     def dependency "luce-gpu" {
         str owner = "dymokomi"
         str version = "^0.1.0"

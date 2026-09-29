@@ -4,7 +4,7 @@ import interop
 import math
 import memory
 import luce_3d.errors as errors
-from luce_3d.math.vector import Vector3
+from geocore import Vector3
 from luce_3d.cameras.perspective import PerspectiveCamera, Projection
 
 pub struct WireRenderer:

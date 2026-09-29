@@ -1,11 +1,16 @@
-import luce_3d.math.vector as vector
-import luce_3d.math.matrix as matrix
-import luce_3d.core.geometry as geometry
+## The three export: scenes, objects, materials, cameras, lights and the
+## renderer. Geometry comes from luce-geocore; its vectors, matrices and the
+## Geometry interface are re-exported, since scene code names them throughout.
+import geocore
+pub type Vector3 = geocore.Vector3
+pub type Matrix4 = geocore.Matrix4
+pub type Geometry = geocore.Geometry
+pub type Vertex = geocore.Vertex
+pub type Bounds = geocore.Bounds
 import luce_3d.core.material as material
 import luce_3d.geometries.buffer as buffer
 import luce_3d.geometries.sphere as sphere
 import luce_3d.geometries.box as box
-import luce_3d.geometries.polygon as polygon
 import luce_3d.materials.lambert as lambert
 import luce_3d.materials.basic as basic
 import luce_3d.errors as errors
@@ -18,39 +23,12 @@ import luce_3d.renderers.edit_overlay as edit_overlay
 pub type EditOverlay = edit_overlay.EditOverlay
 pub let edit_overlay_type = edit_overlay.edit_overlay_type
 
-pub type Vector3 = vector.Vector3
-pub type Matrix4 = matrix.Matrix4
-pub type Geometry = geometry.Geometry
-pub type Vertex = geometry.Vertex
-pub type Bounds = geometry.Bounds
 pub type Material = material.Material
 pub type Color = material.Color
 pub type BufferGeometry = buffer.BufferGeometry
 pub type SphereGeometry = sphere.SphereGeometry
 pub type BoxGeometry = box.BoxGeometry
 pub let box_geometry_type = box.box_geometry_type
-pub type PolygonMesh = polygon.PolygonMesh
-import luce_3d.core.polygon_topology as polygon_topology
-pub type PolygonTopology = polygon_topology.PolygonTopology
-pub let polygon_mesh_type = polygon.polygon_mesh_type
-pub let detached_mesh = polygon.detached_mesh
-import luce_3d.geometries.builder as builder
-pub type MeshBuilder = builder.MeshBuilder
-import luce_3d.geometries.operators as operators
-pub type MeshOps = operators.MeshOps
-import luce_3d.geometries.normals as normals
-pub type MeshNormals = normals.MeshNormals
-import luce_3d.geometries.distance as distance
-## Squared Euclidean distance to a triangle, including degenerate triangles.
-pub let squared_triangle_distance = distance.triangle_distance
-import luce_3d.geometries.overlays as overlays
-pub let mesh_overlay_points = overlays.mesh_overlay_points
-import luce_3d.geometries.primitives as primitives
-pub type MeshPrimitives = primitives.MeshPrimitives
-import luce_3d.geometries.topology_tools as topology_tools
-pub type TopologyTools = topology_tools.TopologyTools
-import luce_3d.geometries.dissolve_workspace as dissolve_workspace
-pub type DissolveWorkspace = dissolve_workspace.DissolveWorkspace
 pub type MeshLambertMaterial = lambert.MeshLambertMaterial
 pub type MeshBasicMaterial = basic.MeshBasicMaterial
 pub let invalid: ErrorCode = errors.invalid

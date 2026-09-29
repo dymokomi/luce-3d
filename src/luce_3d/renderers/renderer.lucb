@@ -12,10 +12,8 @@ import ownership
 import luce_3d.core.object as object
 import luce_3d.errors as errors
 from luce_3d.core.object import Object3D, ObjectNode, Light, LightKind
-from luce_3d.core.geometry import Geometry
+from geocore import Geometry, Vector3, Matrix4
 from luce_3d.core.material import Material, Color, check_color
-from luce_3d.math.vector import Vector3
-from luce_3d.math.matrix import Matrix4
 from luce_3d.cameras.perspective import PerspectiveCamera, Projection
 from luce_3d.renderers.projection import projection_matrix
 from luce_3d.renderers.retained import RetainedBatch

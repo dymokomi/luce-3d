@@ -1,8 +1,7 @@
 ## A hard-edged box, centred at the origin, with independent UVs per face.
 import interop
 import luce_3d.errors as errors
-from luce_3d.core.geometry import Geometry, Vertex, Bounds
-from luce_3d.math.vector import Vector3
+from geocore import Geometry, Vertex, Bounds, Vector3
 
 pub struct BoxGeometry: Geometry:
     let half: Vector3

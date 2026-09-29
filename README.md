@@ -1,9 +1,11 @@
 # Luce 3D
 
-A Luce Base library for scenes, geometry, materials, cameras and rendering through
-standard `gpu`. The public names follow the shape of Three.js. It has no UI
-dependency: an application's view hands the renderer a render target. All
-platform resources belong to the standard library.
+A Luce Base library for scenes, materials, cameras and rendering through
+standard `gpu`, drawing the geometry of
+[luce-geocore](https://github.com/dymokomi/luce-geocore). The public names
+follow the shape of Three.js. It has no UI dependency: an application's view
+hands the renderer a render target. All platform resources belong to the
+standard library.
 
 ```luce
 from three import Scene, Mesh, SphereGeometry, MeshLambertMaterial, Color, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer

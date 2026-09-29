@@ -1,7 +1,8 @@
 # Design and ownership
 
-`math` owns vectors and affine matrices; `core` defines geometry, material and
-scene interfaces. `geometries` owns buffers and sphere construction, `objects`
+Vectors, matrices, the `Geometry` interface and polygon meshes come from
+luce-geocore. `core` defines material and scene interfaces, `geometries` owns
+buffer, box and sphere construction, `objects`
 owns meshes and groups, `scenes` owns roots, `lights` owns illumination values,
 `cameras` owns lens/view calculations, and `renderers` owns traversal and reusable
 command storage. The package contains no window, UI, native framework or

@@ -6,7 +6,8 @@ import interop
 import memory
 import time
 import three
-from three import Vector3, PolygonMesh, Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer
+from geocore import PolygonMesh
+from three import Vector3, Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer
 from fixtures import since
 
 pub struct Viewport:

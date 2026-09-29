@@ -6,7 +6,8 @@ import time
 import interop
 import gpu
 import three
-from three import Vector3, PolygonMesh, polygon_mesh_type, detached_mesh, EditOverlay
+from geocore import Vector3, PolygonMesh, polygon_mesh_type, detached_mesh
+from three import EditOverlay
 from fixtures import Counter, GridArrays, make_mesh, chosen_faces, face_points, since, report, report_bytes, side
 from display import Viewport
 

@@ -1,9 +1,13 @@
 import interop
 import memory
 
-pub let invalid: ErrorCode = ErrorCode.package(300)
-pub let busy: ErrorCode = ErrorCode.package(301)
-pub let limit: ErrorCode = ErrorCode.package(302)
+import geocore
+
+## One identity with luce-geocore's codes, so a failure reads the same whether
+## a mesh kernel or the renderer raised it.
+pub let invalid: ErrorCode = geocore.invalid
+pub let busy: ErrorCode = geocore.busy
+pub let limit: ErrorCode = geocore.limit
 
 pub func success[T](value: T) -> interop.Outcome[T]:
     return interop.Outcome[T].success(interop.Owned[T](value))

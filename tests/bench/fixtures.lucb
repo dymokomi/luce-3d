@@ -5,8 +5,7 @@ import math
 import memory
 import time
 import interop
-import three
-from three import Vector3, PolygonMesh, polygon_mesh_type
+from geocore import Vector3, PolygonMesh, polygon_mesh_type
 
 ## Grid side in quads: 702,244 points, 700,569 faces, 2,802,276 corners.
 pub let side: usize = 837

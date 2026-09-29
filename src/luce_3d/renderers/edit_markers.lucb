@@ -3,7 +3,7 @@
 import gpu
 import math
 from luce_3d.cameras.perspective import Projection
-from luce_3d.renderers.growing import Growing
+from geocore_growing import Growing
 from luce_3d.renderers.edit_screen import Screen
 
 let cell: f64 = 6.0

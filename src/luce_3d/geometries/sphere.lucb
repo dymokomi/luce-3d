@@ -4,9 +4,8 @@ import math
 import memory
 import ownership
 import luce_3d.errors as errors
-from luce_3d.core.geometry import Geometry, Vertex, Bounds
+from geocore import Geometry, Vertex, Bounds, Vector3
 from luce_3d.geometries.buffer import BufferGeometry, buffer_geometry_type
-from luce_3d.math.vector import Vector3
 
 pub struct SphereGeometry: Geometry:
     let buffer: interop.Reference[BufferGeometry]

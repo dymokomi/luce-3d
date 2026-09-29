@@ -2,7 +2,7 @@
 import gpu
 import interop
 import memory
-from luce_3d.math.vector import Vector3
+from geocore import Vector3
 from luce_3d.cameras.perspective import PerspectiveCamera
 from luce_3d.renderers.wire import WireRenderer
 from luce_3d.renderers.projection import projection_matrix

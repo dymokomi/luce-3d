@@ -1,4 +1,5 @@
-from three import PolygonMesh, EditOverlay, Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
+from geocore import PolygonMesh
+from three import EditOverlay, Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
 from gpu import Frame
 import gpu
 import window

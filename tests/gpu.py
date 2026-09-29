@@ -21,7 +21,7 @@ with tempfile.TemporaryDirectory(prefix="luce-3d-gpu-") as temporary:
     project = Path(temporary)
     shutil.copy2(ROOT / "tests/gpu_pixels_main.lucb", project / "main.lucb")
     shutil.copy2(args.gpu_source / "tests/programs/gpu/native.lucb", project / "native.lucb")
-    dependencies = ''.join(f'    def dependency "{name}" {{\n        str path = {json.dumps((ROOT if name == "luce-3d" else ROOT.parent / name).as_posix())}\n    }}\n' for name in ('luce-3d', 'luce-std', 'luce-gpu', 'luce-window'))
+    dependencies = ''.join(f'    def dependency "{name}" {{\n        str path = {json.dumps((ROOT if name == "luce-3d" else ROOT.parent / name).as_posix())}\n    }}\n' for name in ('luce-3d', 'luce-geocore', 'luce-std', 'luce-gpu', 'luce-window'))
     (project / "package.prisma").write_text('#prisma 4.0\ndef package "three-pixels" {\n    str source = "."\n' + dependencies + '}\n')
     for flags in modes:
         binary = project / "pixels"

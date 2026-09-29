@@ -1,10 +1,9 @@
 ## Screen projection for Edit overlays: every point once per camera, for the
 ## point markers, and single points for picking.
 import math
-from luce_3d.math.vector import Vector3
-from luce_3d.geometries.polygon import PolygonMesh
+from geocore import Vector3, PolygonMesh
 from luce_3d.cameras.perspective import Projection
-from luce_3d.renderers.growing import Growing
+from geocore_growing import Growing
 
 ## Picking radius in logical pixels.
 let reach: f64 = 11.0

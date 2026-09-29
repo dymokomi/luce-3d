@@ -8,8 +8,7 @@ import math
 import memory
 import ownership
 import luce_3d.errors as errors
-from luce_3d.math.vector import Vector3
-from luce_3d.geometries.polygon import PolygonMesh
+from geocore import Vector3, PolygonMesh
 from luce_3d.cameras.perspective import PerspectiveCamera, Projection
 from luce_3d.renderers.wire import WireRenderer
 from luce_3d.renderers.projection import projection_matrix
@@ -17,7 +16,7 @@ from luce_3d.renderers.retained import RetainedBatch
 from luce_3d.renderers.edit_markers import Markers
 from luce_3d.renderers.edit_screen import Screen
 import luce_3d.renderers.edit_screen as screens
-from luce_3d.renderers.growing import Growing, same_ids
+from geocore_growing import Growing, same_ids
 
 ## Component modes: 0 points, 1 edges, 2 faces.
 pub struct EditOverlay:

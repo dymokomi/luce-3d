@@ -3,9 +3,8 @@ import ownership
 import luce_3d.errors as errors
 import luce_3d.core.object as object
 from luce_3d.core.object import Object3D, ObjectNode, Light, LightKind
-from luce_3d.core.geometry import Geometry
+from geocore import Geometry, Vector3
 from luce_3d.core.material import Material, Color, check_color
-from luce_3d.math.vector import Vector3
 
 pub struct Scene: Object3D:
     let transform: interop.Reference[ObjectNode]

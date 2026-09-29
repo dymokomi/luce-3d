@@ -4,9 +4,7 @@ import memory
 import ownership
 import thread
 import luce_3d.errors as errors
-from luce_3d.math.vector import Vector3
-from luce_3d.math.matrix import Matrix4
-from luce_3d.core.geometry import Geometry
+from geocore import Vector3, Matrix4, Geometry
 from luce_3d.core.material import Material, Color
 
 pub enum LightKind as u8:

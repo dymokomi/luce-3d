@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix="luce-3d-docs-") as temporary:
     project = Path(temporary)
     dependencies = ''.join(f'    def dependency "{name}" {{\n        str path = {json.dumps((ROOT if name == "luce-3d" else ROOT.parent / name).as_posix())}\n    }}\n'
-                           for name in ('luce-3d', 'luce-std', 'luce-window', 'luce-gpu'))
+                           for name in ('luce-3d', 'luce-geocore', 'luce-std', 'luce-window', 'luce-gpu'))
     (project / "package.prisma").write_text('#prisma 4.0\ndef package "documentation" {\n    str source = "."\n' + dependencies + '}\n')
     examples = re.findall(r'```luce\n(.*?)```', (ROOT / 'README.md').read_text(), re.S)
     assert examples, 'missing documented example'

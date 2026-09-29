@@ -2,8 +2,7 @@ import interop
 import math
 import memory
 import luce_3d.errors as errors
-from luce_3d.core.geometry import Geometry, Vertex, Bounds
-from luce_3d.math.vector import Vector3
+from geocore import Geometry, Vertex, Bounds, Vector3
 
 ## Indexed triangles with owned copies of positions, normals, UVs and indices.
 ## Validate all inputs before publishing the immutable geometry.
