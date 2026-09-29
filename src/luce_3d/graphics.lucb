@@ -62,6 +62,10 @@ pub let group_type = group.group_type
 import luce_3d.objects.mesh as mesh
 pub type Mesh = mesh.Mesh
 pub let mesh_type = mesh.mesh_type
+import luce_3d.objects.surface_hits as surface_hits
+## Where a view ray meets the scene's surfaces, or a construction plane.
+pub type SurfaceHits = surface_hits.SurfaceHits
+pub type SurfaceHit = surface_hits.SurfaceHit
 import luce_3d.lights.ambient as ambient
 pub type AmbientLight = ambient.AmbientLight
 pub let ambient_type = ambient.ambient_type

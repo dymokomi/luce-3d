@@ -1,0 +1,87 @@
+## Where a view ray meets the scene: the nearest face of any visible
+## polygon object under a root (each placed by its parents' transforms, hit
+## through its BVH), or a construction plane. Editors place things on
+## surfaces with it: a sketch plane from a face, PolyDraw's corners.
+import interop
+import math
+import luce_3d.errors as errors
+from luce_3d.core.object import Object3D
+from geocore import Vector3, Matrix4, Mesh
+
+pub struct SurfaceHit:
+    pub let found: bool = false
+    pub let point: Vector3 = Vector3()
+    ## The face's unit normal in world space (its winding's side).
+    pub let normal: Vector3 = Vector3(0.0, 1.0, 0.0)
+    pub let distance: f64 = -1.0
+
+pub struct SurfaceHits:
+    let reserved: u8 = 0
+
+    ## The nearest visible face under `root` along the ray from `origin`
+    ## in `direction`.
+    pub static func cast(root: interop.Interface[Object3D], origin: Vector3, direction: Vector3) -> SurfaceHit!:
+        let ray = direction.normalized() catch failure: error(errors.invalid, "a view ray needs a direction")
+        if not origin.is_finite(): error(errors.invalid, "a view ray needs a finite origin")
+        var best = SurfaceHit()
+        try visit(root, Matrix4(), true, 0, origin, ray, &best)
+        return best
+
+    ## Where the ray meets the plane through `point` facing `normal` (not
+    ## behind the origin), or not found.
+    pub static func plane(origin: Vector3, direction: Vector3, point: Vector3, normal: Vector3) -> SurfaceHit!:
+        let ray = direction.normalized() catch failure: error(errors.invalid, "a view ray needs a direction")
+        let facing = normal.normalized() catch failure: error(errors.invalid, "a plane needs a normal")
+        let along = ray.dot(facing)
+        if math.abs(along) < 1.0e-9: return SurfaceHit()
+        let t = point.subtract(origin).dot(facing) / along
+        if not (t >= 0.0): return SurfaceHit()
+        return SurfaceHit(true, origin.add(ray.multiply_scalar(t)), facing, t)
+
+func visit(source: interop.Interface[Object3D], parent: Matrix4, visible: bool, depth: usize, origin: Vector3, direction: Vector3, best: SurfaceHit*) -> !:
+    if depth >= 64: error(errors.limit, "a scene nests more than 64 levels")
+    try source.enter()
+    defer source.leave()
+    let native = source.value()
+    let node = native.node()
+    defer node.release()
+    let state = try node.get()
+    let world = parent.multiply(state.matrix())
+    let shown = visible and state.is_visible()
+    if shown:
+        if let polygon = native.polygon():
+            defer polygon.release()
+            try hit_mesh(polygon.value(), world, origin, direction, best)
+    let length = state.child_count()
+    var index: i64 = 0
+    while index < length:
+        let child = try state.child(index)
+        defer child.release()
+        try visit(child, world, shown, depth + 1, origin, direction, best)
+        index += 1
+
+## The ray against one mesh placed by `world`: in its own frame, then back.
+func hit_mesh(mesh: const Mesh*, world: Matrix4, origin: Vector3, direction: Vector3, best: SurfaceHit*) -> !:
+    if mesh.face_count() == 0: return
+    let inverse = inverse_of(world) else return
+    let local_origin = inverse.transform_point(origin)
+    let local_direction = inverse.transform_direction(direction).normalized() catch failure: return
+    let face = try mesh.ray_face(local_origin, local_direction)
+    if face < 0: return
+    let t = try mesh.ray_distance(local_origin, local_direction)
+    let point = world.transform_point(local_origin.add(local_direction.multiply_scalar(t)))
+    let distance = point.subtract(origin).length()
+    if best.found and distance >= best.distance: return
+    let normal = world.transform_normal(try mesh.face_normal(face)) catch failure: return
+    *best = SurfaceHit(true, point, normal, distance)
+
+## The inverse of an affine matrix, or none when singular.
+func inverse_of(matrix: Matrix4) -> Matrix4?:
+    let determinant = matrix.determinant()
+    if not math.is_finite(determinant) or math.abs(determinant) < 1.0e-300: return none
+    let a = matrix.y.cross(matrix.z).multiply_scalar(1.0 / determinant)
+    let b = matrix.z.cross(matrix.x).multiply_scalar(1.0 / determinant)
+    let c = matrix.x.cross(matrix.y).multiply_scalar(1.0 / determinant)
+    let linear = Matrix4(Vector3(a.x, b.x, c.x), Vector3(a.y, b.y, c.y), Vector3(a.z, b.z, c.z), Vector3())
+    let t = linear.transform_direction(matrix.translation)
+    return Matrix4(linear.x, linear.y, linear.z, Vector3(-t.x, -t.y, -t.z))
