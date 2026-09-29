@@ -129,9 +129,10 @@ pub struct Renderer:
 
     ## The face of `mesh` under (x, y) in a `width` x `height` view through
     ## `camera`, as the last frame placed it, or -1: an id pass on the GPU,
-    ## reused until the mesh, its placement or the view changes. Fails
-    ## `unavailable` before a frame has drawn on a device (callers fall back to
-    ## a CPU ray).
+    ## reused until the mesh, its placement or the view changes. -2 when the
+    ## last frame did not draw `mesh`'s points (a pick mesh of its own), and
+    ## fails `unavailable` before a frame has drawn on a device: callers fall
+    ## back to a CPU ray.
     pub mutating func pick_face(mesh: interop.Reference[geocore.Mesh], camera: interop.Reference[PerspectiveCamera], x: f64, y: f64, width: f64, height: f64) -> i64!:
         if not self.arrays.has_device(): error(gpu.unavailable, "no frame has drawn on a GPU device")
         if not (width >= 1.0 and height >= 1.0 and width <= 16384.0 and height <= 16384.0): return -1
@@ -139,7 +140,7 @@ pub struct Renderer:
         var found: Matrix4? = none
         for placement in self.placements.view():
             if placement.points == geometry.points_id(): found = placement.world
-        let world = found else return -1
+        let world = found else return -2
         let projection = try camera.value().projection(width / height)
         # A subdivided cage is picked on the surface shown: the display's
         # faces, answered as the cage faces they came from.
