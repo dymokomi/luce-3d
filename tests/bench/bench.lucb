@@ -6,6 +6,7 @@ import time
 import interop
 import gpu
 import three
+import geocore_parallel
 from geocore import Vector3, PolygonMesh, polygon_mesh_type, detached_mesh
 from three import EditOverlay
 from fixtures import Counter, GridArrays, make_mesh, chosen_faces, face_points, since, report, report_bytes, side
@@ -17,6 +18,8 @@ func restore(previous: memory.Allocator):
 pub func main(arguments: str[]) -> i32!:
     var grid = try GridArrays()
     defer grid.close()
+    # Start the pool first: its starting threads free blocks in the current heap.
+    geocore_parallel.warm()
     let previous = memory.heap
     var counter = Counter(previous)
     memory.heap = &counter
@@ -28,7 +31,7 @@ pub func main(arguments: str[]) -> i32!:
     report("construct", since(start))
     report_bytes("mesh core", counter.live)
     let m = mesh.value()
-    print(f"# grid: {m.point_count()} points, {m.face_count()} faces, {m.vertex_count()} corners, {m.edge_count()} edges, {m.index_count() // 3} triangles")
+    print(f"# grid: {m.point_count()} points, {m.face_count()} faces, {m.vertex_count()} corners, {(try m.edge_count())} edges, {m.index_count() // 3} triangles")
     try baselines(&grid)
     try attributes(mesh, &counter)
     let faces = try chosen_faces()

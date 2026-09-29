@@ -75,7 +75,7 @@ func edit_overlays(target: gpu.RenderTarget) -> unit!:
     let hidden = screen(camera, cube.point(0))
     assert(overlay.pick(camera, hidden[0], hidden[1], 200.0, 160.0) != 0)
     var top_edge = -1
-    for edge in 0..<cube.edge_count():
+    for edge in 0..<(try cube.edge_count()):
         let a = cube.edge_point(edge, 0)
         let b = cube.edge_point(edge, 1)
         if (a == 6 and b == 7) or (a == 7 and b == 6):

@@ -117,7 +117,7 @@ pub struct EditOverlay:
         for id in selection:
             var size: i64 = 0
             if mode == 0 and id >= 0 and id < geometry.point_count(): size = 1
-            elif mode == 1 and id >= 0 and id < geometry.edge_count(): size = 2
+            elif mode == 1 and id >= 0 and id < (try geometry.edge_count()): size = 2
             elif mode == 2 and id >= 0 and id < geometry.face_count(): size = try geometry.face_size(id)
             for at in 0..<size:
                 var point = id
@@ -153,7 +153,7 @@ pub struct EditOverlay:
             if failure.code != gpu.unavailable: error(failure.code, failure.message)
             recover gpu.Device()
         defer device.destroy()
-        let edges = (usize)mesh.edge_count()
+        let edges = (usize)(try mesh.edge_count())
         if edges == 0: return
         if device.is_open():
             if not self.wires.is_open():
@@ -204,7 +204,7 @@ pub struct EditOverlay:
         self.selected.clear()
         for id in self.selection.view():
             if self.mode == 1:
-                if id < 0 or id >= mesh.edge_count(): continue
+                if id < 0 or id >= (try mesh.edge_count()): continue
                 try self.accent.push(try mesh.point(try mesh.edge_point(id, 0)))
                 try self.accent.push(try mesh.point(try mesh.edge_point(id, 1)))
                 continue
@@ -224,7 +224,7 @@ pub struct EditOverlay:
     mutating func adjacency(mesh: const PolygonMesh*) -> !:
         if self.edge_starts.count > 0: return
         let points = (usize)mesh.point_count()
-        let edges = mesh.edge_count()
+        let edges = (try mesh.edge_count())
         try self.edge_starts.fill(points + 1, 0)
         for edge in 0..<edges:
             self.edge_starts.items[(usize)(try mesh.edge_point(edge, 0)) + 1] += 1
@@ -245,7 +245,7 @@ pub struct EditOverlay:
         self.hover.clear()
         let id = self.hovered
         if id < 0: return
-        if self.mode == 1 and id < mesh.edge_count():
+        if self.mode == 1 and id < (try mesh.edge_count()):
             try self.hover.push(try mesh.point(try mesh.edge_point(id, 0)))
             try self.hover.push(try mesh.point(try mesh.edge_point(id, 1)))
         if self.mode == 2 and id < mesh.face_count():

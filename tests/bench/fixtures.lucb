@@ -5,30 +5,39 @@ import math
 import memory
 import time
 import interop
+import sync
 from geocore import Vector3, PolygonMesh, polygon_mesh_type
 
 ## Grid side in quads: 702,244 points, 700,569 faces, 2,802,276 corners.
 pub let side: usize = 837
 
 ## Live heap bytes of everything allocated while it is `memory.heap`.
+## Geometry kernels allocate on pool workers too, so it takes a lock.
 pub struct Counter: memory.Allocator:
     pub var upstream: memory.Allocator
     pub var live: usize = 0
     pub var peak: usize = 0
+    var lock: sync.Mutex = sync.Mutex()
 
     pub mutating func allocate(size: usize, alignment: usize) -> u8[]?:
         let block = self.upstream.allocate(size, alignment) else return none
+        self.lock.lock()
+        defer self.lock.unlock()
         self.live += block.length
         if self.live > self.peak: self.peak = self.live
         return block
 
     pub mutating func resize(block: u8[], size: usize) -> bool:
         if not self.upstream.resize(block, size): return false
+        self.lock.lock()
+        defer self.lock.unlock()
         self.live = self.live - block.length + size
         return true
 
     pub mutating func release(block: u8[]):
+        self.lock.lock()
         self.live -= block.length
+        self.lock.unlock()
         self.upstream.release(block)
 
 ## Milliseconds since `start` (a time.now() reading).

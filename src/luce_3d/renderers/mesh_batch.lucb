@@ -72,7 +72,7 @@ pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh:
             try gpu.draw_mesh(target, &buffers, count * 3, block, gpu.MeshKind.surface, slope_bias)
             first += count
             part += 1
-    if wire_width > 0.0 and mesh.edge_count() > 0:
+    if wire_width > 0.0 and (try mesh.edge_count()) > 0:
         var wires = gpu.MeshBuffers()
         wires.positions = buffers.positions
         wires.triangles = try edges(arrays, mesh)
@@ -82,7 +82,7 @@ pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh:
         line[gpu.mesh_tint + 2] = (f32)wire_color.blue
         line[gpu.mesh_line] = (f32)wire_width
         line[gpu.mesh_line + 3] = 0.000001
-        try gpu.draw_mesh(target, &wires, (usize)mesh.edge_count() * 6, line, gpu.MeshKind.wires)
+        try gpu.draw_mesh(target, &wires, (usize)(try mesh.edge_count()) * 6, line, gpu.MeshKind.wires)
 
 ## Face ids of `mesh` from `base` + 1, into an rgba8_linear target (picking).
 pub func draw_polygon_ids(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh: const PolygonMesh*, world: Matrix4, projection: Projection, base: u32) -> !:
@@ -108,7 +108,11 @@ pub func draw_polygon_ids(arrays: GpuArrays*, target: const gpu.RenderTarget*, m
 func parameters(mesh: const PolygonMesh*, world: Matrix4, projection: Projection, lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*) -> f32[120]:
     var block: f32[120]
     let view = projection_matrix(projection)
-    let columns: Vector3[4] = [world.x, world.y, world.z, world.translation]
+    # Positions are f32 offsets from the mesh's f64 origin; the origin joins
+    # the placement here, in f64.
+    let origin = native.origin(mesh)
+    let placed = world.translation.add(world.x.multiply_scalar(origin.x)).add(world.y.multiply_scalar(origin.y)).add(world.z.multiply_scalar(origin.z))
+    let columns: Vector3[4] = [world.x, world.y, world.z, placed]
     for column in 0..<(usize)4:
         let c = columns[column]
         let w = 1.0 if column == 3 else 0.0
@@ -199,7 +203,7 @@ func triangle_faces(arrays: GpuArrays*, mesh: const PolygonMesh*, first: usize, 
 func edges(arrays: GpuArrays*, mesh: const PolygonMesh*) -> gpu.Buffer!:
     let key = ArrayKey(mesh.edges_id(), tag_edges, 0)
     if let found = arrays.find(key): return found
-    let bytes = try arrays.staging((usize)mesh.edge_count() * 8)
+    let bytes = try arrays.staging((usize)(try mesh.edge_count()) * 8)
     try native.pack_edges(mesh, as_u32(bytes))
     return try arrays.store(key, bytes)
 
