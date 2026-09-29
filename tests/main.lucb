@@ -8,6 +8,7 @@ import three
 import polygon_checks
 import scale_checks
 import display_checks
+import position_checks
 import distance_checks
 import partition_checks
 import query_checks
@@ -266,6 +267,15 @@ pub func main(arguments: str[]) -> i32!:
         discard(ownership.finish_run(0))
         assert(tracker.live == 0)
     try display_checks.exercise()
+    for stage in 0..<128:
+        tracker.remaining = (usize)stage
+        position_checks.exercise() catch failure:
+            assert(failure.code == memory.exhausted)
+        tracker.remaining = none
+        ownership.collect()
+        discard(ownership.finish_run(0))
+        assert(tracker.live == 0)
+    try position_checks.exercise()
     ownership.collect()
     discard(ownership.finish_run(0))
     assert(tracker.live == 0)

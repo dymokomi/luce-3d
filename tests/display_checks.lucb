@@ -83,14 +83,11 @@ pub func exercise() -> !:
     var reversed_indices: i64[9]
     for at in 0..<reversed_indices.length: reversed_indices[at] = 4-display[at//3*3+2-at%3]
     try indices(reversed.value(),reversed_indices)
-    # Arbitrary modeling edits invalidate supplied display data and use the
-    # ordinary polygon triangulator again; affine placement is explicit above.
+    # Position-only edits keep supplied display data while no triangle folds;
+    # topology-changing edits above re-triangulate their new faces.
     let moved = try mesh.value().moved_points([1],Vector3(0.0,0.0,0.1))
     defer moved.release()
-    let changed = [points[0],points[1].add(Vector3(0.0,0.0,0.1)),points[2],points[3],points[4]]
-    var ordinary = try PolygonMesh(changed,[5],corners)
-    defer ordinary.close()
-    for at in 0..<ordinary.index_count(): assert((try index(moved.value(),at)) == (try index(&ordinary,at)))
+    try indices(moved.value(),display)
     # Rewinding a failed builder face must not reuse that face's old triangles.
     var builder = try MeshBuilder()
     defer builder.close()

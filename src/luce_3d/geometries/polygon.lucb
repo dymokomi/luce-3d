@@ -13,26 +13,32 @@ from luce_3d.geometries.query_cache import QueryCache
 from luce_3d.geometries.polygon_triangulation import triangulate, area_normal
 import luce_3d.geometries.display_triangulation as display_triangles
 from luce_3d.geometries.topology_hash import topology_hash
+import luce_3d.geometries.position_edit as positions
 
 pub struct PolygonMesh: Geometry, PolygonTopology:
-    let points: Vector3[]
+    var points: Vector3[]
     let sizes: i64[]
     let corners: i64[]
     let offsets: usize[]
     let corner_faces: usize[]
-    let normals: Vector3[]
-    let triangles: i64[]
+    var normals: Vector3[]
+    var triangles: i64[]
     let edge_a: i64[]
     let edge_b: i64[]
     let corner_edges: usize[]
     let edges: usize
-    let extent: Bounds
+    var extent: Bounds
     # Connectivity fingerprint, computed once; position-only copies keep it.
     let topology_key: u64
     var attributes: AttributeSet
     # Same-thread immutable snapshots share topology, never mutable attributes.
     # Worker transfer still takes an independent native copy.
-    let queries: QueryCache[]
+    var queries: QueryCache[]
+    # Position-only edits share the sizes/corners/edge arrays and, unless a face
+    # folded, the triangles. Each count is the number of query caches (point
+    # sets) using that storage; the last one frees it.
+    var topology_owners: usize[]
+    var triangle_owners: usize[]
 
     ## Optional display indices are grouped by polygon, 3*(size-2) entries each.
     ## A wholly -1 face requests ordinary triangulation. Explicit triangles are
@@ -144,7 +150,15 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         let queries = try alloc QueryCache[1] in memory.heap
         errdefer free(queries) in memory.heap
         queries[0] = QueryCache()
+        let topology_owners = try alloc usize[1] in memory.heap
+        errdefer free(topology_owners) in memory.heap
+        topology_owners[0] = 1
+        let triangle_owners = try alloc usize[1] in memory.heap
+        errdefer free(triangle_owners) in memory.heap
+        triangle_owners[0] = 1
         self.attributes = try AttributeSet()
+        self.topology_owners = topology_owners
+        self.triangle_owners = triangle_owners
         self.queries = queries
         self.points = copied_points
         self.sizes = copied_sizes
@@ -370,9 +384,52 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
                         values[at * width + component] /= (f64)weights[at]
         return try self.with_attribute(name, target, entry.width, values, entry.integer)
 
+    ## Position-only edits keep this mesh's topology (edges, corner maps) and
+    ## its triangle indices, recomputing moved faces' normals and the bounds.
+    ## The spatial index is rebuilt lazily on the first query. Stale shading
+    ## normals ("N") are dropped once any point moves, as for other edits.
     pub func with_positions(points: const Vector3[]) -> interop.Reference[PolygonMesh]!:
-        var unchanged: i64[]
-        return try self.remapped(points, self.sizes, self.corners, unchanged, unchanged, unchanged)
+        return try self.repositioned(points, false)
+
+    func repositioned(points: const Vector3[], rigid: bool) -> interop.Reference[PolygonMesh]!:
+        var edit = try positions.reposition(self.points, points, self.sizes, self.corners, self.offsets, self.normals, self.triangles, rigid)
+        if not edit.moved:
+            edit.close()
+            let same = try self.snapshot()
+            errdefer same.release()
+            try positions.copy_attributes(&self.attributes, &same.value().attributes, true)
+            return same
+        let result = try interop.Reference[PolygonMesh].adopt(try self.repositioned_storage(&edit), polygon_mesh_type, memory.heap)
+        errdefer result.release()
+        try positions.copy_attributes(&self.attributes, &result.value().attributes, rigid)
+        return result
+
+    ## Takes the edit's arrays on success; frees them on failure.
+    func repositioned_storage(edit: positions.Repositioned*) -> PolygonMesh*!:
+        errdefer edit.close()
+        let queries = try alloc QueryCache[1] in memory.heap
+        errdefer free(queries) in memory.heap
+        queries[0] = QueryCache()
+        let storage = try alloc PolygonMesh[1] in memory.heap
+        errdefer free(storage) in memory.heap
+        var attributes = try AttributeSet()
+        errdefer attributes.close()
+        var triangle_owners = self.triangle_owners
+        if edit.triangles.length > 0:
+            triangle_owners = try alloc usize[1] in memory.heap
+            triangle_owners[0] = 0
+        storage[0] = self
+        storage[0].attributes = attributes
+        storage[0].points = edit.points
+        storage[0].normals = edit.normals
+        storage[0].extent = edit.extent
+        storage[0].queries = queries
+        storage[0].triangles = edit.triangles if edit.triangles.length > 0 else self.triangles
+        storage[0].triangle_owners = triangle_owners
+        storage[0].topology_owners[0] += 1
+        triangle_owners[0] += 1
+        return storage.data
+
     pub func face_count() -> i64:
         return (i64)self.sizes.length
     pub func edge_count() -> i64:
@@ -469,6 +526,13 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         defer free(points) in memory.heap
         for index in 0..<points.length:
             points[index] = matrix.transform_point(self.points[index])
+        # Without a reflection, placement is a position-only edit: topology and
+        # triangles are shared, and no triangle can fold.
+        if matrix.determinant() > 0.0:
+            let moved = try self.repositioned(points, true)
+            errdefer moved.release()
+            try positions.transform_normals(&moved.value().attributes, matrix)
+            return moved
         # Reversing corners preserves outward normals under a reflection.
         let corners = try alloc i64[self.corners.length] in memory.heap
         defer free(corners) in memory.heap
@@ -490,17 +554,7 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
                 display[triangle*3+at] = parents[old]
         let result = try self.remapped(points, self.sizes, corners, unchanged, unchanged, parents, true, display)
         errdefer result.release()
-        for entry in result.value().attributes.entries[..<result.value().attributes.count]:
-            if entry.name.value != "N" or entry.width != 3:
-                continue
-            for at in 0..<entry.values.length // 3:
-                let n = Vector3(entry.values[at * 3], entry.values[at * 3 + 1], entry.values[at * 3 + 2])
-                if n.length() <= 0.000000001:
-                    continue
-                let transformed = try matrix.transform_normal(n)
-                entry.values[at * 3] = transformed.x
-                entry.values[at * 3 + 1] = transformed.y
-                entry.values[at * 3 + 2] = transformed.z
+        try positions.transform_normals(&result.value().attributes, matrix)
         return result
 
     pub func moved_points(selection: const i64[], delta: Vector3) -> interop.Reference[PolygonMesh]!:
@@ -635,7 +689,14 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
                     corner_parents[next_corner + 2] = corner_parents[next_corner + 1]
                     corner_parents[next_corner + 3] = corner_parents[next_corner]
                     next_corner += 4
-        return try self.remapped(points, sizes, corners, point_parents, face_parents, corner_parents)
+        # Original faces keep their corner slots, so their triangles (CAD display
+        # triangles included) stay valid; only the new quad walls triangulate.
+        let display = try alloc i64[self.triangles.length + walls * 6] in memory.heap
+        defer free(display) in memory.heap
+        memory.copy(display, self.triangles, self.triangles.length)
+        for at in self.triangles.length..<display.length:
+            display[at] = -1
+        return try self.remapped(points, sizes, corners, point_parents, face_parents, corner_parents, false, display)
 
     ## Nearest two-sided face intersection. -1 means no hit; direction must be
     ## normalized for the returned distance to be world-space distance.
@@ -652,12 +713,18 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         self.queries[0].close()
         free(self.queries) in memory.heap
         free(self.points) in memory.heap
+        free(self.normals) in memory.heap
+        self.triangle_owners[0] -= 1
+        if self.triangle_owners[0] == 0:
+            free(self.triangles) in memory.heap
+            free(self.triangle_owners) in memory.heap
+        self.topology_owners[0] -= 1
+        if self.topology_owners[0] > 0: return
+        free(self.topology_owners) in memory.heap
         free(self.sizes) in memory.heap
         free(self.corners) in memory.heap
         free(self.offsets) in memory.heap
         free(self.corner_faces) in memory.heap
-        free(self.normals) in memory.heap
-        free(self.triangles) in memory.heap
         free(self.edge_a) in memory.heap
         free(self.edge_b) in memory.heap
         free(self.corner_edges) in memory.heap
