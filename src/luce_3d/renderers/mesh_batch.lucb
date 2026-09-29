@@ -70,6 +70,20 @@ pub struct FaceHighlight:
         for face in faces:
             if face >= 0 and (usize)face < count: self.words.items[(usize)face // 32] |= (u32)1 << (u32)((usize)face % 32)
 
+    ## Mark the set bits of `words` (64 faces a word); `key` names the bits'
+    ## contents (a selection's column id), so an unchanged selection is free.
+    pub mutating func set_words(topology: u64, count: usize, words: const u64[], key: u64, color: Color, weight: f64) -> !:
+        self.color = color
+        self.weight = weight
+        let combined = (key *% 0x9E3779B97F4A7C15) ^ topology
+        if combined == self.key and topology == self.topology: return
+        self.topology = topology
+        self.key = combined
+        try self.words.fill((count + 31) // 32, 0)
+        for at in 0..<self.words.count:
+            let word = words[at // 2] if at // 2 < words.length else 0
+            self.words.items[at] = (u32)(word >> 32) if at % 2 == 1 else (u32)(word & 0xFFFFFFFF)
+
     pub mutating func close():
         self.words.close()
 

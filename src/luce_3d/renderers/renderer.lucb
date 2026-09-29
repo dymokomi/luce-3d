@@ -15,7 +15,8 @@ import luce_3d.core.object as object
 import luce_3d.errors as errors
 from luce_3d.core.object import Object3D, ObjectNode, Light, LightKind
 import geocore
-from geocore import Geometry, Vector3, Matrix4
+from geocore import Geometry, Vector3, Matrix4, Selection
+from geocore_kernel import selection_bits
 from luce_3d.core.material import Material, Color, check_color
 from luce_3d.cameras.perspective import PerspectiveCamera, Projection
 from luce_3d.renderers.projection import projection_matrix
@@ -154,6 +155,19 @@ pub struct Renderer:
         if not (weight >= 0.0 and weight <= 1.0): error(errors.invalid, "selection tint weight must be in 0..1")
         let geometry = try mesh.get()
         try self.highlight.set(geometry.corners_id(), (usize)geometry.face_count(), faces, color, weight)
+
+    ## Tint the faces of a face `selection` (luce-geocore); other component
+    ## types clear the tint.
+    pub mutating func set_selected_faces(mesh: interop.Reference[geocore.Mesh], selection: interop.Reference[Selection], color: Color = Color(1.0, 0.5, 0.0), weight: f64 = 0.45) -> !:
+        try check_color(color)
+        if not (weight >= 0.0 and weight <= 1.0): error(errors.invalid, "selection tint weight must be in 0..1")
+        let chosen = try selection.get()
+        if chosen.domain() != 2:
+            self.clear_face_selection()
+            return
+        let geometry = try mesh.get()
+        let bits = selection_bits(chosen)
+        try self.highlight.set_words(geometry.corners_id(), (usize)geometry.face_count(), bits.words, chosen.key(), color, weight)
 
     pub mutating func clear_face_selection():
         self.highlight.words.clear()
