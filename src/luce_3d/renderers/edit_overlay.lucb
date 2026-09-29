@@ -39,6 +39,9 @@ pub struct EditOverlay:
     var screen: Screen
     var markers: Markers
     var builds: i64
+    ## Whether selected faces are filled here (false when the renderer tints
+    ## them: Renderer.set_face_selection).
+    var fill: bool
 
     pub func init():
         self.mesh = none
@@ -56,6 +59,7 @@ pub struct EditOverlay:
         self.screen = Screen()
         self.markers = Markers()
         self.builds = 0
+        self.fill = true
 
     ## Cheap when nothing changed: an identity compare and one pass over the
     ## selection list. The mesh is retained, so its address cannot be reused.
@@ -83,6 +87,12 @@ pub struct EditOverlay:
         if changed or hovered != self.hovered:
             self.hovered = hovered
             try self.rebuild_hover(geometry)
+
+    ## Fill selected faces here (true) or leave them to the renderer's tint.
+    pub mutating func set_fill(on: bool):
+        if on != self.fill:
+            self.fill = on
+            self.mode = -1
 
     ## `wires` false leaves the full wireframe to the renderer, which draws it
     ## from the mesh's GPU arrays (Renderer.set_edges).
@@ -140,12 +150,13 @@ pub struct EditOverlay:
         return self.builds
 
     ## The point (mode 0) or edge (mode 1) nearest the cursor on the visible
-    ## face under it, within 11 pixels, or -1. One BVH ray; no per-camera pass.
-    pub func pick(camera: interop.Reference[PerspectiveCamera], x: f64, y: f64, width: f64, height: f64) -> i64!:
+    ## face under it, within 11 pixels, or -1. `face` is that face when the
+    ## caller knows it (a GPU pick; -1 for none); otherwise one BVH ray.
+    pub func pick(camera: interop.Reference[PerspectiveCamera], x: f64, y: f64, width: f64, height: f64, face: i64 = -2) -> i64!:
         let current = self.mesh else return -1
         if self.mode == 2 or width <= 0.0 or height <= 0.0: return -1
         let projection = try camera.value().projection(math.max(1.0, width) / math.max(1.0, height))
-        return try screens.pick(try current.get(), self.mode == 1, projection, x, y, width, height)
+        return try screens.pick(try current.get(), self.mode == 1, projection, x, y, width, height, face)
 
     mutating func draw_wires(mesh: const Mesh*, camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color) -> !:
         let native = try target.get()
@@ -202,6 +213,9 @@ pub struct EditOverlay:
                         try self.accent.push(try mesh.point(b))
             return
         self.selected.clear()
+        # Outlines of more faces than this would cover the model: the tint
+        # alone shows a selection that large.
+        let outline = self.mode == 1 or self.selection.count <= 20000
         for id in self.selection.view():
             if self.mode == 1:
                 if id < 0 or id >= (try mesh.edge_count()): continue
@@ -211,9 +225,11 @@ pub struct EditOverlay:
             if id < 0 or id >= mesh.face_count(): continue
             let offset = try mesh.face_offset(id)
             let size = try mesh.face_size(id)
-            for at in 0..<size:
-                try self.accent.push(try mesh.point(try mesh.face_point(id, at)))
-                try self.accent.push(try mesh.point(try mesh.face_point(id, (at + 1) % size)))
+            if outline:
+                for at in 0..<size:
+                    try self.accent.push(try mesh.point(try mesh.face_point(id, at)))
+                    try self.accent.push(try mesh.point(try mesh.face_point(id, (at + 1) % size)))
+            if not self.fill: continue
             # Triangles are grouped by face, size - 2 per polygon.
             let first = (offset - id * 2) * 3
             for at in first..<first + (size - 2) * 3:

@@ -66,11 +66,13 @@ pub func project(point: Vector3, p: Projection, width: f64, height: f64) -> Vect
 ## screen, within `reach` pixels. The face comes from one BVH ray, so it is
 ## the visible one; the nearest edge to a point inside a visible polygon is
 ## one of its own edges. -1 when the cursor is off the mesh or too far.
-pub func pick(mesh: const Mesh*, edges: bool, p: Projection, x: f64, y: f64, width: f64, height: f64) -> i64!:
-    let direction = p.right.multiply_scalar((x / width * 2.0 - 1.0) * p.aspect / p.focal).add(
-        p.up.multiply_scalar((1.0 - y / height * 2.0) / p.focal)).subtract(p.backward)
-    let face = try mesh.ray_face(p.position, try direction.normalized())
-    if face < 0: return -1
+pub func pick(mesh: const Mesh*, edges: bool, p: Projection, x: f64, y: f64, width: f64, height: f64, known: i64 = -2) -> i64!:
+    var face = known
+    if face < -1:
+        let direction = p.right.multiply_scalar((x / width * 2.0 - 1.0) * p.aspect / p.focal).add(
+            p.up.multiply_scalar((1.0 - y / height * 2.0) / p.focal)).subtract(p.backward)
+        face = try mesh.ray_face(p.position, try direction.normalized())
+    if face < 0 or face >= mesh.face_count(): return -1
     let size = try mesh.face_size(face)
     var found: i64 = -1
     var best = reach

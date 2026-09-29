@@ -20,8 +20,10 @@ from luce_3d.core.material import Material, Color, check_color
 from luce_3d.cameras.perspective import PerspectiveCamera, Projection
 from luce_3d.renderers.projection import projection_matrix
 from luce_3d.renderers.retained import RetainedBatch
+from luce_3d.renderers.picking import FacePicker
+from geocore_growing import Growing
 from luce_3d.renderers.gpu_arrays import GpuArrays
-from luce_3d.renderers.mesh_batch import MeshShading, FrameLighting, draw_polygon
+from luce_3d.renderers.mesh_batch import MeshShading, FrameLighting, FaceHighlight, draw_polygon
 
 struct Item:
     let object: interop.Interface[Object3D]
@@ -32,6 +34,12 @@ struct Item:
     let material: interop.Interface[Material]?
     let illumination: Light
     let visible: bool
+
+## Where the last frame placed a polygon mesh (by its positions' id), so a
+## pick between frames draws it the same way.
+struct Placement:
+    let points: u64
+    let world: Matrix4
 
 struct Prepared:
     let points: Vector3[]
@@ -73,6 +81,9 @@ pub struct Renderer:
     var surfaces: bool = true
     var edge_width: f64 = 0.0
     var edge_color: Color = Color(0.0, 0.0, 0.0)
+    var picker: FacePicker
+    var highlight: FaceHighlight
+    var placements: Growing[Placement]
 
     ## Objects whose prepared data survived a scene change (tests, profiling).
     pub func reused_count() -> i64:
@@ -112,6 +123,43 @@ pub struct Renderer:
         self.edge_color = color
         self.surfaces = surfaces
 
+    ## The face of `mesh` under (x, y) in a `width` x `height` view through
+    ## `camera`, as the last frame placed it, or -1: an id pass on the GPU,
+    ## reused until the mesh, its placement or the view changes. Fails
+    ## `unavailable` before a frame has drawn on a device (callers fall back to
+    ## a CPU ray).
+    pub mutating func pick_face(mesh: interop.Reference[geocore.Mesh], camera: interop.Reference[PerspectiveCamera], x: f64, y: f64, width: f64, height: f64) -> i64!:
+        if not self.arrays.has_device(): error(gpu.unavailable, "no frame has drawn on a GPU device")
+        if not (width >= 1.0 and height >= 1.0 and width <= 16384.0 and height <= 16384.0): return -1
+        let geometry = try mesh.get()
+        var found: Matrix4? = none
+        for placement in self.placements.view():
+            if placement.points == geometry.points_id(): found = placement.world
+        let world = found else return -1
+        let projection = try camera.value().projection(width / height)
+        var key = geometry.points_id() *% 0x9E3779B97F4A7C15 ^ geometry.triangles_id()
+        let values: f64[25] = [world.x.x, world.x.y, world.x.z, world.y.x, world.y.y, world.y.z, world.z.x, world.z.y, world.z.z,
+                               world.translation.x, world.translation.y, world.translation.z, projection.position.x, projection.position.y,
+                               projection.position.z, projection.backward.x, projection.backward.y, projection.backward.z, projection.up.x,
+                               projection.up.y, projection.up.z, projection.focal, projection.near, width, height]
+        for value in values: key = (key ^ memory.read[u64]((void*)&value)) *% 0x100000001B3
+        return try self.picker.face(&self.arrays, self.arrays.device_handle(), geometry, world, projection, key, x, y, (u32)width, (u32)height)
+
+    ## Tint `faces` of `mesh` (and of later meshes with its topology, such as
+    ## its Moves) with `color` at `weight` in the surface shading: a face
+    ## selection costs one bit per face on the GPU, whatever its size. An
+    ## empty list clears it.
+    pub mutating func set_face_selection(mesh: interop.Reference[geocore.Mesh], faces: const i64[], color: Color = Color(1.0, 0.5, 0.0), weight: f64 = 0.45) -> !:
+        try check_color(color)
+        if not (weight >= 0.0 and weight <= 1.0): error(errors.invalid, "selection tint weight must be in 0..1")
+        let geometry = try mesh.get()
+        try self.highlight.set(geometry.corners_id(), (usize)geometry.face_count(), faces, color, weight)
+
+    pub mutating func clear_face_selection():
+        self.highlight.words.clear()
+        self.highlight.key = 0
+        self.highlight.topology = 0
+
     ## GPU array uploads so far and their bytes (tests, benchmarks).
     pub func uploads() -> i64:
         return (i64)self.arrays.uploads
@@ -145,6 +193,9 @@ pub struct Renderer:
         self.surfaces = true
         self.edge_width = 0.0
         self.edge_color = Color(0.0, 0.0, 0.0)
+        self.picker = FacePicker()
+        self.highlight = FaceHighlight()
+        self.placements = Growing[Placement]()
         self.count = 0
         var empty: gpu.Vertex[]
         self.vertices = empty
@@ -198,6 +249,7 @@ pub struct Renderer:
             self.arrays.begin(device) catch failure:
                 return errors.failure[unit](failure.code, failure.message)
         let lighting = self.frame_lighting()
+        self.placements.clear()
         var drawable: usize = 0
         for index in 0..<self.count:
             let item = &self.items[index]
@@ -205,6 +257,8 @@ pub struct Renderer:
                 continue
             if let polygon = item.polygon if device.is_open() else none:
                 let material = item.material else return errors.failure[unit](errors.invalid, "a renderable object has geometry without material")
+                self.placements.push(Placement(polygon.value().points_id(), item.world)) catch failure:
+                    return errors.failure[unit](failure.code, failure.message)
                 self.draw_mesh(item, polygon, material, projection, &lighting, native) catch failure:
                     return errors.failure[unit](failure.code, failure.message)
                 continue
@@ -228,7 +282,7 @@ pub struct Renderer:
         var shading = self.shading
         if self.flat and shading.mode == gpu.Shading.lit: shading.mode = gpu.Shading.flat
         try draw_polygon(&self.arrays, target, try polygon.get(), item.world, projection, lighting, tint, appearance.is_lit(), &shading,
-                         self.wire_width * 0.7071067811865476 if self.surfaces else 0.0, self.surfaces, self.edge_width, self.edge_color)
+                         self.wire_width * 0.7071067811865476 if self.surfaces else 0.0, self.surfaces, self.edge_width, self.edge_color, &self.highlight)
 
     ## Ambient lights summed, and the first four directional lights.
     func frame_lighting() -> FrameLighting:
@@ -439,6 +493,9 @@ pub struct Renderer:
         free(self.spare) in memory.heap
         free(self.lights) in memory.heap
         free(self.items) in memory.heap
+        self.picker.close()
+        self.highlight.close()
+        self.placements.close()
         self.arrays.close()
         if self.vertices.length > 0:
             free(self.vertices) in memory.heap

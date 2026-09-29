@@ -135,6 +135,32 @@ func equivalence(view: View*, mesh: interop.Reference[geocore.Mesh], flat: bool,
     assert(differing * 200 < covered)
     view.renderer.value().set_flat(false)
 
+## GPU picking finds the face a ray through the pixel finds, and nothing off
+## the mesh; a second pick over the same view reuses the id image.
+func picking(view: View*, cube: interop.Reference[geocore.Mesh], image: u8[]) -> !:
+    let eye = Vector3(2.0, 3.0, 4.0)
+    let aim = Vector3(0.0, 0.75, 0.0)
+    try view.camera.value().set_position(eye)
+    try view.camera.value().look_at(aim)
+    try view.show(cube, false)
+    try view.draw(image)
+    let renderer = view.renderer.value()
+    let face = try renderer.pick_face(cube, view.camera, (f64)width * 0.5, (f64)height * 0.5, (f64)width, (f64)height)
+    assert(face >= 0 and face == (try cube.value().ray_face(eye, try aim.subtract(eye).normalized())))
+    assert((try renderer.pick_face(cube, view.camera, 1.0, 1.0, (f64)width, (f64)height)) == -1)
+    assert((try renderer.pick_face(cube, view.camera, (f64)width * 0.5, (f64)height * 0.5, (f64)width, (f64)height)) == face)
+    # The picked face, selected: the renderer tints it from one bit per face.
+    let at = (usize)((height // 2 * width + width // 2) * 4)
+    try renderer.set_face_selection(cube, [face], Color(1.0, 0.0, 0.0), 1.0)
+    try view.draw(image)
+    assert(image[at] > 200 and image[at + 1] < 40 and image[at + 2] < 40)
+    var none_faces: i64[]
+    try renderer.set_face_selection(cube, none_faces)
+    try view.draw(image)
+    assert(image[at + 1] > 60)
+    try view.camera.value().set_position(Vector3(0.0, 1.0, 5.0))
+    try view.camera.value().look_at(Vector3(0.0, 1.0, 0.0))
+
 ## An inside-out mesh (every face reversed) lights like the outward one: the
 ## side facing the eye is shaded.
 func two_sided(view: View*, cube: interop.Reference[geocore.Mesh], outward: u8[], image: u8[]) -> !:
@@ -328,7 +354,8 @@ pub func main(arguments: str[]) -> i32!:
     assert(view.renderer.value().uploads() == before + 2)
     try zebra(&view, image)
     try curvature_map(&view, image)
+    try picking(&view, cube, image)
     try occlusion(&view, cube, image)
     try two_sided(&view, cube, legacy_image, image)
-    print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded; inside-out meshes light on the eye's side; curvature maps")
+    print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded; inside-out meshes light on the eye's side; curvature maps; GPU face picking and selection tint")
     return 0

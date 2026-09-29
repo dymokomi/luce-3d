@@ -11,6 +11,7 @@ from luce_3d.core.material import Color
 from luce_3d.cameras.perspective import Projection
 from luce_3d.renderers.projection import projection_matrix
 from luce_3d.renderers.gpu_arrays import GpuArrays, ArrayKey
+from geocore_growing import Growing
 
 let tag_positions: u8 = 1
 let tag_corners: u8 = 2
@@ -21,6 +22,7 @@ let tag_triangles: u8 = 6
 let tag_faces: u8 = 7
 let tag_edges: u8 = 8
 let tag_curvature: u8 = 9
+let tag_flags: u8 = 10
 
 ## Triangles per draw: the triangle and face buffers stay under luce-gpu's
 ## buffer limit (12 bytes per triangle).
@@ -42,6 +44,35 @@ pub struct MeshShading:
     pub var curvature: i64 = 0
     pub var curvature_range: f64 = 0.0
 
+## Faces tinted with an accent (a face selection): one bit per face of the
+## topology whose corners array is `topology`. `key` names the bits' GPU copy.
+pub struct FaceHighlight:
+    pub var topology: u64 = 0
+    pub var key: u64 = 0
+    pub var words: Growing[u32] = Growing[u32]()
+    pub var color: Color = Color(1.0, 0.5, 0.0)
+    pub var weight: f64 = 0.45
+
+    ## Mark `faces` (ids outside `count` faces are ignored) of the topology
+    ## `topology`; cheap when nothing changed.
+    pub mutating func set(topology: u64, count: usize, faces: const i64[], color: Color, weight: f64) -> !:
+        var key: u64 = 0xCBF29CE484222325 ^ topology
+        for face in faces: key = (key ^ (u64)face) *% 0x100000001B3
+        self.color = color
+        self.weight = weight
+        if key == self.key and topology == self.topology: return
+        self.topology = topology
+        self.key = key
+        if faces.length == 0:
+            self.words.clear()
+            return
+        try self.words.fill((count + 31) // 32, 0)
+        for face in faces:
+            if face >= 0 and (usize)face < count: self.words.items[(usize)face // 32] |= (u32)1 << (u32)((usize)face % 32)
+
+    pub mutating func close():
+        self.words.close()
+
 ## What every object in a frame shares: the camera and the lights. Up to four
 ## directional lights reach the shader; ambient lights add up.
 pub struct FrameLighting:
@@ -54,11 +85,18 @@ pub struct FrameLighting:
 ## and, when `wire_width` > 0, its edges in `wire_color`.
 pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh: const Mesh*, world: Matrix4, projection: Projection,
                       lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*, slope_bias: f64,
-                      surfaces: bool, wire_width: f64, wire_color: Color) -> !:
+                      surfaces: bool, wire_width: f64, wire_color: Color, highlight: const FaceHighlight*? = none) -> !:
     if mesh.face_count() == 0: return
     var buffers = gpu.MeshBuffers()
     buffers.positions = try positions(arrays, mesh)
     var block = parameters(mesh, world, projection, lighting, tint, lit, shading)
+    if let marked = highlight:
+        if marked.words.count > 0 and marked.topology == mesh.corners_id():
+            buffers.flags = try flag_buffer(arrays, marked)
+            block[gpu.mesh_accent] = (f32)marked.color.red
+            block[gpu.mesh_accent + 1] = (f32)marked.color.green
+            block[gpu.mesh_accent + 2] = (f32)marked.color.blue
+            block[gpu.mesh_accent + 3] = (f32)marked.weight
     if surfaces:
         buffers.corners = try corner_points(arrays, mesh)
         let normals = try normal_buffer(arrays, mesh)
@@ -252,6 +290,15 @@ func curvature_buffer(arrays: GpuArrays*, mesh: const Mesh*, shading: const Mesh
     let bytes = try arrays.staging(count * 12)
     try native.pack_curvature(mesh, &source, as_f32(bytes))
     return (try arrays.store(key, bytes), source.domain, range)
+
+## The highlight's bits, one u32 per 32 faces.
+func flag_buffer(arrays: GpuArrays*, highlight: const FaceHighlight*) -> gpu.Buffer!:
+    let key = ArrayKey(highlight.key, tag_flags, 0)
+    if let found = arrays.find(key): return found
+    let words = highlight.words.view()
+    let bytes = try arrays.staging(words.length * 4)
+    memory.copy(u32[]((u32*)bytes.data, words.length), words, words.length)
+    return try arrays.store(key, bytes)
 
 ## Cd by the same precedence, or none.
 func color_buffer(arrays: GpuArrays*, mesh: const Mesh*) -> (gpu.Buffer?, i64)!:
