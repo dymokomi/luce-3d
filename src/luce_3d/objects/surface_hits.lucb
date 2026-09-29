@@ -63,7 +63,8 @@ func visit(source: interop.Interface[Object3D], parent: Matrix4, visible: bool, 
 ## The ray against one mesh placed by `world`: in its own frame, then back.
 func hit_mesh(mesh: const Mesh*, world: Matrix4, origin: Vector3, direction: Vector3, best: SurfaceHit*) -> !:
     if mesh.face_count() == 0: return
-    let inverse = inverse_of(world) else return
+    let inverse = world.inverse() catch failure:
+        return
     let local_origin = inverse.transform_point(origin)
     let local_direction = inverse.transform_direction(direction).normalized() catch failure: return
     let face = try mesh.ray_face(local_origin, local_direction)
@@ -74,14 +75,3 @@ func hit_mesh(mesh: const Mesh*, world: Matrix4, origin: Vector3, direction: Vec
     if best.found and distance >= best.distance: return
     let normal = world.transform_normal(try mesh.face_normal(face)) catch failure: return
     *best = SurfaceHit(true, point, normal, distance)
-
-## The inverse of an affine matrix, or none when singular.
-func inverse_of(matrix: Matrix4) -> Matrix4?:
-    let determinant = matrix.determinant()
-    if not math.is_finite(determinant) or math.abs(determinant) < 1.0e-300: return none
-    let a = matrix.y.cross(matrix.z).multiply_scalar(1.0 / determinant)
-    let b = matrix.z.cross(matrix.x).multiply_scalar(1.0 / determinant)
-    let c = matrix.x.cross(matrix.y).multiply_scalar(1.0 / determinant)
-    let linear = Matrix4(Vector3(a.x, b.x, c.x), Vector3(a.y, b.y, c.y), Vector3(a.z, b.z, c.z), Vector3())
-    let t = linear.transform_direction(matrix.translation)
-    return Matrix4(linear.x, linear.y, linear.z, Vector3(-t.x, -t.y, -t.z))
