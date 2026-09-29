@@ -221,18 +221,19 @@ func edges(arrays: GpuArrays*, mesh: const PolygonMesh*) -> gpu.Buffer!:
     return try arrays.store(key, bytes)
 
 ## The shading normals and their domain: an authored N (corner, then point,
-## face and detail), else the mesh's smooth corner normals (hard past the
-## cusp angle). Flat shading reads neither.
+## face and detail), else the mesh's smooth normals (per point, or per corner
+## where a 60-degree cusp splits a point). Flat shading reads neither.
 func normal_buffer(arrays: GpuArrays*, mesh: const PolygonMesh*) -> (gpu.Buffer, i64)!:
     let found = try preferred(mesh, "N", 3)
     if found.0 >= 0:
         return (try attribute_buffer(arrays, mesh, found.0, tag_normals), found.1)
     let ids = try native.smooth_ids(mesh)
+    let domain = try native.smooth_domain(mesh)
     let key = ArrayKey(ids.0, tag_smooth_normals, 0)
-    if let buffer = arrays.find(key): return (buffer, 1)
-    let bytes = try arrays.staging((usize)mesh.vertex_count() * 12)
+    if let buffer = arrays.find(key): return (buffer, domain)
+    let bytes = try arrays.staging((usize)(mesh.vertex_count() if domain == 1 else mesh.point_count()) * 12)
     try native.pack_smooth_normals(mesh, as_f32(bytes))
-    return (try arrays.store(key, bytes, ids.1), 1)
+    return (try arrays.store(key, bytes, ids.1), domain)
 
 ## Principal curvatures (k1, k2) for the curvature map: the CAD analytic
 ## attributes (corners), else the discrete estimate (points); their domain;
