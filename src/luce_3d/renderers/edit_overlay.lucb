@@ -14,7 +14,10 @@ from luce_3d.cameras.perspective import PerspectiveCamera, Projection
 from luce_3d.renderers.wire import WireRenderer
 from luce_3d.renderers.projection import projection_matrix
 from luce_3d.renderers.retained import RetainedBatch
-from luce_3d.renderers.edit_markers import Markers, Screen, Growing, same_ids
+from luce_3d.renderers.edit_markers import Markers
+from luce_3d.renderers.edit_screen import Screen
+import luce_3d.renderers.edit_screen as screens
+from luce_3d.renderers.growing import Growing, same_ids
 
 ## Component modes: 0 points, 1 edges, 2 faces.
 pub struct EditOverlay:
@@ -135,15 +138,13 @@ pub struct EditOverlay:
     pub func selection_builds() -> i64:
         return self.builds
 
-    ## Nearest visible point (mode 0) or edge (mode 1) within 11 pixels, or -1.
-    ## Candidates are confirmed by one ray each, nearest first.
-    pub mutating func pick(camera: interop.Reference[PerspectiveCamera], x: f64, y: f64, width: f64, height: f64) -> i64!:
+    ## The point (mode 0) or edge (mode 1) nearest the cursor on the visible
+    ## face under it, within 11 pixels, or -1. One BVH ray; no per-camera pass.
+    pub func pick(camera: interop.Reference[PerspectiveCamera], x: f64, y: f64, width: f64, height: f64) -> i64!:
         let current = self.mesh else return -1
-        let mesh = try current.get()
         if self.mode == 2 or width <= 0.0 or height <= 0.0: return -1
         let projection = try camera.value().projection(math.max(1.0, width) / math.max(1.0, height))
-        try self.screen.update(mesh, projection, width, height)
-        return try self.screen.pick(mesh, self.mode == 1, projection, x, y)
+        return try screens.pick(try current.get(), self.mode == 1, projection, x, y, width, height)
 
     mutating func draw_wires(mesh: const PolygonMesh*, camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color) -> !:
         let native = try target.get()
@@ -166,6 +167,9 @@ pub struct EditOverlay:
             let matrix = projection_matrix(try camera.value().projection(size.width / size.height))
             try self.wires.draw(native, matrix, color, 1.0)
             return
+        # Deviceless frames (tests, recording) expand wires on the CPU into the
+        # frame's vertex budget; a wireframe that cannot fit is left out.
+        if edges * 6 > 4194304: return
         if self.wire_points.count == 0:
             try self.wire_points.reserve(edges * 2)
             for edge in 0..<edges:
