@@ -42,8 +42,9 @@ and Luce tests at native optimization levels 0–3 and both C comparison modes.
 `python3 tests/gpu.py` additionally requires a macOS Metal desktop. Build a Base
 consumer with `python3 tools/build.py tests/main.lucb -o build/test`.
 
-See [the API](docs/API.md), [design and ownership](docs/DESIGN.md), and
-[validation](docs/VALIDATION.md). The interactive Luce example lives in the
+See [the API](docs/API.md), [design and ownership](docs/DESIGN.md),
+[validation](docs/VALIDATION.md) and [benchmarks](docs/BENCHMARKS.md)
+(`python3 tests/bench/run.py`). The interactive Luce example lives in the
 separate [luce-demos](https://github.com/dymokomi/luce-demos) repository.
 
 The initial renderer performs transforms, projection and Lambert lighting on the

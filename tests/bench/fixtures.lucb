@@ -1,0 +1,103 @@
+## Benchmark fixtures: the 837x837 quad grid of the geometry-core design, a
+## byte-counting allocator for memory figures, and the report format the
+## runner (run.py) reads: one "name<TAB>value" line per measurement.
+import math
+import memory
+import time
+import interop
+import three
+from three import Vector3, PolygonMesh, polygon_mesh_type
+
+## Grid side in quads: 702,244 points, 700,569 faces, 2,802,276 corners.
+pub let side: usize = 837
+
+## Live heap bytes of everything allocated while it is `memory.heap`.
+pub struct Counter: memory.Allocator:
+    pub var upstream: memory.Allocator
+    pub var live: usize = 0
+    pub var peak: usize = 0
+
+    pub mutating func allocate(size: usize, alignment: usize) -> u8[]?:
+        let block = self.upstream.allocate(size, alignment) else return none
+        self.live += block.length
+        if self.live > self.peak: self.peak = self.live
+        return block
+
+    pub mutating func resize(block: u8[], size: usize) -> bool:
+        if not self.upstream.resize(block, size): return false
+        self.live = self.live - block.length + size
+        return true
+
+    pub mutating func release(block: u8[]):
+        self.live -= block.length
+        self.upstream.release(block)
+
+## Milliseconds since `start` (a time.now() reading).
+pub func since(start: u64) -> f64:
+    return (f64)(time.now() - start) / 1000000.0
+
+pub func report(name: str, milliseconds: f64):
+    print(f"{name}\t{milliseconds}")
+
+pub func report_bytes(name: str, bytes: usize):
+    print(f"bytes:{name}\t{bytes}")
+
+## Points, sizes and corners of the grid, with a gentle ripple so faces are
+## not coplanar. The caller frees all three.
+pub struct GridArrays:
+    pub var points: Vector3[]
+    pub var sizes: i64[]
+    pub var corners: i64[]
+
+    pub func init() -> !:
+        let n = side
+        self.points = try alloc Vector3[(n + 1) * (n + 1)] in memory.heap
+        self.sizes = try alloc i64[n * n] in memory.heap
+        self.corners = try alloc i64[n * n * 4] in memory.heap
+        for z in 0..<n + 1:
+            for x in 0..<n + 1:
+                self.points[z * (n + 1) + x] = Vector3((f64)x / (f64)n - 0.5, 0.01 * math.sin((f64)(x + z) * 0.1), (f64)z / (f64)n - 0.5)
+        for z in 0..<n:
+            for x in 0..<n:
+                let a = (i64)(z * (n + 1) + x)
+                let face = z * n + x
+                self.sizes[face] = 4
+                self.corners[face * 4] = a
+                self.corners[face * 4 + 1] = a + (i64)n + 1
+                self.corners[face * 4 + 2] = a + (i64)n + 2
+                self.corners[face * 4 + 3] = a + 1
+
+    pub mutating func close():
+        free(self.points) in memory.heap
+        free(self.sizes) in memory.heap
+        free(self.corners) in memory.heap
+
+pub func make_mesh(grid: const GridArrays*) -> interop.Reference[PolygonMesh]!:
+    return try interop.Reference[PolygonMesh].adopt(new PolygonMesh(grid.points, grid.sizes, grid.corners) in memory.heap, polygon_mesh_type, memory.heap)
+
+## 1,000 faces spread over the grid, as the design's Move and select cases.
+pub func chosen_faces() -> i64[]!:
+    let faces = try alloc i64[1000] in memory.heap
+    for at in 0..<faces.length:
+        faces[at] = (i64)((at * 691) % (side * side))
+    return faces
+
+## The distinct points of `faces` (4,000 for the grid), ascending.
+pub func face_points(mesh: const PolygonMesh*, faces: const i64[]) -> i64[]!:
+    let marked = try alloc bool[(usize)mesh.point_count()] in memory.heap
+    defer free(marked) in memory.heap
+    for at in 0..<marked.length: marked[at] = false
+    var count: usize = 0
+    for face in faces:
+        for corner in 0..<(try mesh.face_size(face)):
+            let point = (usize)(try mesh.face_point(face, corner))
+            if not marked[point]:
+                marked[point] = true
+                count += 1
+    let points = try alloc i64[count] in memory.heap
+    var at: usize = 0
+    for point in 0..<marked.length:
+        if marked[point]:
+            points[at] = (i64)point
+            at += 1
+    return points

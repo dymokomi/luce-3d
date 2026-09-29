@@ -1,0 +1,162 @@
+## The geometry-core benchmark (docs/BENCHMARKS.md): every operation the
+## design's targets name, on the 700k-face grid. Build with --native --opt 2;
+## tests/bench/run.py does, and prints the table against the targets.
+import memory
+import time
+import interop
+import gpu
+import three
+from three import Vector3, PolygonMesh, polygon_mesh_type, detached_mesh, EditOverlay
+from fixtures import Counter, GridArrays, make_mesh, chosen_faces, face_points, since, report, report_bytes, side
+from display import Viewport
+
+func restore(previous: memory.Allocator):
+    memory.heap = previous
+
+pub func main(arguments: str[]) -> i32!:
+    var grid = try GridArrays()
+    defer grid.close()
+    let previous = memory.heap
+    var counter = Counter(previous)
+    memory.heap = &counter
+    defer restore(previous)
+
+    var start = time.now()
+    let mesh = try make_mesh(&grid)
+    defer mesh.release()
+    report("construct", since(start))
+    report_bytes("mesh core", counter.live)
+    let m = mesh.value()
+    print(f"# grid: {m.point_count()} points, {m.face_count()} faces, {m.vertex_count()} corners, {m.edge_count()} edges, {m.index_count() // 3} triangles")
+    try baselines(&grid)
+    try attributes(mesh, &counter)
+    let faces = try chosen_faces()
+    defer free(faces) in memory.heap
+    let points = try face_points(m, faces)
+    defer free(points) in memory.heap
+    try selection(mesh, faces)
+    try moves(mesh, points)
+    try queries(mesh, points)
+    try display(mesh, points)
+    return 0
+
+## Primitive costs the design's budgets are derived from.
+func baselines(grid: const GridArrays*) -> !:
+    let count = grid.points.length
+    var start = time.now()
+    let copy = try alloc Vector3[count] in memory.heap
+    defer free(copy) in memory.heap
+    memory.copy(copy, grid.points, count)
+    report("baseline: memcpy f64 positions", since(start))
+    start = time.now()
+    let packed = try alloc f32[count * 3] in memory.heap
+    defer free(packed) in memory.heap
+    for at in 0..<count:
+        packed[at * 3] = (f32)grid.points[at].x
+        packed[at * 3 + 1] = (f32)grid.points[at].y
+        packed[at * 3 + 2] = (f32)grid.points[at].z
+    report("baseline: pack f32x3 positions", since(start))
+
+## Adding an attribute should cost that attribute alone, not every other one.
+func attributes(mesh: interop.Reference[PolygonMesh], counter: const Counter*) -> !:
+    let m = mesh.value()
+    let weights = try alloc f64[(usize)m.point_count()] in memory.heap
+    defer free(weights) in memory.heap
+    for at in 0..<weights.length: weights[at] = (f64)at
+    var start = time.now()
+    let weighted = try m.with_attribute("weight", 0, 1, weights)
+    defer weighted.release()
+    report("attribute add: point f64", since(start))
+    let uv = try alloc f64[(usize)m.vertex_count() * 2] in memory.heap
+    defer free(uv) in memory.heap
+    for at in 0..<uv.length: uv[at] = (f64)(at % 7) * 0.125
+    let before = counter.live
+    start = time.now()
+    let textured = try weighted.value().with_attribute("uv", 1, 2, uv)
+    defer textured.release()
+    report("attribute add: corner uv on a mesh with weight", since(start))
+    report_bytes("uv attribute", counter.live - before)
+    start = time.now()
+    let masked = try textured.value().with_attribute("mask", 2, 1, weights[..<(usize)m.face_count()])
+    defer masked.release()
+    report("attribute add: face on a mesh with uv + weight", since(start))
+
+## Selecting 1k faces: the overlay's selection batch and the gizmo centre.
+func selection(mesh: interop.Reference[PolygonMesh], faces: const i64[]) -> !:
+    var overlay = EditOverlay()
+    defer overlay.close()
+    let start = time.now()
+    try overlay.update(mesh, 2, faces, -1)
+    discard(try EditOverlay.center(mesh, 2, faces))
+    report("select 1k faces (overlay + centre)", since(start))
+
+## A Move of 1k faces (4k points), bare and with attributes, and the worker
+## to UI hand-off of its result.
+func moves(mesh: interop.Reference[PolygonMesh], points: const i64[]) -> !:
+    let m = mesh.value()
+    let delta = Vector3(0.0, 0.1, 0.0)
+    var start = time.now()
+    let moved = try m.moved_points(points, delta)
+    defer moved.release()
+    report("move 1k faces: bare mesh", since(start))
+    let values = try alloc f64[(usize)m.vertex_count() * 2] in memory.heap
+    defer free(values) in memory.heap
+    for at in 0..<values.length: values[at] = (f64)(at % 5)
+    let uv = try m.with_attribute("uv", 1, 2, values)
+    defer uv.release()
+    let weighted = try uv.value().with_attribute("weight", 0, 1, values[..<(usize)m.point_count()])
+    defer weighted.release()
+    let masked = try weighted.value().with_attribute("mask", 2, 1, values[..<(usize)m.face_count()])
+    defer masked.release()
+    start = time.now()
+    let moved_rich = try masked.value().moved_points(points, delta)
+    defer moved_rich.release()
+    report("move 1k faces: mesh with uv + weight + mask", since(start))
+    start = time.now()
+    let handed = try detached_mesh(moved_rich)
+    report("worker to UI hand-off", since(start))
+    handed.close()
+    free(handed) in memory.heap
+
+## CPU spatial queries: the BVH build, picks, and the index after a Move.
+func queries(mesh: interop.Reference[PolygonMesh], points: const i64[]) -> !:
+    let m = mesh.value()
+    var start = time.now()
+    try m.prepare_queries()
+    report("BVH build", since(start))
+    start = time.now()
+    var hits: i64 = 0
+    for at in 0..<1000:
+        let x = (f64)(at % 37) / 37.0 - 0.5
+        let z = (f64)(at % 41) / 41.0 - 0.5
+        hits += try m.ray_face(Vector3(x, 5.0, z), Vector3(0.0, -1.0, 0.0))
+    report("1000 BVH ray picks", since(start))
+    let moved = try m.moved_points(points, Vector3(0.0, 0.1, 0.0))
+    defer moved.release()
+    start = time.now()
+    try moved.value().prepare_queries()
+    report("BVH after a Move (rebuild or refit)", since(start))
+    assert(hits != 0)
+
+## First display, a camera-only redraw, and the redraw of a moved mesh; the
+## Move round trip adds the cook and hand-off measured the same way.
+func display(mesh: interop.Reference[PolygonMesh], points: const i64[]) -> !:
+    var view = Viewport() catch failure:
+        print(f"# display skipped: {failure.message}")
+        return
+    defer view.close()
+    try view.show(mesh)
+    report("display: first draw of a new mesh", try view.draw())
+    try view.orbit(0.1)
+    report("display: camera-only redraw", try view.draw())
+    let start = time.now()
+    let moved = try mesh.value().moved_points(points, Vector3(0.0, 0.1, 0.0))
+    defer moved.release()
+    let handed = try detached_mesh(moved)
+    let owner = try interop.Reference[PolygonMesh].adopt(handed, polygon_mesh_type, memory.heap)
+    defer owner.release()
+    let cooked = since(start)
+    try view.show(owner)
+    let drawn = try view.draw()
+    report("display: redraw after a Move", drawn)
+    report("Move 1k faces round trip (cook + hand-off + display)", cooked + drawn)

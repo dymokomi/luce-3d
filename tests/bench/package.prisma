@@ -1,0 +1,22 @@
+#prisma 4.0
+def package "luce_3d_bench" {
+    str source = "."
+    def dependency "luce_3d" {
+        str path = "../.."
+    }
+    def dependency "luce-gpu" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../../../luce-gpu"
+    }
+    def dependency "luce-std" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../../../luce-std"
+    }
+    def dependency "luce-window" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../../../luce-window"
+    }
+}

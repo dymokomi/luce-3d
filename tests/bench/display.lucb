@@ -1,0 +1,100 @@
+## An offscreen viewport for display timings: a scene with the editor's two
+## lights and one Lambert mesh, drawn into a 1400x900 texture. A timed draw
+## ends with a one-pixel read, so it covers the GPU's work, not just recording.
+import gpu
+import interop
+import memory
+import time
+import three
+from three import Vector3, PolygonMesh, Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer
+from fixtures import since
+
+pub struct Viewport:
+    var device: gpu.Device
+    var texture: gpu.Texture
+    let scene: interop.Reference[Scene]
+    let root: interop.Interface[Object3D]
+    let camera: interop.Reference[PerspectiveCamera]
+    let renderer: interop.Reference[Renderer]
+    var shown: interop.Reference[Mesh]?
+    var shown_object: interop.Interface[Object3D]?
+
+    ## Fails with gpu.unavailable (or unsupported) when there is no device.
+    pub func init() -> !:
+        var device = try gpu.Device.open()
+        errdefer device.destroy()
+        var texture = try gpu.Texture.create(device, 1400, 900, gpu.Format.rgba8)
+        errdefer texture.destroy()
+        let scene = try interop.Reference[Scene].adopt(new Scene() in memory.heap, three.scene_type, memory.heap)
+        let ambient = try interop.Reference[AmbientLight].adopt(new AmbientLight(intensity = 0.35) in memory.heap, three.ambient_type, memory.heap)
+        defer ambient.release()
+        let ambient_object = ambient.as_interface[Object3D](ambient.value())
+        defer ambient_object.release()
+        try scene.value().add(ambient_object)
+        let sun = try interop.Reference[DirectionalLight].adopt(new DirectionalLight(intensity = 0.85, direction = Vector3(3.0, 5.0, 2.0)) in memory.heap, three.directional_type, memory.heap)
+        defer sun.release()
+        let sun_object = sun.as_interface[Object3D](sun.value())
+        defer sun_object.release()
+        try scene.value().add(sun_object)
+        let camera = try interop.Reference[PerspectiveCamera].adopt(new PerspectiveCamera(45.0, 1.0, 0.05, 100.0) in memory.heap, three.perspective_camera_type, memory.heap)
+        try camera.value().set_position(Vector3(0.0, 1.2, 1.2))
+        self.device = device
+        self.texture = texture
+        self.scene = scene
+        self.root = scene.as_interface[Object3D](scene.value())
+        self.camera = camera
+        self.renderer = try interop.Reference[Renderer].adopt(new Renderer(true) in memory.heap, three.renderer_type, memory.heap)
+        self.shown = none
+        self.shown_object = none
+
+    ## Display `mesh` instead of the previous one, as the editor does when a
+    ## cook publishes a new result.
+    pub mutating func show(mesh: interop.Reference[PolygonMesh]) -> !:
+        self.hide()
+        let geometry = mesh.as_interface[Geometry](mesh.value())
+        defer geometry.release()
+        let material = try interop.Reference[MeshLambertMaterial].adopt(new MeshLambertMaterial(gpu.Color(0.7, 0.7, 0.7)) in memory.heap, three.lambert_material_type, memory.heap)
+        defer material.release()
+        let appearance = material.as_interface[Material](material.value())
+        defer appearance.release()
+        let object = try interop.Reference[Mesh].adopt(new Mesh(geometry, appearance) in memory.heap, three.mesh_type, memory.heap)
+        let node = object.as_interface[Object3D](object.value())
+        try self.scene.value().add(node)
+        self.shown = object
+        self.shown_object = node
+
+    mutating func hide():
+        if let node = self.shown_object:
+            discard(self.scene.value().remove(node) catch failure: recover false)
+            node.release()
+        if let object = self.shown: object.release()
+        self.shown = none
+        self.shown_object = none
+
+    ## Orbit a little, so a redraw is a camera change.
+    pub mutating func orbit(step: f64) -> !:
+        try self.camera.value().set_position(Vector3(step, 1.2, 1.2))
+
+    ## One complete frame, including GPU completion. Milliseconds.
+    pub mutating func draw() -> f64!:
+        let start = time.now()
+        let recording = try self.texture.frame()
+        defer recording.release()
+        let target = try recording.value().target()
+        let result = self.renderer.value().render(self.root, self.camera, target, true)
+        target.release()
+        defer result.release()
+        try result.get()
+        discard(try recording.value().present(gpu.Color(0.1, 0.1, 0.1)))
+        var pixel: u8[4]
+        try self.texture.read(pixel, gpu.Region(700, 450, 1, 1))
+        return since(start)
+
+    pub mutating func close():
+        self.hide()
+        self.renderer.release()
+        self.camera.release()
+        self.root.release()
+        self.scene.release()
+        self.texture.destroy()
+        self.device.destroy()
