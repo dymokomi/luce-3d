@@ -48,23 +48,27 @@ Differences below about 10 % are noise.
 
 ## luced-3d (headless editor)
 
-| Operation | Target | Step 0 | Step 1 | Step 2 | Step 3 |
-|---|---|---:|---:|---:|---:|
-| grid 700k: import and cook to an Edit node | — | 2,653.8 ms | 2,779.2 ms | 2,429.5 ms | 1,641.5 ms |
-| grid 700k: first display | < 30 ms | 1,807.3 ms | 1,805.8 ms | 39.1 ms | 57.2 ms |
-| grid 700k: camera-only redraw | — | 3.33 ms | 3.22 ms | 4.57 ms | 5.13 ms |
-| grid 700k: select 1k faces (1000 clicks) | < 2 ms per click | 81.8 ms | 85.1 ms | 83.7 ms | 36.4 ms |
-| grid 700k: Move 1k faces, request to adopted result | — | 960.1 ms | 1,063.6 ms | 855.5 ms | 28.7 ms |
-| grid 700k: Move 1k faces, redraw | — | 1,768.3 ms | 1,778.0 ms | 9.21 ms | 14.5 ms |
-| **grid 700k: Move 1k faces round trip** | **< 10 ms** | **2,728.4 ms** | **2,841.5 ms** | **864.7 ms** | **43.2 ms** |
-| grid 700k: invert a 1k-face selection | — | 1,029.5 ms | 1,038.4 ms | 1,034.2 ms | 1,112.5 ms |
-| camera.step: import and cook to an Edit node | — | 9,221.5 ms | 9,552.0 ms | 9,077.6 ms | 2,517.4 ms |
-| camera.step: first display | < 30 ms | 2,060.5 ms | 2,201.7 ms | 73.3 ms | 19.0 ms |
-| camera.step: select 1k faces (1000 clicks) | < 2 ms per click | 121.7 ms | 123.7 ms | 121.8 ms | 55.1 ms |
-| camera.step: Move 1k faces, request to adopted result | — | 1,240.8 ms | 1,322.3 ms | 1,114.6 ms | 68.5 ms |
-| camera.step: Move 1k faces, redraw | — | 1,905.8 ms | 1,987.7 ms | 20.6 ms | 13.0 ms |
-| **camera.step: Move 1k faces round trip** | **< 10 ms** | **3,146.6 ms** | **3,310.0 ms** | **1,135.2 ms** | **81.5 ms** |
-| camera.step: invert a 1k-face selection | — | 961.3 ms | 972.3 ms | 992.9 ms | 1,072.9 ms |
+| Operation | Target | Step 0 | Step 1 | Step 2 | Step 3 | Step 4 |
+|---|---|---:|---:|---:|---:|---:|
+| grid 700k: import and cook to an Edit node | — | 2,653.8 ms | 2,779.2 ms | 2,429.5 ms | 1,641.5 ms | 105.7 ms |
+| grid 700k: first display | < 30 ms | 1,807.3 ms | 1,805.8 ms | 39.1 ms | 57.2 ms | 59.8 ms |
+| grid 700k: camera-only redraw | — | 3.33 ms | 3.22 ms | 4.57 ms | 5.13 ms | 5.20 ms |
+| grid 700k: select 1k faces (1000 clicks) | < 2 ms per click | 81.8 ms | 85.1 ms | 83.7 ms | 36.4 ms | 36.6 ms |
+| grid 700k: Move 1k faces, request to adopted result | — | 960.1 ms | 1,063.6 ms | 855.5 ms | 28.7 ms | 10.1 ms |
+| grid 700k: Move 1k faces, redraw | — | 1,768.3 ms | 1,778.0 ms | 9.21 ms | 14.5 ms | 14.4 ms |
+| **grid 700k: Move 1k faces round trip** | **< 10 ms** | **2,728.4 ms** | **2,841.5 ms** | **864.7 ms** | **43.2 ms** | **24.6 ms** |
+| grid 700k: invert a 1k-face selection | — | 1,029.5 ms | 1,038.4 ms | 1,034.2 ms | 1,112.5 ms | 38.1 ms |
+| camera.step: import and cook to an Edit node | — | 9,221.5 ms | 9,552.0 ms | 9,077.6 ms | 2,517.4 ms | 2,345.5 ms |
+| camera.step: first display | < 30 ms | 2,060.5 ms | 2,201.7 ms | 73.3 ms | 19.0 ms | 20.6 ms |
+| camera.step: select 1k faces (1000 clicks) | < 2 ms per click | 121.7 ms | 123.7 ms | 121.8 ms | 55.1 ms | 56.9 ms |
+| camera.step: Move 1k faces, request to adopted result | — | 1,240.8 ms | 1,322.3 ms | 1,114.6 ms | 68.5 ms | 19.8 ms |
+| camera.step: Move 1k faces, redraw | — | 1,905.8 ms | 1,987.7 ms | 20.6 ms | 13.0 ms | 12.4 ms |
+| **camera.step: Move 1k faces round trip** | **< 10 ms** | **3,146.6 ms** | **3,310.0 ms** | **1,135.2 ms** | **81.5 ms** | **32.2 ms** |
+| camera.step: invert a 1k-face selection | — | 961.3 ms | 972.3 ms | 992.9 ms | 1,072.9 ms | 34.7 ms |
+| grid 700k: Move 1k adjacent faces round trip (local edit) | < 10 ms | — | — | — | — | 13.3 ms |
+| grid 700k: redraw with the inverted selection (699k faces) | — | — | — | — | — | 12.4 ms |
+| camera.step: Move 1k adjacent faces round trip (local edit) | < 10 ms | — | — | — | — | 12.6 ms |
+| camera.step: redraw with the inverted selection | — | — | — | — | — | 12.3 ms |
 
 ## Step notes
 
@@ -114,3 +118,23 @@ Differences below about 10 % are noise.
   - Left for step 4: the UI side of a Move (about 11 ms building the Edit
     recipe in Luce lists), the worker's cook of it, inverting a selection
     (O(n²), about 1 s), and dirty-range uploads.
+- **Step 4** (picking, selection and edits on the GPU side; luced-3d): the
+  editor's interaction paths.
+  - Faces are picked from the renderer's id pass (`Renderer.pick_face`), read
+    back once per view; points and edges take the picked face. No query
+    index is warmed on the worker any more (publish 15 → ~1 ms).
+  - Selected faces tint in the surface pass from one bit per face
+    (`Renderer.set_face_selection`); the overlay outlines up to 20k faces and
+    builds no fill: a 699k-face selection redraws in 12 ms.
+  - Inverting a selection is O(n + k) (1.1 s → 35–38 ms); a click costs
+    0.04–0.06 ms (target 2 ms).
+  - The UI's Move recipe was 11 ms, nearly all the first connectivity hash:
+    it is hashed in parallel chunks now (10 → 1 ms). Refreshing authored N
+    runs in parallel (29 → 5 ms on camera.step).
+  - A column names the elements an edit changed; the renderer patches just
+    that range of the previous buffer. A local Move (1k adjacent faces) is
+    13 ms round trip on both models; the spread-out 1k-face Move still
+    re-uploads whole arrays (23–32 ms).
+  - Tools and the overlay stay up during a drag (`editing()` holds while a
+    gesture's previews recook).
+  - These runs shared the machine with other sessions (load 7–10).
