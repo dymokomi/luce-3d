@@ -262,6 +262,35 @@ func zebra(view: View*, image: u8[]) -> !:
     assert(dark and light and jumps * 50 < inside)
     try view.renderer.value().set_shading(0)
 
+## The curvature map: a sphere bends one way everywhere (red at the automatic
+## range); a flat grid reads zero (green); a fixed range ten times its
+## curvature fades the sphere towards green.
+func curvature_map(view: View*, image: u8[]) -> !:
+    try view.camera.value().set_position(Vector3(0.0, 1.0, 5.0))
+    try view.camera.value().look_at(Vector3(0.0, 1.0, 0.0))
+    let sphere = try MeshPrimitives.sphere(1.0, 48)
+    defer sphere.release()
+    try view.show(sphere, false)
+    try view.renderer.value().set_shading(6)
+    try view.renderer.value().set_curvature(0)
+    try view.draw(image)
+    let at = (usize)((height // 2 * width + width // 2) * 4)
+    assert(image[at] > 150 and image[at + 1] < 100)
+    try view.renderer.value().set_curvature(0, 10.0)
+    try view.draw(image)
+    assert(image[at + 1] > image[at])
+    let grid = try MeshPrimitives.grid(4.0, 8)
+    defer grid.release()
+    try view.camera.value().set_position(Vector3(0.0, 4.0, 0.5))
+    try view.camera.value().look_at(Vector3(0.0, 0.0, 0.0))
+    try view.show(grid, false)
+    try view.renderer.value().set_curvature(0)
+    try view.draw(image)
+    assert(image[at + 1] > 150 and image[at] < 100 and image[at + 2] < 100)
+    try view.renderer.value().set_shading(0)
+    try view.camera.value().set_position(Vector3(0.0, 1.0, 5.0))
+    try view.camera.value().look_at(Vector3(0.0, 1.0, 0.0))
+
 pub func main(arguments: str[]) -> i32!:
     var device = gpu.Device.open() catch failure:
         if failure.code == gpu.unavailable:
@@ -295,7 +324,8 @@ pub func main(arguments: str[]) -> i32!:
     try view.draw(image)
     assert(view.renderer.value().uploads() == before + 2)
     try zebra(&view, image)
+    try curvature_map(&view, image)
     try occlusion(&view, cube, image)
     try two_sided(&view, cube, legacy_image, image)
-    print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded; inside-out meshes light on the eye's side")
+    print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded; inside-out meshes light on the eye's side; curvature maps")
     return 0

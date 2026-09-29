@@ -86,9 +86,20 @@ pub struct Renderer:
     ## (or across the planar model), `duty` the dark share, around `axis`.
     ## Shading is draw state: changing it uploads nothing.
     pub mutating func set_shading(mode: i64, stripes: f64 = 20.0, duty: f64 = 0.5, axis: Vector3 = Vector3(0.0, 1.0, 0.0), planar: bool = false, stripes_only: bool = false) -> !:
-        if mode < 0 or mode > 5 or not (stripes >= 1.0 and stripes <= 256.0) or not (duty > 0.0 and duty < 1.0) or not axis.is_finite() or axis.length() < 0.000001:
-            error(errors.invalid, "shading needs a mode 0..5, 1..256 stripes, a duty in (0,1) and a nonzero axis")
-        self.shading = MeshShading(mode = gpu.Shading((u8)mode), stripes = stripes, duty = duty, planar = planar, stripes_only = stripes_only, axis = try axis.normalized())
+        if mode < 0 or mode > 6 or not (stripes >= 1.0 and stripes <= 256.0) or not (duty > 0.0 and duty < 1.0) or not axis.is_finite() or axis.length() < 0.000001:
+            error(errors.invalid, "shading needs a mode 0..6, 1..256 stripes, a duty in (0,1) and a nonzero axis")
+        let kind = self.shading.curvature
+        let range = self.shading.curvature_range
+        self.shading = MeshShading(mode = gpu.Shading((u8)mode), stripes = stripes, duty = duty, planar = planar, stripes_only = stripes_only, axis = try axis.normalized(), curvature = kind, curvature_range = range)
+
+    ## The curvature map (shading mode 6): which value (0 mean, 1 Gaussian,
+    ## 2 k1, 3 k2, 4 the larger |k|) and the value it spans (0: automatic,
+    ## the 98th percentile of the mesh's values).
+    pub mutating func set_curvature(kind: i64, range: f64 = 0.0) -> !:
+        if kind < 0 or kind > 4 or not (range >= 0.0 and range < 1.0e12):
+            error(errors.invalid, "curvature needs a value kind 0..4 and a finite range, 0 for automatic")
+        self.shading.curvature = kind
+        self.shading.curvature_range = range
 
     ## Draw every polygon mesh's edges `width` logical pixels wide (0: none),
     ## from the same GPU arrays as its surfaces; `surfaces` false leaves only

@@ -20,6 +20,7 @@ let tag_colors: u8 = 5
 let tag_triangles: u8 = 6
 let tag_faces: u8 = 7
 let tag_edges: u8 = 8
+let tag_curvature: u8 = 9
 
 ## Triangles per draw: the triangle and face buffers stay under luce-gpu's
 ## buffer limit (12 bytes per triangle).
@@ -36,6 +37,10 @@ pub struct MeshShading:
     pub var axis: Vector3 = Vector3(0.0, 1.0, 0.0)
     pub var dark: Color = Color(0.0, 0.0, 0.0)
     pub var light: Color = Color(1.0, 1.0, 1.0)
+    ## Curvature mode: which value (0 mean, 1 Gaussian, 2 k1, 3 k2, 4 the
+    ## larger |k|) and the value the map spans (0: the 98th percentile).
+    pub var curvature: i64 = 0
+    pub var curvature_range: f64 = 0.0
 
 ## What every object in a frame shares: the camera and the lights. Up to four
 ## directional lights reach the shader; ambient lights add up.
@@ -59,9 +64,16 @@ pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh:
         let normals = try normal_buffer(arrays, mesh)
         buffers.normals = normals.0
         block[gpu.mesh_mode + 1] = (f32)normals.1
-        let colors = try color_buffer(arrays, mesh)
-        if let buffer = colors.0: buffers.colors = buffer
-        block[gpu.mesh_mode + 2] = (f32)colors.1
+        if shading.mode == gpu.Shading.curvature:
+            let curvature = try curvature_buffer(arrays, mesh, shading)
+            buffers.colors = curvature.0
+            block[gpu.mesh_mode + 2] = (f32)curvature.1
+            block[gpu.mesh_curvature] = (f32)shading.curvature
+            block[gpu.mesh_curvature + 1] = (f32)curvature.2
+        else:
+            let colors = try color_buffer(arrays, mesh)
+            if let buffer = colors.0: buffers.colors = buffer
+            block[gpu.mesh_mode + 2] = (f32)colors.1
         let total = (usize)mesh.index_count() // 3
         var first: usize = 0
         var part: u32 = 0
@@ -106,8 +118,8 @@ pub func draw_polygon_ids(arrays: GpuArrays*, target: const gpu.RenderTarget*, m
         first += count
         part += 1
 
-func parameters(mesh: const PolygonMesh*, world: Matrix4, projection: Projection, lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*) -> f32[120]:
-    var block: f32[120]
+func parameters(mesh: const PolygonMesh*, world: Matrix4, projection: Projection, lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*) -> f32[124]:
+    var block: f32[124]
     let view = projection_matrix(projection)
     # Positions are f32 offsets from the mesh's f64 origin; the origin joins
     # the placement here, in f64.
@@ -221,6 +233,24 @@ func normal_buffer(arrays: GpuArrays*, mesh: const PolygonMesh*) -> (gpu.Buffer,
     let bytes = try arrays.staging((usize)mesh.vertex_count() * 12)
     try native.pack_smooth_normals(mesh, as_f32(bytes))
     return (try arrays.store(key, bytes, ids.1), 1)
+
+## Principal curvatures (k1, k2) for the curvature map: the CAD analytic
+## attributes (corners), else the discrete estimate (points); their domain;
+## and the range the map spans.
+func curvature_buffer(arrays: GpuArrays*, mesh: const PolygonMesh*, shading: const MeshShading*) -> (gpu.Buffer, i64, f64)!:
+    let source = try native.curvature_source(mesh)
+    var range = shading.curvature_range
+    if range <= 0.0:
+        if let known = arrays.range(source.key, shading.curvature): range = known
+        else:
+            range = try native.curvature_range(mesh, &source, shading.curvature)
+            arrays.remember_range(source.key, shading.curvature, range)
+    let key = ArrayKey(source.key, tag_curvature, 0)
+    if let found = arrays.find(key): return (found, source.domain, range)
+    let count = (usize)mesh.vertex_count() if source.domain == 1 else (usize)mesh.point_count()
+    let bytes = try arrays.staging(count * 12)
+    try native.pack_curvature(mesh, &source, as_f32(bytes))
+    return (try arrays.store(key, bytes), source.domain, range)
 
 ## Cd by the same precedence, or none.
 func color_buffer(arrays: GpuArrays*, mesh: const PolygonMesh*) -> (gpu.Buffer?, i64)!:
