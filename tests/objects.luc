@@ -1,5 +1,6 @@
 import geocore
-from three import EditOverlay, Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
+import math
+from three import Knife, EditOverlay, Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
 from gpu import Frame
 import gpu
 import window
@@ -94,6 +95,15 @@ func edit_overlays(target: gpu.RenderTarget) -> unit!:
     let raised = screen(camera, moved.point(6).add(moved.point(7)).multiply_scalar(0.5))
     assert(overlay.pick(camera, raised[0], raised[1] + 1.0, 200.0, 160.0) == top_edge)
     assert(overlay.pick(camera, middle[0], middle[1] + 1.0, 200.0, 160.0) != top_edge)
+    # A knife stroke across the cube's middle: its plane holds the eye, it
+    # passes over the faces under the line, and Shift snaps it to 15°.
+    let across = screen(camera, cube.point(0).add(cube.point(6)).multiply_scalar(0.5))
+    let stroke = Knife.plane(camera, across[0] - 30.0, across[1], across[0] + 30.0, across[1], 200.0, 160.0)
+    assert(math.abs(stroke.normal.length() - 1.0) < 0.000001 and stroke.point.subtract(camera.position()).length() < 0.000001)
+    let under = Knife.faces_under(cube, camera, across[0] - 30.0, across[1], across[0] + 30.0, across[1], 200.0, 160.0)
+    assert(under.count() >= 2 and under.count() <= 6)
+    let level = Knife.snapped(0.0, 0.0, 10.0, 1.0)
+    assert(math.abs(level.y) < 0.000001 and math.abs(level.x - math.sqrt(101.0)) < 0.000001)
     # A point cloud (CAD control vertices: no faces) picks the nearest point
     # on screen, within reach.
     let cloud = geocore.Mesh.from_corner_data([Vector3(0.0, 0.0, 0.0), Vector3(0.0, 2.0, 0.0)], [], [], [], [])

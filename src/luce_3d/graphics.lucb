@@ -28,6 +28,9 @@ pub let append_curve_segments = curve_lines.append_curve_segments
 import luce_3d.renderers.edit_overlay as edit_overlay
 pub type EditOverlay = edit_overlay.EditOverlay
 pub let edit_overlay_type = edit_overlay.edit_overlay_type
+import luce_3d.renderers.knife as knife
+pub type Knife = knife.Knife
+pub type KnifePlane = knife.KnifePlane
 
 pub type Material = material.Material
 pub type Color = material.Color
