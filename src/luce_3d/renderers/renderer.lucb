@@ -17,7 +17,7 @@ from luce_3d.core.object import Object3D, ObjectNode, Light, LightKind
 import geocore
 from geocore import Geometry, Vector3, Matrix4, Selection
 from geocore_kernel import selection_bits, subdivided_display, mesh_dispose
-from luce_3d.renderers.subdivision_draw import display_highlight
+from luce_3d.renderers.subdivision_draw import display_highlight, cage_face_of
 from luce_3d.core.material import Material, Color, check_color
 from luce_3d.cameras.perspective import PerspectiveCamera, Projection
 from luce_3d.renderers.projection import projection_matrix
@@ -141,6 +141,15 @@ pub struct Renderer:
             if placement.points == geometry.points_id(): found = placement.world
         let world = found else return -1
         let projection = try camera.value().projection(width / height)
+        # A subdivided cage is picked on the surface shown: the display's
+        # faces, answered as the cage faces they came from.
+        if let display = try subdivided_display(geometry):
+            defer mesh_dispose(display)
+            let face = try self.pick_mesh(display, world, projection, x, y, width, height)
+            return try cage_face_of(display, face)
+        return try self.pick_mesh(geometry, world, projection, x, y, width, height)
+
+    mutating func pick_mesh(geometry: const geocore.Mesh*, world: Matrix4, projection: Projection, x: f64, y: f64, width: f64, height: f64) -> i64!:
         var key = geometry.points_id() *% 0x9E3779B97F4A7C15 ^ geometry.triangles_id()
         let values: f64[25] = [world.x.x, world.x.y, world.x.z, world.y.x, world.y.y, world.y.z, world.z.x, world.z.y, world.z.z,
                                world.translation.x, world.translation.y, world.translation.z, projection.position.x, projection.position.y,

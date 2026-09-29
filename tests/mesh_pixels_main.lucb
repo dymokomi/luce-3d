@@ -200,10 +200,10 @@ func occlusion(view: View*, cube: interop.Reference[geocore.Mesh], image: u8[]) 
 ## directly.
 func subdivided(view: View*, cube: interop.Reference[geocore.Mesh], image: u8[], direct: u8[]) -> !:
     try view.show(cube, false)
-    try view.draw(image)
+    try view.draw(direct)
     var cage_covered: usize = 0
     for at in 0..<(usize)(width * height):
-        if image[at * 4] != 0: cage_covered += 1
+        if direct[at * 4] != 0: cage_covered += 1
     let marking = try Verbs.run("Subdivision", cube, "", 0, [1.0, 2.0, 3.0, 1.0])
     defer marking.release()
     let marked = try marking.value().mesh()
@@ -214,6 +214,29 @@ func subdivided(view: View*, cube: interop.Reference[geocore.Mesh], image: u8[],
     for at in 0..<(usize)(width * height):
         if image[at * 4] != 0: covered += 1
     assert(covered > 1000 and covered * 20 < cage_covered * 19)
+    # Picking hits what is shown: a pixel inside the cage's silhouette but
+    # off the smooth surface misses; one on it names a cage face, which the
+    # selection tint then covers.
+    let renderer = view.renderer.value()
+    var outside: i64 = -1
+    for at in 0..<(usize)(width * height):
+        if direct[at * 4] != 0 and image[at * 4] == 0:
+            outside = (i64)at
+            break
+    assert(outside >= 0)
+    let ox = (f64)(outside % (i64)width) + 0.5
+    let oy = (f64)(outside // (i64)width) + 0.5
+    assert((try renderer.pick_face(marked, view.camera, ox, oy, (f64)width, (f64)height)) == -1)
+    assert((try renderer.pick_face(cube, view.camera, ox, oy, (f64)width, (f64)height)) >= 0)
+    let face = try renderer.pick_face(marked, view.camera, (f64)width * 0.5, (f64)height * 0.5, (f64)width, (f64)height)
+    assert(face >= 0 and face < 6)
+    let center = (usize)((height // 2 * width + width // 2) * 4)
+    try renderer.set_face_selection(marked, [face], Color(1.0, 0.0, 0.0), 1.0)
+    try view.draw(direct)
+    assert(direct[center] > 200 and direct[center + 1] < 40)
+    var nothing: i64[]
+    try renderer.set_face_selection(marked, nothing)
+    try view.draw(image)
     let display = try Subdivision.display(marked)
     defer display.release()
     try view.show(display, false)
