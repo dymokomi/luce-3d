@@ -12,6 +12,7 @@ from luce_3d.geometries.attributes import AttributeSet
 from luce_3d.geometries.query_cache import QueryCache
 from luce_3d.geometries.polygon_triangulation import triangulate, area_normal
 import luce_3d.geometries.display_triangulation as display_triangles
+from luce_3d.geometries.topology_hash import topology_hash
 
 pub struct PolygonMesh: Geometry, PolygonTopology:
     let points: Vector3[]
@@ -26,6 +27,8 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
     let corner_edges: usize[]
     let edges: usize
     let extent: Bounds
+    # Connectivity fingerprint, computed once; position-only copies keep it.
+    let topology_key: u64
     var attributes: AttributeSet
     # Same-thread immutable snapshots share topology, never mutable attributes.
     # Worker transfer still takes an independent native copy.
@@ -155,6 +158,7 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         self.corner_edges = corner_edges
         self.edges = edges
         self.extent = Bounds(minimum, maximum)
+        self.topology_key = topology_hash(points.length, sizes, corners)
 
     # Attribute-only edits keep the triangulation, edge index, bounds and BVH.
     func snapshot_storage() -> PolygonMesh*!:
@@ -187,6 +191,9 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
 
     pub func point_count() -> i64:
         return (i64)self.points.length
+    ## Nonzero 64-bit connectivity hash (bit pattern as a signed integer).
+    pub func topology_hash() -> i64:
+        return (i64)self.topology_key
     pub func domain_count(domain: i64) -> i64!:
         if domain < 0 or domain > 3:
             error(errors.invalid, "unknown attribute domain")
