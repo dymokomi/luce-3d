@@ -1,0 +1,238 @@
+## Screen-space support for Edit overlays: a per-camera projection of every
+## point for picking, and depth-tested point markers thinned to one per
+## marker-sized screen cell. Visibility comes from the depth buffer when
+## drawing and from a single ray per pick candidate, never a ray per point.
+import gpu
+import math
+import memory
+from luce_3d.math.vector import Vector3
+from luce_3d.geometries.polygon import PolygonMesh
+from luce_3d.cameras.perspective import Projection
+
+## Picking radius in logical pixels, and hidden candidates tried per pick.
+let reach: f64 = 11.0
+let attempts: usize = 8
+let cell: f64 = 6.0
+
+## A heap array that grows by doubling and keeps its capacity across rebuilds.
+pub struct Growing[T]:
+    pub var items: T[]
+    pub var count: usize = 0
+
+    pub func view() -> const T[]:
+        return self.items[..<self.count]
+
+    pub mutating func clear():
+        self.count = 0
+
+    pub mutating func reserve(capacity: usize) -> !:
+        if capacity <= self.items.length: return
+        var size: usize = 64 if self.items.length == 0 else self.items.length
+        while size < capacity: size *= 2
+        let grown = try alloc T[size] in memory.heap
+        if self.count > 0: memory.copy(grown, self.items, self.count)
+        if self.items.length > 0: free(self.items) in memory.heap
+        self.items = grown
+
+    pub mutating func push(value: T) -> !:
+        try self.reserve(self.count + 1)
+        self.items[self.count] = value
+        self.count += 1
+
+    pub mutating func fill(count: usize, value: T) -> !:
+        try self.reserve(count)
+        for at in 0..<count: self.items[at] = value
+        self.count = count
+
+    pub mutating func assign(values: const T[]) -> !:
+        try self.reserve(values.length)
+        if values.length > 0: memory.copy(self.items, values, values.length)
+        self.count = values.length
+
+    pub mutating func close():
+        if self.items.length > 0: free(self.items) in memory.heap
+        var empty: T[]
+        self.items = empty
+        self.count = 0
+
+pub func same_ids(stored: const Growing[i64]*, values: const i64[]) -> bool:
+    if values.length != stored.count: return false
+    for at in 0..<values.length:
+        if stored.items[at] != values[at]: return false
+    return true
+
+## Logical-pixel positions and view depths of every point for one camera.
+## A depth of -1 marks a point behind the near plane.
+pub struct Screen:
+    var xs: Growing[f32]
+    var ys: Growing[f32]
+    var depths: Growing[f32]
+    var key: f64[20]
+    pub var version: u64 = 0
+
+    pub func init():
+        self.xs = Growing[f32]()
+        self.ys = Growing[f32]()
+        self.depths = Growing[f32]()
+        var key: f64[20]
+        for at in 0..<(usize)20: key[at] = math.nan
+        self.key = key
+        self.version = 0
+
+    pub mutating func invalidate():
+        self.key[0] = math.nan
+
+    pub mutating func update(mesh: const PolygonMesh*, p: Projection, width: f64, height: f64) -> !:
+        let key: f64[20] = [p.position.x, p.position.y, p.position.z, p.right.x, p.right.y, p.right.z, p.up.x, p.up.y, p.up.z,
+                            p.backward.x, p.backward.y, p.backward.z, p.focal, p.aspect, p.near, p.far, width, height, (f64)mesh.point_count(), 0.0]
+        var same = true
+        for at in 0..<(usize)20: same = same and key[at] == self.key[at]
+        if same: return
+        let count = (usize)mesh.point_count()
+        try self.xs.fill(count, 0.0)
+        try self.ys.fill(count, 0.0)
+        try self.depths.fill(count, -1.0)
+        for id in 0..<count:
+            let offset = (try mesh.point((i64)id)).subtract(p.position)
+            let depth = -offset.dot(p.backward)
+            let d = math.max(p.near, depth)
+            self.xs.items[id] = (f32)((offset.dot(p.right) * p.focal / p.aspect / d + 1.0) * width * 0.5)
+            self.ys.items[id] = (f32)((1.0 - offset.dot(p.up) * p.focal / d) * height * 0.5)
+            self.depths.items[id] = (f32)depth if depth > p.near else -1.0
+        self.key = key
+        self.version += 1
+
+    ## Nearest point or edge under (x, y) that a ray from the eye reaches.
+    pub func pick(mesh: const PolygonMesh*, edges: bool, p: Projection, x: f64, y: f64) -> i64!:
+        var rejected: i64[8]
+        var tried: usize = 0
+        while tried < attempts:
+            var found: i64 = -1
+            var best = reach
+            var blend = 0.0
+            let count = mesh.edge_count() if edges else mesh.point_count()
+            for id in 0..<count:
+                if skipped(rejected, tried, id): continue
+                if not edges:
+                    let at = (usize)id
+                    if self.depths.items[at] <= 0.0: continue
+                    let distance = math.hypot((f64)self.xs.items[at] - x, (f64)self.ys.items[at] - y)
+                    if distance < best:
+                        best = distance
+                        found = id
+                    continue
+                let a = (usize)(try mesh.edge_point(id, 0))
+                let b = (usize)(try mesh.edge_point(id, 1))
+                let da = (f64)self.depths.items[a]
+                let db = (f64)self.depths.items[b]
+                if da <= 0.0 or db <= 0.0: continue
+                let ax = (f64)self.xs.items[a]
+                let ay = (f64)self.ys.items[a]
+                let dx = (f64)self.xs.items[b] - ax
+                let dy = (f64)self.ys.items[b] - ay
+                let t = math.max(0.0, math.min(1.0, ((x - ax) * dx + (y - ay) * dy) / math.max(0.000001, dx * dx + dy * dy)))
+                let distance = math.hypot(x - ax - t * dx, y - ay - t * dy)
+                if distance < best:
+                    best = distance
+                    found = id
+                    # Perspective-correct location under the cursor, not the midpoint.
+                    blend = (t / db) / ((1.0 - t) / da + t / db)
+            if found < 0: return -1
+            var target = Vector3()
+            if edges:
+                let a = try mesh.point(try mesh.edge_point(found, 0))
+                let b = try mesh.point(try mesh.edge_point(found, 1))
+                target = a.add(b.subtract(a).multiply_scalar(blend))
+            else:
+                target = try mesh.point(found)
+            if try visible(mesh, p.position, target): return found
+            rejected[tried] = found
+            tried += 1
+        return -1
+
+    pub mutating func close():
+        self.xs.close()
+        self.ys.close()
+        self.depths.close()
+
+func skipped(rejected: const i64[8], count: usize, id: i64) -> bool:
+    for at in 0..<count:
+        if rejected[at] == id: return true
+    return false
+
+func visible(mesh: const PolygonMesh*, origin: Vector3, point: Vector3) -> bool!:
+    let offset = point.subtract(origin)
+    let distance = offset.length()
+    if distance < 0.00001: return false
+    let nearest = try mesh.ray_distance(origin, offset.multiply_scalar(1.0 / distance))
+    return nearest < 0.0 or nearest >= distance - math.max(0.002, distance * 0.0001)
+
+## Depth-tested square markers, at most one ordinary and one selected marker
+## per screen cell (the nearest point wins). Rebuilt when the camera or the
+## selection changes; the hovered marker is drawn on its own.
+pub struct Markers:
+    var vertices: Growing[gpu.Vertex]
+    var nearest: Growing[i64]
+    var version: u64 = 0
+    var valid: bool = false
+
+    pub func init():
+        self.vertices = Growing[gpu.Vertex]()
+        self.nearest = Growing[i64]()
+        self.version = 0
+        self.valid = false
+
+    pub mutating func invalidate():
+        self.valid = false
+
+    pub mutating func draw(target: const gpu.RenderTarget*, screen: const Screen*, selected: const bool[], hovered: i64,
+                           p: Projection, width: f64, height: f64, ordinary: gpu.Color, accent: gpu.Color) -> !:
+        if not self.valid or self.version != screen.version:
+            self.vertices.clear()
+            # Selected markers first: at equal depth the first one drawn wins.
+            for round in 0..<(usize)2:
+                try self.nearest_per_cell(screen, selected, round == 0, width, height)
+                for id in self.nearest.view():
+                    if id >= 0: try self.quad(screen, (usize)id, 3.0, p, width, height, accent if round == 0 else ordinary)
+            self.version = screen.version
+            self.valid = true
+        let count = self.vertices.count
+        if hovered >= 0 and (usize)hovered < screen.depths.count and screen.depths.items[(usize)hovered] > 0.0:
+            try self.quad(screen, (usize)hovered, 4.5, p, width, height, accent)
+        if self.vertices.count > 0:
+            try target.allow_vertices(8388608)
+            try target.triangles(self.vertices.view(), true)
+        self.vertices.count = count
+
+    mutating func nearest_per_cell(screen: const Screen*, selected: const bool[], chosen: bool, width: f64, height: f64) -> !:
+        let columns = (usize)math.ceil(width / cell)
+        let rows = (usize)math.ceil(height / cell)
+        try self.nearest.fill(columns * rows, -1)
+        for id in 0..<screen.depths.count:
+            let depth = screen.depths.items[id]
+            if depth <= 0.0 or selected[id] != chosen: continue
+            let x = (f64)screen.xs.items[id]
+            let y = (f64)screen.ys.items[id]
+            if x < 0.0 or y < 0.0 or x >= width or y >= height: continue
+            let slot = (usize)(y / cell) * columns + (usize)(x / cell)
+            let other = self.nearest.items[slot]
+            if other < 0 or screen.depths.items[(usize)other] > depth:
+                self.nearest.items[slot] = (i64)id
+
+    mutating func quad(screen: const Screen*, id: usize, radius: f64, p: Projection, width: f64, height: f64, color: gpu.Color) -> !:
+        let w = (f64)screen.depths.items[id]
+        let x = ((f64)screen.xs.items[id] / (width * 0.5) - 1.0) * w
+        let y = (1.0 - (f64)screen.ys.items[id] / (height * 0.5)) * w
+        # Pull the marker toward the eye by twice its own world size so the
+        # surface it sits on does not clip it.
+        let z = p.far * (w - p.near) / (p.far - p.near) - 4.0 * radius * p.far * p.near / (p.focal * height * (p.far - p.near))
+        let rx = radius * 2.0 / width * w
+        let ry = radius * 2.0 / height * w
+        let corners: f64[12] = [-rx, -ry, rx, -ry, rx, ry, -rx, -ry, rx, ry, -rx, ry]
+        for at in 0..<(usize)6:
+            try self.vertices.push(gpu.Vertex(x = (f32)(x + corners[at * 2]), y = (f32)(y + corners[at * 2 + 1]), z = (f32)z, w = (f32)w,
+                                              red = (f32)color.red, green = (f32)color.green, blue = (f32)color.blue))
+
+    pub mutating func close():
+        self.vertices.close()
+        self.nearest.close()

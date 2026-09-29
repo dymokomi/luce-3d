@@ -1,7 +1,8 @@
-from three import Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
+from three import PolygonMesh, EditOverlay, Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
 from three_ui import SceneView
 from ui import Application
 from gpu import Frame
+import gpu
 import window
 
 pub func main(arguments: list[str]) -> int!:
@@ -31,6 +32,62 @@ pub func main(arguments: list[str]) -> int!:
     assert(group.remove(mesh))
     scene.add(mesh)
     assert(group.node().child_count() == 0 and scene.node().child_count() == 4)
+    edit_overlays(target)
     frame.close()
     print("ok Luce scene objects and UI composition")
     return 0
+
+func screen(camera: PerspectiveCamera, point: Vector3) -> list[float]!:
+    let p = camera.projection(200.0 / 160.0)
+    let offset = point.subtract(p.position)
+    let depth = -offset.dot(p.backward)
+    return [(offset.dot(p.right) * p.focal / p.aspect / depth + 1.0) * 100.0, (1.0 - offset.dot(p.up) * p.focal / depth) * 80.0]
+
+## Edit overlays keep selection batches in Base and pick through the retained
+## screen projection, confirming the nearest candidate with one ray.
+func edit_overlays(target: gpu.RenderTarget) -> unit!:
+    let cube = PolygonMesh.cube(2.0)
+    let camera = PerspectiveCamera(50.0, 1.0, 0.1, 100.0)
+    camera.set_position(Vector3(3.0, 4.0, 5.0))
+    camera.look_at(Vector3(0.0, 1.0, 0.0))
+    let overlay = EditOverlay()
+    let grey = gpu.Color(0.3, 0.3, 0.3)
+    let accent = gpu.Color(1.0, 0.5, 0.0)
+    let top = EditOverlay.center(cube, 2, [2, 2])
+    assert(top.x == 0.0 and top.y == 2.0 and top.z == 0.0)
+    assert(EditOverlay.center(cube, 0, []).y == 1.0 and EditOverlay.center(cube, 1, [0]).y == 1.0)
+    overlay.update(cube, 2, [0], 1)
+    assert(overlay.accent_segments() == 4 and overlay.selected_triangles() == 2)
+    let builds = overlay.selection_builds()
+    for hovered in [2, 3, -1, 4]:
+        overlay.update(cube, 2, [0], hovered)
+        overlay.draw(camera, target, grey, accent, grey)
+    assert(overlay.selection_builds() == builds)
+    overlay.update(cube, 2, [0, 5], -1)
+    assert(overlay.selection_builds() == builds + 1 and overlay.selected_triangles() == 4)
+    overlay.draw(camera, target, grey, accent, grey)
+    overlay.update(cube, 1, [0, 1], 3)
+    assert(overlay.accent_segments() == 2 and overlay.selected_triangles() == 0)
+    overlay.update(cube, 0, [2, 3, 6, 7], -1)
+    assert(overlay.accent_segments() == 4)
+    overlay.draw(camera, target, grey, accent, grey)
+    let near = screen(camera, cube.point(6))
+    assert(overlay.pick(camera, near[0] + 2.0, near[1] - 1.0, 200.0, 160.0) == 6)
+    let hidden = screen(camera, cube.point(0))
+    assert(overlay.pick(camera, hidden[0], hidden[1], 200.0, 160.0) != 0)
+    var top_edge = -1
+    for edge in 0..<cube.edge_count():
+        let a = cube.edge_point(edge, 0)
+        let b = cube.edge_point(edge, 1)
+        if (a == 6 and b == 7) or (a == 7 and b == 6):
+            top_edge = edge
+    overlay.update(cube, 1, [], -1)
+    let middle = screen(camera, cube.point(6).add(cube.point(7)).multiply_scalar(0.5))
+    assert(overlay.pick(camera, middle[0], middle[1] + 1.0, 200.0, 160.0) == top_edge)
+    # A new mesh replaces every retained batch.
+    let moved = cube.moved_points([6, 7], Vector3(0.0, 1.5, 0.0))
+    overlay.update(moved, 1, [], -1)
+    overlay.draw(camera, target, grey, accent, grey)
+    let raised = screen(camera, moved.point(6).add(moved.point(7)).multiply_scalar(0.5))
+    assert(overlay.pick(camera, raised[0], raised[1] + 1.0, 200.0, 160.0) == top_edge)
+    assert(overlay.pick(camera, middle[0], middle[1] + 1.0, 200.0, 160.0) != top_edge)

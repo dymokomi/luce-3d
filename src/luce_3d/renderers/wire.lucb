@@ -11,68 +11,84 @@ pub struct WireRenderer:
     let reserved: u8 = 0
 
     ## Independent endpoint pairs; width is in target logical pixels, not world units.
+    ## Any count is accepted; vertices are generated in bounded chunks.
     pub static func lines(points: const Vector3[], camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget],
                           color: gpu.Color, width: f64 = 1.0, bias: f64 = 0.000001) -> !:
-        if points.length % 2 != 0 or points.length > 131072 or not math.is_finite(width) or width <= 0.0 or width > 32.0:
+        if points.length % 2 != 0 or not math.is_finite(width) or width <= 0.0 or width > 32.0:
             error(errors.invalid, "invalid wire segment count or pixel width")
         let native = try target.get()
         let size = try native.size()
         if size.width <= 0.0 or size.height <= 0.0 or points.length == 0:
             return
         let projection = try camera.value().projection(size.width / size.height)
-        let vertices = try alloc gpu.Vertex[points.length * 3] in memory.heap
+        let vertices = try alloc gpu.Vertex[(chunk if points.length > chunk else points.length) * 3] in memory.heap
         defer free(vertices) in memory.heap
-        var count: usize = 0
-        var index: usize = 0
-        while index < points.length:
-            var a = points[index]
-            var b = points[index + 1]
-            index += 2
-            if not a.is_finite() or not b.is_finite():
-                error(errors.invalid, "wire endpoints must be finite")
-            var da = -a.subtract(projection.position).dot(projection.backward)
-            var db = -b.subtract(projection.position).dot(projection.backward)
-            if (da < projection.near and db < projection.near) or (da > projection.far and db > projection.far):
-                continue
-            if da < projection.near:
-                a = a.add(b.subtract(a).multiply_scalar((projection.near - da) / (db - da)))
-                da = projection.near
-            if db < projection.near:
-                b = b.add(a.subtract(b).multiply_scalar((projection.near - db) / (da - db)))
-                db = projection.near
-            let av = projected(a, projection, color, bias)
-            let bv = projected(b, projection, color, bias)
-            let dx = ((f64)bv.x / db - (f64)av.x / da) * size.width
-            let dy = ((f64)bv.y / db - (f64)av.y / da) * size.height
-            let length = math.sqrt(dx * dx + dy * dy)
-            if length < 0.000001:
-                continue
-            let nx = -dy / length * width / size.width
-            let ny = dx / length * width / size.height
-            let a0 = offset(av, nx, ny)
-            let a1 = offset(av, -nx, -ny)
-            let b0 = offset(bv, nx, ny)
-            let b1 = offset(bv, -nx, -ny)
-            for vertex in [a0, b0, b1, a0, b1, a1]:
-                vertices[count] = vertex
-                count += 1
-        if count > 0:
-            try native.triangles(vertices[..<count], true)
+        var start: usize = 0
+        while start < points.length:
+            let end = start + chunk if points.length - start > chunk else points.length
+            try segments(points[start..<end], projection, native, vertices, color, width, bias, size.width, size.height)
+            start = end
 
     ## Selection fills share the scene depth buffer, unlike 2D Painter triangles.
     pub static func triangles(points: const Vector3[], camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color) -> !:
-        if points.length % 3 != 0 or points.length > 196608:
+        if points.length % 3 != 0:
             error(errors.invalid, "invalid overlay triangle count")
         let native = try target.get()
         let size = try native.size()
         if points.length == 0 or size.width <= 0.0 or size.height <= 0.0:
             return
         let projection = try camera.value().projection(size.width / size.height)
-        let vertices = try alloc gpu.Vertex[points.length] in memory.heap
+        let vertices = try alloc gpu.Vertex[chunk if points.length > chunk else points.length] in memory.heap
         defer free(vertices) in memory.heap
-        for index in 0..<points.length:
-            vertices[index] = projected(points[index], projection, color, 0.0000005)
-        try native.triangles(vertices, true)
+        var start: usize = 0
+        while start < points.length:
+            let end = start + chunk if points.length - start > chunk else points.length
+            for index in start..<end:
+                vertices[index - start] = projected(points[index], projection, color, 0.0000005)
+            try native.triangles(vertices[..<end - start], true)
+            start = end
+
+## Points per chunk: even and a multiple of three, so no segment or triangle splits.
+let chunk: usize = 131070
+
+func segments(points: const Vector3[], projection: Projection, native: const gpu.RenderTarget*, vertices: gpu.Vertex[],
+              color: gpu.Color, width: f64, bias: f64, target_width: f64, target_height: f64) -> !:
+    var count: usize = 0
+    var index: usize = 0
+    while index < points.length:
+        var a = points[index]
+        var b = points[index + 1]
+        index += 2
+        if not a.is_finite() or not b.is_finite():
+            error(errors.invalid, "wire endpoints must be finite")
+        var da = -a.subtract(projection.position).dot(projection.backward)
+        var db = -b.subtract(projection.position).dot(projection.backward)
+        if (da < projection.near and db < projection.near) or (da > projection.far and db > projection.far):
+            continue
+        if da < projection.near:
+            a = a.add(b.subtract(a).multiply_scalar((projection.near - da) / (db - da)))
+            da = projection.near
+        if db < projection.near:
+            b = b.add(a.subtract(b).multiply_scalar((projection.near - db) / (da - db)))
+            db = projection.near
+        let av = projected(a, projection, color, bias)
+        let bv = projected(b, projection, color, bias)
+        let dx = ((f64)bv.x / db - (f64)av.x / da) * target_width
+        let dy = ((f64)bv.y / db - (f64)av.y / da) * target_height
+        let length = math.sqrt(dx * dx + dy * dy)
+        if length < 0.000001:
+            continue
+        let nx = -dy / length * width / target_width
+        let ny = dx / length * width / target_height
+        let a0 = offset(av, nx, ny)
+        let a1 = offset(av, -nx, -ny)
+        let b0 = offset(bv, nx, ny)
+        let b1 = offset(bv, -nx, -ny)
+        for vertex in [a0, b0, b1, a0, b1, a1]:
+            vertices[count] = vertex
+            count += 1
+    if count > 0:
+        try native.triangles(vertices[..<count], true)
 
 func projected(point: Vector3, projection: Projection, color: gpu.Color, bias: f64) -> gpu.Vertex:
     let relative = point.subtract(projection.position)

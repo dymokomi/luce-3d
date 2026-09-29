@@ -37,11 +37,7 @@ pub struct WireBatch:
             let matrix = projection_matrix(try camera.value().projection(size.width / size.height))
             try self.retained.draw(native, matrix, color, width)
             return
-        var offset: usize = 0
-        while offset < self.points.length:
-            let end = offset + 131072 if self.points.length - offset > 131072 else self.points.length
-            try WireRenderer.lines(self.points[offset..<end], camera, target, color, width)
-            offset = end
+        try WireRenderer.lines(self.points, camera, target, color, width)
     pub mutating func close():
         self.retained.close()
         free(self.points) in memory.heap

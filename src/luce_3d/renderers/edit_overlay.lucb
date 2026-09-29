@@ -1,0 +1,272 @@
+## Edit-mode overlays kept in Base: the full wireframe is one retained GPU batch
+## per mesh, selection geometry is rebuilt only when the selection changes, and
+## point markers only when the camera does. A Luce loop over a CAD mesh's 1.4M
+## edges cost 0.6-2.4 s per frame.
+import gpu
+import interop
+import math
+import memory
+import ownership
+import luce_3d.errors as errors
+from luce_3d.math.vector import Vector3
+from luce_3d.geometries.polygon import PolygonMesh
+from luce_3d.cameras.perspective import PerspectiveCamera, Projection
+from luce_3d.renderers.wire import WireRenderer
+from luce_3d.renderers.projection import projection_matrix
+from luce_3d.renderers.retained import RetainedBatch
+from luce_3d.renderers.edit_markers import Markers, Screen, Growing, same_ids
+
+## Component modes: 0 points, 1 edges, 2 faces.
+pub struct EditOverlay:
+    var mesh: interop.Reference[PolygonMesh]?
+    var mode: i64
+    var selection: Growing[i64]
+    var hovered: i64
+    # Wireframe of every edge, uploaded once per mesh; the CPU copy exists only
+    # for targets without a device.
+    var wires: RetainedBatch
+    var wire_points: Growing[Vector3]
+    # Accent edges and face triangles of the current selection.
+    var accent: Growing[Vector3]
+    var faces: Growing[Vector3]
+    var hover: Growing[Vector3]
+    var selected: Growing[bool]
+    # Point-to-edge adjacency (CSR), built once per mesh for point selections.
+    var edge_starts: Growing[u32]
+    var point_edges: Growing[u32]
+    var screen: Screen
+    var markers: Markers
+    var builds: i64
+
+    pub func init():
+        self.mesh = none
+        self.mode = -1
+        self.hovered = -1
+        self.selection = Growing[i64]()
+        self.wires = RetainedBatch()
+        self.wire_points = Growing[Vector3]()
+        self.accent = Growing[Vector3]()
+        self.faces = Growing[Vector3]()
+        self.hover = Growing[Vector3]()
+        self.selected = Growing[bool]()
+        self.edge_starts = Growing[u32]()
+        self.point_edges = Growing[u32]()
+        self.screen = Screen()
+        self.markers = Markers()
+        self.builds = 0
+
+    ## Cheap when nothing changed: an identity compare and one pass over the
+    ## selection list. The mesh is retained, so its address cannot be reused.
+    pub mutating func update(mesh: interop.Reference[PolygonMesh], mode: i64, selection: const i64[], hovered: i64) -> !:
+        if mode < 0 or mode > 2: error(errors.invalid, "edit component mode must be 0, 1 or 2")
+        let geometry = try mesh.get()
+        var changed_mesh = true
+        if let current = self.mesh:
+            changed_mesh = current.value() != geometry
+        if changed_mesh:
+            if let current = self.mesh: current.release()
+            self.mesh = mesh.clone()
+            self.wires.close()
+            self.wire_points.clear()
+            self.edge_starts.clear()
+            self.point_edges.clear()
+            self.screen.invalidate()
+        let changed = changed_mesh or mode != self.mode or not same_ids(&self.selection, selection)
+        if changed:
+            self.mode = mode
+            try self.selection.assign(selection)
+            try self.rebuild_selection(geometry)
+            self.builds += 1
+            self.markers.invalidate()
+        if changed or hovered != self.hovered:
+            self.hovered = hovered
+            try self.rebuild_hover(geometry)
+
+    pub mutating func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget],
+                           wire: gpu.Color, accent: gpu.Color, point: gpu.Color) -> !:
+        let current = self.mesh else return
+        let mesh = try current.get()
+        let native = try target.get()
+        let size = try native.size()
+        if size.width <= 0.0 or size.height <= 0.0: return
+        try self.draw_wires(mesh, camera, target, wire)
+        if self.faces.count > 0:
+            try WireRenderer.triangles(self.faces.view(), camera, target, accent)
+        if self.accent.count > 0:
+            try WireRenderer.lines(self.accent.view(), camera, target, accent, 2.5)
+        if self.hover.count > 0:
+            try WireRenderer.lines(self.hover.view(), camera, target, accent, 3.0 if self.mode == 2 else 2.5)
+        if self.mode == 0:
+            let projection = try camera.value().projection(size.width / size.height)
+            try self.screen.update(mesh, projection, size.width, size.height)
+            try self.markers.draw(native, &self.screen, self.selected.view(), self.hovered, projection, size.width, size.height, point, accent)
+
+    ## Mean of the distinct points under a selection, or the bounds center when
+    ## nothing is selected: the Move gizmo's origin, without Luce list scans.
+    pub static func center(mesh: interop.Reference[PolygonMesh], mode: i64, selection: const i64[]) -> Vector3!:
+        let geometry = try mesh.get()
+        let marked = try alloc bool[(usize)geometry.point_count()] in memory.heap
+        defer free(marked) in memory.heap
+        for at in 0..<marked.length: marked[at] = false
+        var sum = Vector3()
+        var count = 0.0
+        for id in selection:
+            var size: i64 = 0
+            if mode == 0 and id >= 0 and id < geometry.point_count(): size = 1
+            elif mode == 1 and id >= 0 and id < geometry.edge_count(): size = 2
+            elif mode == 2 and id >= 0 and id < geometry.face_count(): size = try geometry.face_size(id)
+            for at in 0..<size:
+                var point = id
+                if mode == 1: point = try geometry.edge_point(id, at)
+                elif mode == 2: point = try geometry.face_point(id, at)
+                if marked[(usize)point]: continue
+                marked[(usize)point] = true
+                sum = sum.add(try geometry.point(point))
+                count += 1.0
+        if count == 0.0: return geometry.bounds().minimum.add(geometry.bounds().maximum).multiply_scalar(0.5)
+        return sum.multiply_scalar(1.0 / count)
+
+    ## Selection batch sizes, for tests and diagnostics.
+    pub func accent_segments() -> i64:
+        return (i64)self.accent.count // 2
+    pub func selected_triangles() -> i64:
+        return (i64)self.faces.count // 3
+    ## Selection rebuilds so far: hover and camera changes must not add any.
+    pub func selection_builds() -> i64:
+        return self.builds
+
+    ## Nearest visible point (mode 0) or edge (mode 1) within 11 pixels, or -1.
+    ## Candidates are confirmed by one ray each, nearest first.
+    pub mutating func pick(camera: interop.Reference[PerspectiveCamera], x: f64, y: f64, width: f64, height: f64) -> i64!:
+        let current = self.mesh else return -1
+        let mesh = try current.get()
+        if self.mode == 2 or width <= 0.0 or height <= 0.0: return -1
+        let projection = try camera.value().projection(math.max(1.0, width) / math.max(1.0, height))
+        try self.screen.update(mesh, projection, width, height)
+        return try self.screen.pick(mesh, self.mode == 1, projection, x, y)
+
+    mutating func draw_wires(mesh: const PolygonMesh*, camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color) -> !:
+        let native = try target.get()
+        var device = gpu.device_of(native) catch failure:
+            if failure.code != gpu.unavailable: error(failure.code, failure.message)
+            recover gpu.Device()
+        defer device.destroy()
+        let edges = (usize)mesh.edge_count()
+        if edges == 0: return
+        if device.is_open():
+            if not self.wires.is_open():
+                let vertices = try alloc gpu.Vertex[edges] in memory.heap
+                defer free(vertices) in memory.heap
+                for edge in 0..<edges:
+                    let a = try mesh.point(try mesh.edge_point((i64)edge, 0))
+                    let b = try mesh.point(try mesh.edge_point((i64)edge, 1))
+                    vertices[edge] = gpu.Vertex(x = (f32)a.x, y = (f32)a.y, z = (f32)a.z, red = (f32)b.x, green = (f32)b.y, blue = (f32)b.z)
+                try self.wires.upload(device, vertices, true)
+            let size = try native.size()
+            let matrix = projection_matrix(try camera.value().projection(size.width / size.height))
+            try self.wires.draw(native, matrix, color, 1.0)
+            return
+        if self.wire_points.count == 0:
+            try self.wire_points.reserve(edges * 2)
+            for edge in 0..<edges:
+                try self.wire_points.push(try mesh.point(try mesh.edge_point((i64)edge, 0)))
+                try self.wire_points.push(try mesh.point(try mesh.edge_point((i64)edge, 1)))
+        try WireRenderer.lines(self.wire_points.view(), camera, target, color)
+
+    ## Selection geometry costs O(selection), never O(mesh): selected faces add
+    ## their triangles (a contiguous range per face) and edges; selected points
+    ## light the edges whose ends are both selected, found by adjacency.
+    mutating func rebuild_selection(mesh: const PolygonMesh*) -> !:
+        self.accent.clear()
+        self.faces.clear()
+        let points = (usize)mesh.point_count()
+        if self.mode == 0:
+            try self.selected.fill(points, false)
+            for id in self.selection.view():
+                if id >= 0 and (usize)id < points: self.selected.items[(usize)id] = true
+            if self.selection.count > 0: try self.adjacency(mesh)
+            for id in self.selection.view():
+                if id < 0 or (usize)id >= points: continue
+                for at in self.edge_starts.items[(usize)id]..<self.edge_starts.items[(usize)id + 1]:
+                    let edge = (i64)self.point_edges.items[(usize)at]
+                    let a = try mesh.edge_point(edge, 0)
+                    let b = try mesh.edge_point(edge, 1)
+                    # Reached from both selected ends; emit from the low one.
+                    if a == id and self.selected.items[(usize)b]:
+                        try self.accent.push(try mesh.point(a))
+                        try self.accent.push(try mesh.point(b))
+            return
+        self.selected.clear()
+        for id in self.selection.view():
+            if self.mode == 1:
+                if id < 0 or id >= mesh.edge_count(): continue
+                try self.accent.push(try mesh.point(try mesh.edge_point(id, 0)))
+                try self.accent.push(try mesh.point(try mesh.edge_point(id, 1)))
+                continue
+            if id < 0 or id >= mesh.face_count(): continue
+            let offset = try mesh.face_offset(id)
+            let size = try mesh.face_size(id)
+            for at in 0..<size:
+                try self.accent.push(try mesh.point(try mesh.face_point(id, at)))
+                try self.accent.push(try mesh.point(try mesh.face_point(id, (at + 1) % size)))
+            # Triangles are grouped by face, size - 2 per polygon.
+            let first = (offset - id * 2) * 3
+            for at in first..<first + (size - 2) * 3:
+                let value = mesh.index(at)
+                defer value.release()
+                try self.faces.push(try mesh.point(try mesh.corner_point(try value.get())))
+
+    mutating func adjacency(mesh: const PolygonMesh*) -> !:
+        if self.edge_starts.count > 0: return
+        let points = (usize)mesh.point_count()
+        let edges = mesh.edge_count()
+        try self.edge_starts.fill(points + 1, 0)
+        for edge in 0..<edges:
+            self.edge_starts.items[(usize)(try mesh.edge_point(edge, 0)) + 1] += 1
+            self.edge_starts.items[(usize)(try mesh.edge_point(edge, 1)) + 1] += 1
+        for at in 0..<points: self.edge_starts.items[at + 1] += self.edge_starts.items[at]
+        try self.point_edges.fill((usize)edges * 2, 0)
+        var cursor = try alloc u32[points] in memory.heap
+        defer free(cursor) in memory.heap
+        memory.copy(cursor, self.edge_starts.items, points)
+        for edge in 0..<edges:
+            for end in 0..<(i64)2:
+                let point = (usize)(try mesh.edge_point(edge, end))
+                self.point_edges.items[(usize)cursor[point]] = (u32)edge
+                cursor[point] += 1
+
+    ## The hovered edge, or the outline of a hovered unselected face.
+    mutating func rebuild_hover(mesh: const PolygonMesh*) -> !:
+        self.hover.clear()
+        let id = self.hovered
+        if id < 0: return
+        if self.mode == 1 and id < mesh.edge_count():
+            try self.hover.push(try mesh.point(try mesh.edge_point(id, 0)))
+            try self.hover.push(try mesh.point(try mesh.edge_point(id, 1)))
+        if self.mode == 2 and id < mesh.face_count():
+            for chosen in self.selection.view():
+                if chosen == id: return
+            let size = try mesh.face_size(id)
+            for at in 0..<size:
+                try self.hover.push(try mesh.point(try mesh.face_point(id, at)))
+                try self.hover.push(try mesh.point(try mesh.face_point(id, (at + 1) % size)))
+
+    pub mutating func close():
+        if let current = self.mesh: current.release()
+        self.mesh = none
+        self.wires.close()
+        self.wire_points.close()
+        self.selection.close()
+        self.accent.close()
+        self.faces.close()
+        self.hover.close()
+        self.selected.close()
+        self.edge_starts.close()
+        self.point_edges.close()
+        self.screen.close()
+        self.markers.close()
+
+    func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
+        if let current = self.mesh: current.trace(visit, context)
+
+pub let edit_overlay_type: interop.Type[EditOverlay] = interop.Type[EditOverlay]("EditOverlay", EditOverlay.close, EditOverlay.trace, closeable = true, main_thread = true)
