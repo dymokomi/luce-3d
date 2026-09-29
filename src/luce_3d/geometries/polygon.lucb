@@ -9,7 +9,7 @@ from luce_3d.core.polygon_topology import PolygonTopology
 from luce_3d.math.vector import Vector3
 from luce_3d.math.matrix import Matrix4
 from luce_3d.geometries.attributes import AttributeSet
-from luce_3d.geometries.query_cache import QueryCache
+from luce_3d.geometries.query_cache import QueryCache, SharedCount
 from luce_3d.geometries.polygon_triangulation import triangulate, area_normal
 import luce_3d.geometries.display_triangulation as display_triangles
 from luce_3d.geometries.topology_hash import topology_hash
@@ -31,14 +31,15 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
     # Connectivity fingerprint, computed once; position-only copies keep it.
     let topology_key: u64
     var attributes: AttributeSet
-    # Same-thread immutable snapshots share topology, never mutable attributes.
-    # Worker transfer still takes an independent native copy.
+    # Snapshots, including worker-to-UI transfers, share the immutable storage
+    # and its query index, never attributes. Counts are atomic: owners on
+    # different threads close independently and the last one frees.
     var queries: QueryCache[]
     # Position-only edits share the sizes/corners/edge arrays and, unless a face
     # folded, the triangles. Each count is the number of query caches (point
     # sets) using that storage; the last one frees it.
-    var topology_owners: usize[]
-    var triangle_owners: usize[]
+    var topology_owners: SharedCount[]
+    var triangle_owners: SharedCount[]
 
     ## Optional display indices are grouped by polygon, 3*(size-2) entries each.
     ## A wholly -1 face requests ordinary triangulation. Explicit triangles are
@@ -150,12 +151,12 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         let queries = try alloc QueryCache[1] in memory.heap
         errdefer free(queries) in memory.heap
         queries[0] = QueryCache()
-        let topology_owners = try alloc usize[1] in memory.heap
+        let topology_owners = try alloc SharedCount[1] in memory.heap
         errdefer free(topology_owners) in memory.heap
-        topology_owners[0] = 1
-        let triangle_owners = try alloc usize[1] in memory.heap
+        topology_owners[0].count.store(1)
+        let triangle_owners = try alloc SharedCount[1] in memory.heap
         errdefer free(triangle_owners) in memory.heap
-        triangle_owners[0] = 1
+        triangle_owners[0].count.store(1)
         self.attributes = try AttributeSet()
         self.topology_owners = topology_owners
         self.triangle_owners = triangle_owners
@@ -181,7 +182,7 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         let attributes = try AttributeSet()
         storage[0] = self
         storage[0].attributes = attributes
-        storage[0].queries[0].owners += 1
+        discard(storage[0].queries[0].owners.add(1))
         return storage.data
 
     func snapshot() -> interop.Reference[PolygonMesh]!:
@@ -324,10 +325,12 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         if normals.length > 0: try result.value().attributes.put("N", 1, 3, normals, false)
         return result
 
-    ## Deep-owned native copy for a worker mailbox. No ARC owners, callbacks or
-    ## borrowed spans cross threads. The receiver adopts this copy on its thread.
+    ## Native owner for a worker mailbox: it shares the immutable storage and
+    ## query index through atomic counts and owns a copy of the attributes. No
+    ## ARC owners, callbacks or borrowed spans cross threads; the receiver
+    ## adopts it on its thread.
     func detached_copy() -> PolygonMesh*!:
-        let result = try new PolygonMesh(self.points, self.sizes, self.corners, self.triangles) in memory.heap
+        let result = try self.snapshot_storage()
         errdefer dispose_detached(result)
         for entry in self.attributes.entries[..<self.attributes.count]:
             try result.attributes.put(entry.name.value, entry.domain, entry.width, entry.values, entry.integer)
@@ -416,8 +419,8 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         errdefer attributes.close()
         var triangle_owners = self.triangle_owners
         if edit.triangles.length > 0:
-            triangle_owners = try alloc usize[1] in memory.heap
-            triangle_owners[0] = 0
+            triangle_owners = try alloc SharedCount[1] in memory.heap
+            triangle_owners[0].count.store(0)
         storage[0] = self
         storage[0].attributes = attributes
         storage[0].points = edit.points
@@ -426,8 +429,8 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         storage[0].queries = queries
         storage[0].triangles = edit.triangles if edit.triangles.length > 0 else self.triangles
         storage[0].triangle_owners = triangle_owners
-        storage[0].topology_owners[0] += 1
-        triangle_owners[0] += 1
+        discard(storage[0].topology_owners[0].count.add(1))
+        discard(triangle_owners[0].count.add(1))
         return storage.data
 
     pub func face_count() -> i64:
@@ -481,7 +484,7 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         let face = self.corner_faces[(usize)index]
         let at = (usize)index - self.offsets[face]
         var color = Vector3(1.0, 1.0, 1.0)
-        var normal = self.normals[face]
+        let normal = self.shading_normal((usize)index, face)
         var u = 1.0 if at == 1 or at == 2 else 0.0
         var v = 1.0 if at >= 2 else 0.0
         # Houdini-style corner > point > primitive > detail lookup precedence.
@@ -494,19 +497,34 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
                 let start = element * (usize)entry.width
                 color = Vector3(math.max(0.0, math.min(1.0, entry.values[start])), math.max(0.0, math.min(1.0, entry.values[start + 1])), math.max(0.0, math.min(1.0, entry.values[start + 2])))
             let uv = self.attributes.uvs[(usize)domain]
-            let ni = self.attributes.normals[(usize)domain]
-            if ni >= 0 and self.attributes.entries[(usize)ni].width == 3:
-                let entry = &self.attributes.entries[(usize)ni]
-                let start = element * 3
-                let provided = Vector3(entry.values[start], entry.values[start + 1], entry.values[start + 2])
-                if provided.length() > 0.000000001:
-                    normal = provided.multiply_scalar(1.0 / provided.length())
             if uv >= 0 and self.attributes.entries[(usize)uv].width >= 2:
                 let entry = &self.attributes.entries[(usize)uv]
                 let start = element * (usize)entry.width
                 u = entry.values[start]
                 v = entry.values[start + 1]
         return errors.success[Vertex](Vertex(self.points[(usize)self.corners[(usize)index]], normal, u, v, color))
+    ## A corner's shading normal alone, without building a whole Vertex; bulk
+    ## overlay extraction calls it for every corner.
+    pub func corner_normal(corner: i64) -> Vector3!:
+        try checked(corner, self.corners.length)
+        return self.shading_normal((usize)corner, self.corner_faces[(usize)corner])
+
+    ## The N attribute by corner > point > primitive > detail precedence,
+    ## else the face normal.
+    func shading_normal(corner: usize, face: usize) -> Vector3:
+        var normal = self.normals[face]
+        let domains: i64[4] = [3, 2, 0, 1]
+        for domain in domains:
+            let ni = self.attributes.normals[(usize)domain]
+            if ni < 0 or self.attributes.entries[(usize)ni].width != 3:
+                continue
+            let element = 0 if domain == 3 else (face if domain == 2 else ((usize)self.corners[corner] if domain == 0 else corner))
+            let entry = &self.attributes.entries[(usize)ni]
+            let provided = Vector3(entry.values[element * 3], entry.values[element * 3 + 1], entry.values[element * 3 + 2])
+            if provided.length() > 0.000000001:
+                normal = provided.multiply_scalar(1.0 / provided.length())
+        return normal
+
     pub func index(offset: i64) -> interop.Outcome[i64]:
         if offset < 0 or (usize)offset >= self.triangles.length:
             return errors.failure[i64](errors.invalid, "polygon triangle index out of range")
@@ -708,18 +726,15 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
 
     pub mutating func close():
         self.attributes.close()
-        self.queries[0].owners -= 1
-        if self.queries[0].owners > 0: return
+        if self.queries[0].owners.sub(1, .acq_rel) > 1: return
         self.queries[0].close()
         free(self.queries) in memory.heap
         free(self.points) in memory.heap
         free(self.normals) in memory.heap
-        self.triangle_owners[0] -= 1
-        if self.triangle_owners[0] == 0:
+        if self.triangle_owners[0].count.sub(1, .acq_rel) == 1:
             free(self.triangles) in memory.heap
             free(self.triangle_owners) in memory.heap
-        self.topology_owners[0] -= 1
-        if self.topology_owners[0] > 0: return
+        if self.topology_owners[0].count.sub(1, .acq_rel) > 1: return
         free(self.topology_owners) in memory.heap
         free(self.sizes) in memory.heap
         free(self.corners) in memory.heap

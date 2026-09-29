@@ -20,9 +20,7 @@ pub func mesh_overlay_points(mesh: PolygonMesh*, matrix: Matrix4, normals: bool 
             var n = Vector3()
             let offset = try mesh.face_offset(index)
             for corner in 0..<(try mesh.face_size(index)):
-                let vertex = mesh.vertex(offset + corner)
-                defer vertex.release()
-                n = n.add((try vertex.get()).normal)
+                n = n.add(try mesh.corner_normal(offset + corner))
             n = try n.normalized() if n.length() > 0.000000001 else (try mesh.face_normal(index))
             points[(usize)index * 2] = p
             points[(usize)index * 2 + 1] = p.add((try matrix.transform_normal(n)).multiply_scalar(length))
