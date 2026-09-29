@@ -74,7 +74,21 @@ pub func face_under(mesh: const Mesh*, p: Projection, x: f64, y: f64, width: f64
 ## screen, within `reach` pixels. The face comes from one BVH ray, so it is
 ## the visible one; the nearest edge to a point inside a visible polygon is
 ## one of its own edges. -1 when the cursor is off the mesh or too far.
+## A mesh without faces (a point cloud, such as CAD control vertices) has
+## nothing to hide its points: the nearest point on screen, in front of the
+## camera, within `reach`.
 pub func pick(mesh: const Mesh*, edges: bool, p: Projection, x: f64, y: f64, width: f64, height: f64, known: i64 = -2) -> i64!:
+    if mesh.face_count() == 0:
+        if edges: return -1
+        var nearest: i64 = -1
+        var closest = reach
+        for point in 0..<mesh.point_count():
+            let here = project(try mesh.point(point), p, width, height)
+            let distance = math.hypot(here.x - x, here.y - y)
+            if here.z > p.near and distance < closest:
+                closest = distance
+                nearest = point
+        return nearest
     let face = try face_under(mesh, p, x, y, width, height, known)
     if face < 0 or face >= mesh.face_count(): return -1
     let size = try mesh.face_size(face)

@@ -90,6 +90,14 @@ func edit_overlays(target: gpu.RenderTarget) -> unit!:
     let raised = screen(camera, moved.point(6).add(moved.point(7)).multiply_scalar(0.5))
     assert(overlay.pick(camera, raised[0], raised[1] + 1.0, 200.0, 160.0) == top_edge)
     assert(overlay.pick(camera, middle[0], middle[1] + 1.0, 200.0, 160.0) != top_edge)
+    # A point cloud (CAD control vertices: no faces) picks the nearest point
+    # on screen, within reach.
+    let cloud = geocore.Mesh.from_corner_data([Vector3(0.0, 0.0, 0.0), Vector3(0.0, 2.0, 0.0)], [], [], [], [])
+    overlay.update(cloud, 0, [1], -1)
+    overlay.draw(camera, target, grey, accent, grey)
+    let high = screen(camera, cloud.point(1))
+    assert(overlay.pick(camera, high[0] + 3.0, high[1], 200.0, 160.0) == 1)
+    assert(overlay.pick(camera, high[0] + 40.0, high[1], 200.0, 160.0) == -1)
 
 ## A static scene re-prepares only changed objects: adding a mesh keeps the
 ## other's data, and a hidden mesh shown again right away reuses its own.
