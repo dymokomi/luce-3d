@@ -28,10 +28,11 @@ re-exports its `Vector3`, `Matrix4`, `Vertex`, `Bounds` and `Geometry`. A
 | `ObjectNode` | Transform, visibility and child membership shared through composition; `position`, `rotation`, `scale`, corresponding setters, `matrix`, `set_visible`, `add`, `remove`, `clear`, `child_count`. |
 | `Scene`, `Group` | Own a node and child objects; expose `node`, transform methods, `add`, `remove`, `clear`. |
 | `Mesh(geometry,material)` | Owns shared geometry/material interfaces and its own node. |
+| `Mesh.of(mesh,material)` | A scene object for a geocore `PolygonMesh`, drawn from GPU arrays retained by the mesh's change ids (per-vertex fallback on deviceless frames). |
 | `AmbientLight(color=white,intensity=1)` | Scene light; `set_intensity` updates its contribution. |
 | `DirectionalLight(color=white,intensity=1,direction=(1,1,1))` | Direction points toward the light and is transformed with its scene node. |
 | `PerspectiveCamera(fov=50,aspect=1,near=0.1,far=1000)` | World-space camera initially at `(0,0,5)` looking at the origin; `set_position`, `look_at`, `set_aspect`, `set_projection`. FOV is vertical degrees. |
-| `Renderer()` | `render(scene,camera,target,fit_aspect=false)` appends checked triangles to a standard GPU target. `set_wire_overlay(width=0)` reserves slope-aware depth for a coplanar logical-pixel wire overlay; zero restores ordinary depth. It changes draw state, not cached geometry. |
+| `Renderer()` | `render(scene,camera,target,fit_aspect=false)` appends checked triangles to a standard GPU target. `set_wire_overlay(width=0)` reserves slope-aware depth for a coplanar logical-pixel wire overlay; zero restores ordinary depth. It changes draw state, not cached geometry. `set_shading(mode,stripes=20,duty=0.5,axis=(0,1,0),planar=false,stripes_only=false)` shades polygon meshes: 0 lit, 1 flat, 2 zebra, 3 isophotes, 4 normals, 5 unlit. `set_edges(width,color,surfaces=true)` draws their edges from the same arrays (`surfaces=false`: wires only). `uploads()` and `uploaded_bytes()` count GPU array uploads. None of these re-uploads geometry. |
 | `WireRenderer` | `lines(points,camera,target,color,width=1,bias=0.000001)` draws independent world endpoint pairs at constant logical-pixel width; near clipped and depth tested. `triangles(points,camera,target,color)` draws depth-tested selection fills. Uses the existing target depth buffer; current GPU API also writes depth. |
 
 Rotations are intrinsic XYZ radians, applied as Z, Y, X to column vectors. A world

@@ -1,0 +1,246 @@
+## Drawing a polygon mesh from retained GPU arrays: positions, corner points,
+## triangles, triangle faces, normals and colors are each a buffer keyed by the
+## mesh array it came from, and the vertex stage pulls from them. Nothing is
+## prepared per vertex on the CPU; lighting and the analysis modes run in the
+## shaders, so changing lights or shading uploads nothing.
+import gpu
+import memory
+import geocore_native as native
+from geocore import PolygonMesh, Matrix4, Vector3
+from luce_3d.core.material import Color
+from luce_3d.cameras.perspective import Projection
+from luce_3d.renderers.projection import projection_matrix
+from luce_3d.renderers.gpu_arrays import GpuArrays, ArrayKey
+
+let tag_positions: u8 = 1
+let tag_corners: u8 = 2
+let tag_normals: u8 = 3
+let tag_face_normals: u8 = 4
+let tag_colors: u8 = 5
+let tag_triangles: u8 = 6
+let tag_faces: u8 = 7
+let tag_edges: u8 = 8
+
+## Triangles per draw: the triangle and face buffers stay under luce-gpu's
+## buffer limit (12 bytes per triangle).
+let chunk_triangles: usize = 11184810
+
+## How surfaces are shaded: a luce-gpu Shading mode and the zebra / isophote
+## stripe settings. Stripes run around (cylinder) or along (planar) `axis`.
+pub struct MeshShading:
+    pub var mode: gpu.Shading = gpu.Shading.lit
+    pub var stripes: f64 = 20.0
+    pub var duty: f64 = 0.5
+    pub var planar: bool = false
+    pub var stripes_only: bool = false
+    pub var axis: Vector3 = Vector3(0.0, 1.0, 0.0)
+    pub var dark: Color = Color(0.0, 0.0, 0.0)
+    pub var light: Color = Color(1.0, 1.0, 1.0)
+
+## What every object in a frame shares: the camera and the lights. Up to four
+## directional lights reach the shader; ambient lights add up.
+pub struct FrameLighting:
+    pub var ambient: Color = Color(0.0, 0.0, 0.0)
+    pub var directions: Vector3[4] = [Vector3(), Vector3(), Vector3(), Vector3()]
+    pub var colors: Color[4] = [Color(0.0, 0.0, 0.0), Color(0.0, 0.0, 0.0), Color(0.0, 0.0, 0.0), Color(0.0, 0.0, 0.0)]
+    pub var count: usize = 0
+
+## Draw `mesh` placed by `world`: its surfaces (unless `surfaces` is false)
+## and, when `wire_width` > 0, its edges in `wire_color`.
+pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh: const PolygonMesh*, world: Matrix4, projection: Projection,
+                      lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*, slope_bias: f64,
+                      surfaces: bool, wire_width: f64, wire_color: Color) -> !:
+    if mesh.face_count() == 0: return
+    var buffers = gpu.MeshBuffers()
+    buffers.positions = try positions(arrays, mesh)
+    var block = parameters(mesh, world, projection, lighting, tint, lit, shading)
+    if surfaces:
+        buffers.corners = try corner_points(arrays, mesh)
+        let normals = try normal_buffer(arrays, mesh)
+        buffers.normals = normals.0
+        block[gpu.mesh_mode + 1] = (f32)normals.1
+        let colors = try color_buffer(arrays, mesh)
+        if let buffer = colors.0: buffers.colors = buffer
+        block[gpu.mesh_mode + 2] = (f32)colors.1
+        let total = (usize)mesh.index_count() // 3
+        var first: usize = 0
+        var part: u32 = 0
+        while first < total:
+            let count = chunk_triangles if total - first > chunk_triangles else total - first
+            buffers.triangles = try triangles(arrays, mesh, first, count, part)
+            buffers.faces = try triangle_faces(arrays, mesh, first, count, part)
+            try gpu.draw_mesh(target, &buffers, count * 3, block, gpu.MeshKind.surface, slope_bias)
+            first += count
+            part += 1
+    if wire_width > 0.0 and mesh.edge_count() > 0:
+        var wires = gpu.MeshBuffers()
+        wires.positions = buffers.positions
+        wires.triangles = try edges(arrays, mesh)
+        var line = block
+        line[gpu.mesh_tint] = (f32)wire_color.red
+        line[gpu.mesh_tint + 1] = (f32)wire_color.green
+        line[gpu.mesh_tint + 2] = (f32)wire_color.blue
+        line[gpu.mesh_line] = (f32)wire_width
+        line[gpu.mesh_line + 3] = 0.000001
+        try gpu.draw_mesh(target, &wires, (usize)mesh.edge_count() * 6, line, gpu.MeshKind.wires)
+
+## Face ids of `mesh` from `base` + 1, into an rgba8_linear target (picking).
+pub func draw_polygon_ids(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh: const PolygonMesh*, world: Matrix4, projection: Projection, base: u32) -> !:
+    if mesh.face_count() == 0: return
+    let lighting = FrameLighting()
+    let shading = MeshShading(mode = gpu.Shading.unlit)
+    var block = parameters(mesh, world, projection, &lighting, Color(1.0, 1.0, 1.0), false, &shading)
+    block[gpu.mesh_mode + 3] = f32.bits(base)
+    var buffers = gpu.MeshBuffers()
+    buffers.positions = try positions(arrays, mesh)
+    buffers.corners = try corner_points(arrays, mesh)
+    let total = (usize)mesh.index_count() // 3
+    var first: usize = 0
+    var part: u32 = 0
+    while first < total:
+        let count = chunk_triangles if total - first > chunk_triangles else total - first
+        buffers.triangles = try triangles(arrays, mesh, first, count, part)
+        buffers.faces = try triangle_faces(arrays, mesh, first, count, part)
+        try gpu.draw_mesh(target, &buffers, count * 3, block, gpu.MeshKind.ids)
+        first += count
+        part += 1
+
+func parameters(mesh: const PolygonMesh*, world: Matrix4, projection: Projection, lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*) -> f32[120]:
+    var block: f32[120]
+    let view = projection_matrix(projection)
+    let columns: Vector3[4] = [world.x, world.y, world.z, world.translation]
+    for column in 0..<(usize)4:
+        let c = columns[column]
+        let w = 1.0 if column == 3 else 0.0
+        for row in 0..<(usize)4:
+            block[gpu.mesh_clip + column * 4 + row] = (f32)((f64)view[row] * c.x + (f64)view[4 + row] * c.y + (f64)view[8 + row] * c.z + (f64)view[12 + row] * w)
+        block[gpu.mesh_world + column * 4] = (f32)c.x
+        block[gpu.mesh_world + column * 4 + 1] = (f32)c.y
+        block[gpu.mesh_world + column * 4 + 2] = (f32)c.z
+        block[gpu.mesh_world + column * 4 + 3] = (f32)w
+    # Normals take the inverse transpose, as cofactors over the determinant.
+    let determinant = world.determinant()
+    let scale = 1.0 / determinant if determinant != 0.0 else 0.0
+    let cofactors: Vector3[3] = [world.y.cross(world.z), world.z.cross(world.x), world.x.cross(world.y)]
+    for column in 0..<(usize)3:
+        block[gpu.mesh_normal_matrix + column * 4] = (f32)(cofactors[column].x * scale)
+        block[gpu.mesh_normal_matrix + column * 4 + 1] = (f32)(cofactors[column].y * scale)
+        block[gpu.mesh_normal_matrix + column * 4 + 2] = (f32)(cofactors[column].z * scale)
+    block[gpu.mesh_normal_matrix + 15] = 1.0
+    block[gpu.mesh_tint] = (f32)tint.red
+    block[gpu.mesh_tint + 1] = (f32)tint.green
+    block[gpu.mesh_tint + 2] = (f32)tint.blue
+    block[gpu.mesh_tint + 3] = 1.0 if lit else 0.0
+    block[gpu.mesh_ambient] = (f32)lighting.ambient.red
+    block[gpu.mesh_ambient + 1] = (f32)lighting.ambient.green
+    block[gpu.mesh_ambient + 2] = (f32)lighting.ambient.blue
+    for light in 0..<lighting.count:
+        let direction = lighting.directions[light]
+        let color = lighting.colors[light]
+        block[gpu.mesh_light_direction + light * 4] = (f32)direction.x
+        block[gpu.mesh_light_direction + light * 4 + 1] = (f32)direction.y
+        block[gpu.mesh_light_direction + light * 4 + 2] = (f32)direction.z
+        block[gpu.mesh_light_direction + light * 4 + 3] = 1.0
+        block[gpu.mesh_light_color + light * 4] = (f32)color.red
+        block[gpu.mesh_light_color + light * 4 + 1] = (f32)color.green
+        block[gpu.mesh_light_color + light * 4 + 2] = (f32)color.blue
+    block[gpu.mesh_eye] = (f32)projection.position.x
+    block[gpu.mesh_eye + 1] = (f32)projection.position.y
+    block[gpu.mesh_eye + 2] = (f32)projection.position.z
+    block[gpu.mesh_mode] = (f32)(u8)shading.mode
+    block[gpu.mesh_mode + 1] = -1.0
+    block[gpu.mesh_mode + 2] = -1.0
+    block[gpu.mesh_zebra] = (f32)shading.stripes
+    block[gpu.mesh_zebra + 1] = (f32)shading.duty
+    block[gpu.mesh_zebra + 2] = 1.0 if shading.planar else 0.0
+    block[gpu.mesh_zebra + 3] = 1.0 if shading.stripes_only else 0.0
+    block[gpu.mesh_zebra_axis] = (f32)shading.axis.x
+    block[gpu.mesh_zebra_axis + 1] = (f32)shading.axis.y
+    block[gpu.mesh_zebra_axis + 2] = (f32)shading.axis.z
+    block[gpu.mesh_zebra_dark] = (f32)shading.dark.red
+    block[gpu.mesh_zebra_dark + 1] = (f32)shading.dark.green
+    block[gpu.mesh_zebra_dark + 2] = (f32)shading.dark.blue
+    block[gpu.mesh_zebra_light] = (f32)shading.light.red
+    block[gpu.mesh_zebra_light + 1] = (f32)shading.light.green
+    block[gpu.mesh_zebra_light + 2] = (f32)shading.light.blue
+    return block
+
+# mark: Arrays ================================================================================
+
+func positions(arrays: GpuArrays*, mesh: const PolygonMesh*) -> gpu.Buffer!:
+    let key = ArrayKey(mesh.points_id(), tag_positions, 0)
+    if let found = arrays.find(key): return found
+    let bytes = try arrays.staging((usize)mesh.point_count() * 12)
+    try native.pack_positions(mesh, as_f32(bytes))
+    return try arrays.store(key, bytes, native.points_parent(mesh))
+
+func corner_points(arrays: GpuArrays*, mesh: const PolygonMesh*) -> gpu.Buffer!:
+    let key = ArrayKey(mesh.corners_id(), tag_corners, 0)
+    if let found = arrays.find(key): return found
+    let bytes = try arrays.staging((usize)mesh.vertex_count() * 4)
+    try native.pack_corner_points(mesh, as_u32(bytes))
+    return try arrays.store(key, bytes)
+
+func triangles(arrays: GpuArrays*, mesh: const PolygonMesh*, first: usize, count: usize, part: u32) -> gpu.Buffer!:
+    let key = ArrayKey(mesh.triangles_id(), tag_triangles, part)
+    if let found = arrays.find(key): return found
+    let bytes = try arrays.staging(count * 12)
+    try native.pack_triangles(mesh, first, as_u32(bytes))
+    return try arrays.store(key, bytes)
+
+## Faces follow triangles and corners: keyed by both ids.
+func triangle_faces(arrays: GpuArrays*, mesh: const PolygonMesh*, first: usize, count: usize, part: u32) -> gpu.Buffer!:
+    let key = ArrayKey(mesh.triangles_id() *% 0x9E3779B97F4A7C15 ^ mesh.corners_id(), tag_faces, part)
+    if let found = arrays.find(key): return found
+    let bytes = try arrays.staging(count * 4)
+    try native.pack_triangle_faces(mesh, first, as_u32(bytes))
+    return try arrays.store(key, bytes)
+
+func edges(arrays: GpuArrays*, mesh: const PolygonMesh*) -> gpu.Buffer!:
+    let key = ArrayKey(mesh.edges_id(), tag_edges, 0)
+    if let found = arrays.find(key): return found
+    let bytes = try arrays.staging((usize)mesh.edge_count() * 8)
+    try native.pack_edges(mesh, as_u32(bytes))
+    return try arrays.store(key, bytes)
+
+## The shading normals and their domain: an authored N (corner, then point,
+## face and detail), else the face normals.
+func normal_buffer(arrays: GpuArrays*, mesh: const PolygonMesh*) -> (gpu.Buffer, i64)!:
+    let found = try preferred(mesh, "N", 3)
+    if found.0 >= 0:
+        return (try attribute_buffer(arrays, mesh, found.0, tag_normals), found.1)
+    let key = ArrayKey(mesh.normals_id(), tag_face_normals, 0)
+    if let buffer = arrays.find(key): return (buffer, 2)
+    let bytes = try arrays.staging((usize)mesh.face_count() * 12)
+    try native.pack_face_normals(mesh, as_f32(bytes))
+    return (try arrays.store(key, bytes, native.normals_parent(mesh)), 2)
+
+## Cd by the same precedence, or none.
+func color_buffer(arrays: GpuArrays*, mesh: const PolygonMesh*) -> (gpu.Buffer?, i64)!:
+    let found = try preferred(mesh, "Cd", 3)
+    if found.0 < 0: return (none, -1)
+    return (try attribute_buffer(arrays, mesh, found.0, tag_colors), found.1)
+
+func attribute_buffer(arrays: GpuArrays*, mesh: const PolygonMesh*, index: i64, tag: u8) -> gpu.Buffer!:
+    let key = ArrayKey(try mesh.attribute_id(index), tag, 0)
+    if let found = arrays.find(key): return found
+    let bytes = try arrays.staging(try native.attribute_tuples(mesh, index) * 12)
+    try native.pack_attribute3(mesh, index, as_f32(bytes))
+    return try arrays.store(key, bytes)
+
+## The attribute `name` of at least `width` components on the highest-priority
+## domain (corner, point, face, detail) and the domain the shader indexes by;
+## a single-storage attribute reads as detail.
+func preferred(mesh: const PolygonMesh*, name: str, width: i64) -> (i64, i64)!:
+    let domains: i64[4] = [1, 0, 2, 3]
+    for domain in domains:
+        let index = mesh.find_attribute(name, domain)
+        if index >= 0 and (try mesh.attribute_width(index)) >= width and not (try mesh.attribute_integer(index)):
+            return (index, 3 if (try mesh.attribute_storage(index)) == 1 else domain)
+    return (-1, -1)
+
+func as_f32(bytes: u8[]) -> f32[]:
+    return f32[]((f32*)bytes.data, bytes.length // 4)
+
+func as_u32(bytes: u8[]) -> u32[]:
+    return u32[]((u32*)bytes.data, bytes.length // 4)

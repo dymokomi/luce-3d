@@ -35,6 +35,11 @@ portable suite and this documentation check on ARM64 macOS and x86-64 Linux, and
 the Metal suite on macOS. Exact toolchain and library revisions are recorded in bootstrap
 pins. Tests use temporary output directories and release them on success/failure.
 
-There is no Vulkan renderer yet. CPU-side mesh preparation is intentional and
-must not be reported as GPU vertex shading. This initial library has no texture,
-shadow, skinning, model-loading or general shader API.
+`python3 tests/gpu.py` also renders tests/mesh_pixels_main.lucb offscreen: the
+polygon-mesh path matches the per-vertex path within 3/255 in lit and flat
+modes (with authored normals and point colors), a Move uploads exactly two
+arrays, zebra bands double with the stripe count on a cylinder, break at a
+crease with a normal per face and flow across the same seam with shared
+normals, and change without one-pixel jumps on a sphere. The program uses only
+portable `gpu` calls, so it runs on Vulkan hosts too. This library has no
+texture, shadow, skinning, model-loading or general shader API.

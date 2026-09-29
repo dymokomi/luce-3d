@@ -84,14 +84,16 @@ pub struct EditOverlay:
             self.hovered = hovered
             try self.rebuild_hover(geometry)
 
+    ## `wires` false leaves the full wireframe to the renderer, which draws it
+    ## from the mesh's GPU arrays (Renderer.set_edges).
     pub mutating func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget],
-                           wire: gpu.Color, accent: gpu.Color, point: gpu.Color) -> !:
+                           wire: gpu.Color, accent: gpu.Color, point: gpu.Color, wires: bool = true) -> !:
         let current = self.mesh else return
         let mesh = try current.get()
         let native = try target.get()
         let size = try native.size()
         if size.width <= 0.0 or size.height <= 0.0: return
-        try self.draw_wires(mesh, camera, target, wire)
+        if wires: try self.draw_wires(mesh, camera, target, wire)
         if self.faces.count > 0:
             try WireRenderer.triangles(self.faces.view(), camera, target, accent)
         if self.accent.count > 0:

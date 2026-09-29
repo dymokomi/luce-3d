@@ -32,10 +32,18 @@ must not assume a newly added child appears in the current frame. Reentrant
 rendering on the same renderer fails. Explicit closure during a guarded callback
 defers disposal until the outer invocation returns.
 
-Transforms, inverse-transpose normals, camera projection and Lambert illumination
-are computed on the CPU. Reusable output vertices carry homogeneous positions and
-linear color to standard `gpu`, which owns clipping, shader/pipeline selection,
-rasterization and depth. A render call appends to the caller's frame; failure can
+A polygon mesh object (`Mesh.of`) draws from GPU buffers the renderer retains
+in `GpuArrays`, keyed by the change ids of the mesh arrays they came from:
+positions, corner points, triangles and their faces, normals (an authored N,
+else face normals), colors (Cd) and edges. A moved mesh finds its topology and
+attribute buffers there and uploads positions and face normals; when no draw of
+the frame reads the previous positions, it rewrites that buffer in place.
+World transforms, Lambert lighting and the analysis shadings are shader work;
+lights and shading are parameters. Custom `Geometry` implementations keep the
+CPU path: transforms, inverse-transpose normals, camera projection and Lambert
+illumination computed on the CPU, and output vertices carrying homogeneous
+positions and linear color to standard `gpu`, which owns clipping, shader and
+pipeline selection, rasterization and depth. A render call appends to the caller's frame; failure can
 leave earlier commands recorded. The owning application discards a failed frame.
 It does not retry or present a partially failed frame automatically.
 

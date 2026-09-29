@@ -4,7 +4,7 @@ import memory
 import ownership
 import thread
 import luce_3d.errors as errors
-from geocore import Vector3, Matrix4, Geometry
+from geocore import Vector3, Matrix4, Geometry, PolygonMesh
 from luce_3d.core.material import Material, Color
 
 pub enum LightKind as u8:
@@ -20,9 +20,11 @@ pub struct Light:
 
 ## Open scene protocol. node returns one retained reference to stable transform
 ## and child storage; geometry/material returns transfer optional retained edges.
+## polygon returns the mesh a polygon object draws from its GPU arrays, or none.
 pub interface Object3D:
     func node() -> interop.Reference[ObjectNode]
     func geometry() -> interop.Interface[Geometry]?
+    func polygon() -> interop.Reference[PolygonMesh]?
     func material() -> interop.Interface[Material]?
     func light() -> Light
 

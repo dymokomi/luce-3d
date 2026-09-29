@@ -3,7 +3,7 @@ import ownership
 import luce_3d.errors as errors
 import luce_3d.core.object as object
 from luce_3d.core.object import Object3D, ObjectNode, Light, LightKind
-from geocore import Geometry, Vector3
+from geocore import Geometry, Vector3, PolygonMesh
 from luce_3d.core.material import Material, Color, check_color
 
 pub struct AmbientLight: Object3D:
@@ -45,6 +45,9 @@ pub struct AmbientLight: Object3D:
         self.transform.value().clear()
 
     pub func geometry() -> interop.Interface[Geometry]?:
+        return none
+
+    pub func polygon() -> interop.Reference[PolygonMesh]?:
         return none
 
     pub func material() -> interop.Interface[Material]?:

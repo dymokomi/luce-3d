@@ -1,9 +1,11 @@
-## World transforms and Lambert lighting are cached per drawn geometry: a scene
+## Polygon meshes (Mesh.of) draw on device frames from retained GPU arrays
+## keyed by their change ids (renderers/mesh_batch.lucb): lighting and the
+## analysis shadings run in shaders, and a changed mesh uploads only the arrays
+## that changed. Other geometry goes through the per-vertex interface, with
+## world transforms and Lambert lighting cached per drawn geometry: a scene
 ## change keeps the prepared data of every object whose geometry, material,
-## world transform and lights are unchanged, and prepares only the others.
-## Device frames retain GPU geometry and send only camera uniforms per redraw;
-## standalone frames keep a CPU projection fallback for portable recording/tests.
-## Backend resources and shaders remain entirely in luce-gpu.
+## world transform and lights are unchanged. Standalone frames keep a CPU
+## projection fallback for portable recording and tests.
 import gpu
 import interop
 import math
@@ -12,17 +14,20 @@ import ownership
 import luce_3d.core.object as object
 import luce_3d.errors as errors
 from luce_3d.core.object import Object3D, ObjectNode, Light, LightKind
-from geocore import Geometry, Vector3, Matrix4
+from geocore import Geometry, Vector3, Matrix4, PolygonMesh
 from luce_3d.core.material import Material, Color, check_color
 from luce_3d.cameras.perspective import PerspectiveCamera, Projection
 from luce_3d.renderers.projection import projection_matrix
 from luce_3d.renderers.retained import RetainedBatch
+from luce_3d.renderers.gpu_arrays import GpuArrays
+from luce_3d.renderers.mesh_batch import MeshShading, FrameLighting, draw_polygon
 
 struct Item:
     let object: interop.Interface[Object3D]
     let node: interop.Reference[ObjectNode]
     let world: Matrix4
     let geometry: interop.Interface[Geometry]?
+    let polygon: interop.Reference[PolygonMesh]?
     let material: interop.Interface[Material]?
     let illumination: Light
     let visible: bool
@@ -61,6 +66,12 @@ pub struct Renderer:
     var light_count: usize
     var flat: bool = false
     var wire_width: f64 = 0.0
+    # Polygon meshes: their GPU arrays, shading, and optional edge wires.
+    var arrays: GpuArrays
+    var shading: MeshShading
+    var surfaces: bool = true
+    var edge_width: f64 = 0.0
+    var edge_color: Color = Color(0.0, 0.0, 0.0)
 
     ## Objects whose prepared data survived a scene change (tests, profiling).
     pub func reused_count() -> i64:
@@ -69,6 +80,31 @@ pub struct Renderer:
     ## Display state only: switching normals never invalidates geometry buffers.
     pub mutating func set_flat(value: bool):
         self.flat = value
+
+    ## Surface shading of polygon meshes: 0 lit, 1 flat, 2 zebra, 3 isophotes,
+    ## 4 normals, 5 unlit. Zebra and isophote stripes: `stripes` over a turn
+    ## (or across the planar model), `duty` the dark share, around `axis`.
+    ## Shading is draw state: changing it uploads nothing.
+    pub mutating func set_shading(mode: i64, stripes: f64 = 20.0, duty: f64 = 0.5, axis: Vector3 = Vector3(0.0, 1.0, 0.0), planar: bool = false, stripes_only: bool = false) -> !:
+        if mode < 0 or mode > 5 or not (stripes >= 1.0 and stripes <= 256.0) or not (duty > 0.0 and duty < 1.0) or not axis.is_finite() or axis.length() < 0.000001:
+            error(errors.invalid, "shading needs a mode 0..5, 1..256 stripes, a duty in (0,1) and a nonzero axis")
+        self.shading = MeshShading(mode = gpu.Shading((u8)mode), stripes = stripes, duty = duty, planar = planar, stripes_only = stripes_only, axis = try axis.normalized())
+
+    ## Draw every polygon mesh's edges `width` logical pixels wide (0: none),
+    ## from the same GPU arrays as its surfaces; `surfaces` false leaves only
+    ## the wires.
+    pub mutating func set_edges(width: f64, color: Color, surfaces: bool = true) -> !:
+        if not (width >= 0.0 and width <= 32.0): error(errors.invalid, "edge width must be finite and in 0..32")
+        try check_color(color)
+        self.edge_width = width
+        self.edge_color = color
+        self.surfaces = surfaces
+
+    ## GPU array uploads so far and their bytes (tests, benchmarks).
+    pub func uploads() -> i64:
+        return (i64)self.arrays.uploads
+    pub func uploaded_bytes() -> i64:
+        return (i64)self.arrays.uploaded
 
     ## Reserve the depth footprint of a coplanar screen-width wire overlay.
     ## Zero disables it. This is draw state; retained geometry stays unchanged.
@@ -92,6 +128,11 @@ pub struct Renderer:
         self.light_count = 0
         self.flat = false
         self.wire_width = 0.0
+        self.arrays = GpuArrays()
+        self.shading = MeshShading()
+        self.surfaces = true
+        self.edge_width = 0.0
+        self.edge_color = Color(0.0, 0.0, 0.0)
         self.count = 0
         var empty: gpu.Vertex[]
         self.vertices = empty
@@ -137,10 +178,23 @@ pub struct Renderer:
                 self.lights[self.light_count] = Light(light.kind, light.color, light.intensity, direction)
                 self.light_count += 1
         self.lighting = self.light_signature()
+        var device = gpu.device_of(native) catch failure:
+            if failure.code != gpu.unavailable: return errors.failure[unit](failure.code, failure.message)
+            recover gpu.Device()
+        defer device.destroy()
+        if device.is_open():
+            self.arrays.begin(device) catch failure:
+                return errors.failure[unit](failure.code, failure.message)
+        let lighting = self.frame_lighting()
         var drawable: usize = 0
         for index in 0..<self.count:
             let item = &self.items[index]
             if not item.visible:
+                continue
+            if let polygon = item.polygon if device.is_open() else none:
+                let material = item.material else return errors.failure[unit](errors.invalid, "a renderable object has geometry without material")
+                self.draw_mesh(item, polygon, material, projection, &lighting, native) catch failure:
+                    return errors.failure[unit](failure.code, failure.message)
                 continue
             let geometry = item.geometry else continue
             let material = item.material else return errors.failure[unit](errors.invalid, "a renderable object has geometry without material")
@@ -149,7 +203,38 @@ pub struct Renderer:
             if not rendered.is_success():
                 return rendered
             rendered.release()
+        if device.is_open(): self.arrays.trim()
         return errors.success[unit](())
+
+    mutating func draw_mesh(item: const Item*, polygon: interop.Reference[PolygonMesh], material: interop.Interface[Material], projection: Projection,
+                            lighting: const FrameLighting*, target: const gpu.RenderTarget*) -> !:
+        try material.enter()
+        defer material.leave()
+        let appearance = material.value()
+        let tint = appearance.color()
+        try check_color(tint)
+        var shading = self.shading
+        if self.flat and shading.mode == gpu.Shading.lit: shading.mode = gpu.Shading.flat
+        try draw_polygon(&self.arrays, target, try polygon.get(), item.world, projection, lighting, tint, appearance.is_lit(), &shading,
+                         self.wire_width * 0.7071067811865476 if self.surfaces else 0.0, self.surfaces, self.edge_width, self.edge_color)
+
+    ## Ambient lights summed, and the first four directional lights.
+    func frame_lighting() -> FrameLighting:
+        var lighting = FrameLighting()
+        var red = 0.0
+        var green = 0.0
+        var blue = 0.0
+        for light in self.lights[..<self.light_count]:
+            if light.kind == LightKind.ambient:
+                red += light.color.red * light.intensity
+                green += light.color.green * light.intensity
+                blue += light.color.blue * light.intensity
+            elif light.kind == LightKind.directional and lighting.count < 4:
+                lighting.directions[lighting.count] = light.direction
+                lighting.colors[lighting.count] = Color(light.color.red * light.intensity, light.color.green * light.intensity, light.color.blue * light.intensity)
+                lighting.count += 1
+        lighting.ambient = Color(red, green, blue)
+        return lighting
 
     mutating func gather(source: interop.Interface[Object3D], parent: Matrix4, visible: bool, depth: usize, parent_id: u64) -> !:
         if depth >= 64 or self.count >= self.items.length:
@@ -170,6 +255,8 @@ pub struct Renderer:
             error(errors.invalid, "world transform components overflowed")
         let geometry = native.geometry()
         defer release_geometry(geometry)
+        let polygon = native.polygon()
+        defer release_polygon(polygon)
         let material = native.material()
         defer release_material(material)
         let illumination = native.light()
@@ -177,7 +264,7 @@ pub struct Renderer:
         if not (illumination.intensity >= 0.0 and illumination.intensity <= 100.0) or not illumination.direction.is_finite():
             error(errors.invalid, "a custom light returned invalid parameters")
         let shown = visible and state.is_visible()
-        self.items[self.count] = Item(source.clone(), node.clone(), world, clone_geometry(geometry), clone_material(material), illumination, shown)
+        self.items[self.count] = Item(source.clone(), node.clone(), world, clone_geometry(geometry), clone_polygon(polygon), clone_material(material), illumination, shown)
         self.count += 1
         let length = state.child_count()
         var index: i64 = 0
@@ -326,6 +413,7 @@ pub struct Renderer:
     mutating func finish():
         for item in self.items[..<self.count]:
             release_geometry(item.geometry)
+            release_polygon(item.polygon)
             release_material(item.material)
             item.node.release()
             item.object.release()
@@ -339,6 +427,7 @@ pub struct Renderer:
         free(self.spare) in memory.heap
         free(self.lights) in memory.heap
         free(self.items) in memory.heap
+        self.arrays.close()
         if self.vertices.length > 0:
             free(self.vertices) in memory.heap
 
@@ -414,6 +503,8 @@ pub struct Renderer:
             item.node.trace(visit, context)
             if let geometry = item.geometry:
                 geometry.trace(visit, context)
+            if let polygon = item.polygon:
+                polygon.trace(visit, context)
             if let material = item.material:
                 material.trace(visit, context)
 
@@ -430,6 +521,15 @@ func release_material(value: interop.Interface[Material]?):
 func clone_geometry(value: interop.Interface[Geometry]?) -> interop.Interface[Geometry]?:
     if let geometry = value:
         return geometry.clone()
+    return none
+
+func release_polygon(value: interop.Reference[PolygonMesh]?):
+    if let mesh = value:
+        mesh.release()
+
+func clone_polygon(value: interop.Reference[PolygonMesh]?) -> interop.Reference[PolygonMesh]?:
+    if let mesh = value:
+        return mesh.clone()
     return none
 
 func clone_material(value: interop.Interface[Material]?) -> interop.Interface[Material]?:

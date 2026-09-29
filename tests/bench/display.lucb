@@ -52,13 +52,11 @@ pub struct Viewport:
     ## cook publishes a new result.
     pub mutating func show(mesh: interop.Reference[PolygonMesh]) -> !:
         self.hide()
-        let geometry = mesh.as_interface[Geometry](mesh.value())
-        defer geometry.release()
         let material = try interop.Reference[MeshLambertMaterial].adopt(new MeshLambertMaterial(gpu.Color(0.7, 0.7, 0.7)) in memory.heap, three.lambert_material_type, memory.heap)
         defer material.release()
         let appearance = material.as_interface[Material](material.value())
         defer appearance.release()
-        let object = try interop.Reference[Mesh].adopt(new Mesh(geometry, appearance) in memory.heap, three.mesh_type, memory.heap)
+        let object = try Mesh.of(mesh, appearance)
         let node = object.as_interface[Object3D](object.value())
         try self.scene.value().add(node)
         self.shown = object

@@ -20,6 +20,7 @@ if args.opt is None:
 with tempfile.TemporaryDirectory(prefix="luce-3d-gpu-") as temporary:
     project = Path(temporary)
     shutil.copy2(ROOT / "tests/gpu_pixels_main.lucb", project / "main.lucb")
+    shutil.copy2(ROOT / "tests/mesh_pixels_main.lucb", project / "mesh_pixels.lucb")
     shutil.copy2(args.gpu_source / "tests/programs/gpu/native.lucb", project / "native.lucb")
     dependencies = ''.join(f'    def dependency "{name}" {{\n        str path = {json.dumps((ROOT if name == "luce-3d" else ROOT.parent / name).as_posix())}\n    }}\n' for name in ('luce-3d', 'luce-geocore', 'luce-std', 'luce-gpu', 'luce-window'))
     (project / "package.prisma").write_text('#prisma 4.0\ndef package "three-pixels" {\n    str source = "."\n' + dependencies + '}\n')
@@ -28,4 +29,7 @@ with tempfile.TemporaryDirectory(prefix="luce-3d-gpu-") as temporary:
         subprocess.run([str(args.base.resolve()), "build", str(project / "main.lucb"), *flags, "-o", str(binary)], check=True, timeout=180)
         subprocess.run([str(binary)], check=True, timeout=60,
                        env=dict(os.environ, MTL_DEBUG_LAYER="1", MTL_SHADER_VALIDATION="1"))
-print("PASS real 3D depth, clipping and region scopes")
+        # Offscreen polygon-mesh pixels: portable to every GPU backend.
+        subprocess.run([str(args.base.resolve()), "build", str(project / "mesh_pixels.lucb"), *flags, "-o", str(binary)], check=True, timeout=180)
+        subprocess.run([str(binary)], check=True, timeout=120, env=dict(os.environ, MTL_DEBUG_LAYER="1"))
+print("PASS real 3D depth, clipping, region scopes and polygon-mesh pixels")

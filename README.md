@@ -49,9 +49,11 @@ See [the API](docs/API.md), [design and ownership](docs/DESIGN.md),
 (`python3 tests/bench/run.py`). The interactive Luce example lives in the
 separate [luce-demos](https://github.com/dymokomi/luce-demos) repository.
 
-The initial renderer performs transforms, projection and Lambert lighting on the
-CPU; `gpu` performs homogeneous clipping, rasterization, interpolation and depth
-testing. Metal is implemented. Vulkan, textures, custom materials/shaders,
+Polygon meshes (`Mesh.of`) draw from GPU arrays retained by the arrays' change
+ids: vertex pulling, lighting and the zebra, isophote and normal analysis modes
+run in `gpu` shaders, and a changed mesh uploads only its changed arrays. Other
+geometry goes through the per-vertex `Geometry` interface, transformed and lit
+on the CPU. Metal and Vulkan are implemented. Textures, custom materials,
 shadows, animation assets and asset loading are later work. This is development
 code with no compatibility commitment before its first release.
 

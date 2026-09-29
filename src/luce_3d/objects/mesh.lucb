@@ -1,17 +1,22 @@
 import interop
+import memory
 import ownership
 import luce_3d.errors as errors
 import luce_3d.core.object as object
 from luce_3d.core.object import Object3D, ObjectNode, Light, LightKind
-from geocore import Geometry, Vector3
+from geocore import Geometry, Vector3, PolygonMesh
 from luce_3d.core.material import Material, Color, check_color
 
+## A scene object drawing a geometry with a material. `Mesh.of` wraps a
+## polygon mesh, which the renderer draws from retained GPU arrays keyed by
+## the mesh's change ids instead of through the per-vertex interface.
 pub struct Mesh: Object3D:
     let transform: interop.Reference[ObjectNode]
     let shape: interop.Interface[Geometry]
     let appearance: interop.Interface[Material]
+    let source: interop.Reference[PolygonMesh]?
 
-    pub func init(geometry: interop.Interface[Geometry], material: interop.Interface[Material]) -> !:
+    pub func init(geometry: interop.Interface[Geometry], material: interop.Interface[Material], polygon: interop.Reference[PolygonMesh]? = none) -> !:
         try geometry.enter()
         defer geometry.leave()
         try material.enter()
@@ -19,6 +24,19 @@ pub struct Mesh: Object3D:
         self.transform = try object.make_node()
         self.shape = geometry.clone()
         self.appearance = material.clone()
+        var retained: interop.Reference[PolygonMesh]? = none
+        if let mesh = polygon: retained = mesh.clone()
+        self.source = retained
+
+    ## A scene object for a polygon mesh.
+    pub static func of(mesh: interop.Reference[PolygonMesh], material: interop.Interface[Material]) -> interop.Reference[Mesh]!:
+        let geometry = mesh.as_interface[Geometry](try mesh.get())
+        defer geometry.release()
+        return try interop.Reference[Mesh].adopt(new Mesh(geometry, material, mesh) in memory.heap, mesh_type, memory.heap)
+
+    pub func polygon() -> interop.Reference[PolygonMesh]?:
+        let mesh = self.source else return none
+        return mesh.clone()
 
     pub func node() -> interop.Reference[ObjectNode]:
         return self.transform.clone()
@@ -60,11 +78,13 @@ pub struct Mesh: Object3D:
         self.transform.value().clear()
         self.shape.release()
         self.appearance.release()
+        if let mesh = self.source: mesh.release()
         self.transform.release()
 
     func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
         self.transform.trace(visit, context)
         self.shape.trace(visit, context)
         self.appearance.trace(visit, context)
+        if let mesh = self.source: mesh.trace(visit, context)
 
 pub let mesh_type: interop.Type[Mesh] = interop.Type[Mesh]("Mesh", Mesh.close, Mesh.trace, closeable = true, main_thread = true)
