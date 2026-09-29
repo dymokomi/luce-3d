@@ -5,6 +5,9 @@ import memory
 import ownership
 import window
 import three
+from three import append_curve_segments
+from geocore_kernel import arc_curves, empty_set, set_put, curves_type, adopt_set
+from geocore_growing import Growing
 from three import SphereGeometry, BufferGeometry, Vertex, Vector3, Matrix4, MeshLambertMaterial, Color, Scene, Group, Mesh, Object3D, Geometry, Material, PerspectiveCamera, Renderer
 
 struct Tracker: memory.Allocator:
@@ -205,7 +208,30 @@ func scene_membership(tracker: Tracker*) -> !:
     parent.close()
     assert(parent_node.value().child_count() == 0 and remaining_node.value().parent_id() == 0)
 
+## Curve lines: a poly circle's closed polyline, and a Bezier circle's hull
+## (control polygon, handle arms, a cross per control point).
+func curve_lines() -> !:
+    for kind in 0..<(i64)2:
+        let circle = try arc_curves(1.0, 0.0, 360.0, 16, kind, 2, 4)
+        let storage = try empty_set()
+        try set_put(storage, curves_type(), (void*)circle)
+        let set = try adopt_set(storage)
+        defer set.release()
+        var lines = Growing[Vector3]()
+        defer lines.close()
+        var hulls = Growing[Vector3]()
+        defer hulls.close()
+        try append_curve_segments(set.value(), Matrix4(), &lines, &hulls)
+        assert(lines.count == (32 if kind == 0 else 16 * 4 * 2))
+        assert(hulls.count == (0 if kind == 0 else (16 + 16 + 48) * 2))
+        for point in lines.view(): near_loose(point.length(), 1.0)
+        assert((try three.CurveLines.count(set)) == (16 if kind == 0 else 64))
+
+func near_loose(left: f64, right: f64):
+    assert(math.abs(left - right) < 0.01)
+
 pub func main(arguments: str[]) -> i32!:
+    try curve_lines()
     let previous = memory.heap
     var tracker = Tracker(previous, 0, none)
     memory.heap = &tracker

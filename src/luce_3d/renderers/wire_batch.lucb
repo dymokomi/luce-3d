@@ -2,7 +2,9 @@
 import gpu
 import interop
 import memory
-from geocore import Vector3
+import math
+import luce_3d.errors as errors
+from geocore import Vector3, Bounds
 from luce_3d.cameras.perspective import PerspectiveCamera
 from luce_3d.renderers.wire import WireRenderer
 from luce_3d.renderers.projection import projection_matrix
@@ -18,6 +20,15 @@ pub struct WireBatch:
             self.points[index] = points[index]
     pub func count() -> i64:
         return (i64)self.points.length // 2
+    ## The box around every endpoint (framing); fails when there are none.
+    pub func bounds() -> Bounds!:
+        if self.points.length == 0: error(errors.invalid, "an empty wire batch has no bounds")
+        var low = self.points[0]
+        var high = low
+        for p in self.points:
+            low = Vector3(math.min(low.x, p.x), math.min(low.y, p.y), math.min(low.z, p.z))
+            high = Vector3(math.max(high.x, p.x), math.max(high.y, p.y), math.max(high.z, p.z))
+        return Bounds(low, high)
     pub mutating func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color, width: f64 = 1.0) -> !:
         let native = try target.get()
         var device = gpu.device_of(native) catch failure:

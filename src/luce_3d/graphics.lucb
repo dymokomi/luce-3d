@@ -22,6 +22,9 @@ pub type WireRenderer = wire.WireRenderer
 import luce_3d.renderers.wire_batch as wire_batch
 pub type WireBatch = wire_batch.WireBatch
 pub let wire_batch_type = wire_batch.wire_batch_type
+import luce_3d.renderers.curve_lines as curve_lines
+pub type CurveLines = curve_lines.CurveLines
+pub let append_curve_segments = curve_lines.append_curve_segments
 import luce_3d.renderers.edit_overlay as edit_overlay
 pub type EditOverlay = edit_overlay.EditOverlay
 pub let edit_overlay_type = edit_overlay.edit_overlay_type
