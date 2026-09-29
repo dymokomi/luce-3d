@@ -8,7 +8,7 @@ import math
 import memory
 import three
 import geocore
-from geocore import MeshNormals, MeshPrimitives, AttributeKernels, Vector3, Verbs
+from geocore import MeshNormals, MeshPrimitives, AttributeKernels, Vector3, Verbs, Subdivision
 from three import Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer, Color, WireRenderer, MeshGeometry
 
 let width: u32 = 160
@@ -195,6 +195,35 @@ func occlusion(view: View*, cube: interop.Reference[geocore.Mesh], image: u8[]) 
     let behind = red_pixels(image)
     assert(alone > 100 and behind * 4 < alone * 3)
 
+## A subdivided cube draws its limit surface: rounder, so it covers fewer
+## pixels than the cage, and the same pixels as its display mesh drawn
+## directly.
+func subdivided(view: View*, cube: interop.Reference[geocore.Mesh], image: u8[], direct: u8[]) -> !:
+    try view.show(cube, false)
+    try view.draw(image)
+    var cage_covered: usize = 0
+    for at in 0..<(usize)(width * height):
+        if image[at * 4] != 0: cage_covered += 1
+    let marking = try Verbs.run("Subdivision", cube, "", 0, [1.0, 2.0, 3.0, 1.0])
+    defer marking.release()
+    let marked = try marking.value().mesh()
+    defer marked.release()
+    try view.show(marked, false)
+    try view.draw(image)
+    var covered: usize = 0
+    for at in 0..<(usize)(width * height):
+        if image[at * 4] != 0: covered += 1
+    assert(covered > 1000 and covered * 20 < cage_covered * 19)
+    let display = try Subdivision.display(marked)
+    defer display.release()
+    try view.show(display, false)
+    try view.draw(direct)
+    var differing: usize = 0
+    for at in 0..<(usize)(width * height):
+        let difference = (i64)image[at * 4] - (i64)direct[at * 4]
+        if difference > 3 or difference < -3: differing += 1
+    assert(differing * 200 < covered)
+
 func red_pixels(image: const u8[]) -> usize:
     var count: usize = 0
     for at in 0..<(usize)(width * height):
@@ -363,5 +392,6 @@ pub func main(arguments: str[]) -> i32!:
     try picking(&view, cube, image)
     try occlusion(&view, cube, image)
     try two_sided(&view, cube, legacy_image, image)
+    try subdivided(&view, cube, image, legacy_image)
     print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded; inside-out meshes light on the eye's side; curvature maps; GPU face picking and selection tint")
     return 0

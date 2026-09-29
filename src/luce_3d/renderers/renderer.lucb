@@ -16,7 +16,8 @@ import luce_3d.errors as errors
 from luce_3d.core.object import Object3D, ObjectNode, Light, LightKind
 import geocore
 from geocore import Geometry, Vector3, Matrix4, Selection
-from geocore_kernel import selection_bits
+from geocore_kernel import selection_bits, subdivided_display, mesh_dispose
+from luce_3d.renderers.subdivision_draw import display_highlight
 from luce_3d.core.material import Material, Color, check_color
 from luce_3d.cameras.perspective import PerspectiveCamera, Projection
 from luce_3d.renderers.projection import projection_matrix
@@ -84,6 +85,8 @@ pub struct Renderer:
     var edge_color: Color = Color(0.0, 0.0, 0.0)
     var picker: FacePicker
     var highlight: FaceHighlight
+    ## The cage highlight mapped onto a subdivided mesh's display faces.
+    var display_highlight: FaceHighlight
     var placements: Growing[Placement]
 
     ## Objects whose prepared data survived a scene change (tests, profiling).
@@ -209,6 +212,7 @@ pub struct Renderer:
         self.edge_color = Color(0.0, 0.0, 0.0)
         self.picker = FacePicker()
         self.highlight = FaceHighlight()
+        self.display_highlight = FaceHighlight()
         self.placements = Growing[Placement]()
         self.count = 0
         var empty: gpu.Vertex[]
@@ -295,8 +299,21 @@ pub struct Renderer:
         try check_color(tint)
         var shading = self.shading
         if self.flat and shading.mode == gpu.Shading.lit: shading.mode = gpu.Shading.flat
-        try draw_polygon(&self.arrays, target, try polygon.get(), item.world, projection, lighting, tint, appearance.is_lit(), &shading,
-                         self.wire_width * 0.7071067811865476 if self.surfaces else 0.0, self.surfaces, self.edge_width, self.edge_color, &self.highlight)
+        let cage = try polygon.get()
+        let bias = self.wire_width * 0.7071067811865476 if self.surfaces else 0.0
+        # A subdivided cage: its limit surface, the cage's wires over it.
+        if let display = try subdivided_display(cage):
+            defer mesh_dispose(display)
+            if self.highlight.topology == cage.corners_id(): try display_highlight(&self.highlight, display, &self.display_highlight)
+            else: self.display_highlight.words.clear()
+            try draw_polygon(&self.arrays, target, display, item.world, projection, lighting, tint, appearance.is_lit(), &shading,
+                             bias, self.surfaces, 0.0, self.edge_color, &self.display_highlight)
+            if self.edge_width > 0.0:
+                try draw_polygon(&self.arrays, target, cage, item.world, projection, lighting, tint, appearance.is_lit(), &shading,
+                                 0.0, false, self.edge_width, self.edge_color, none)
+            return
+        try draw_polygon(&self.arrays, target, cage, item.world, projection, lighting, tint, appearance.is_lit(), &shading,
+                         bias, self.surfaces, self.edge_width, self.edge_color, &self.highlight)
 
     ## Ambient lights summed, and the first four directional lights.
     func frame_lighting() -> FrameLighting:
@@ -509,6 +526,7 @@ pub struct Renderer:
         free(self.items) in memory.heap
         self.picker.close()
         self.highlight.close()
+        self.display_highlight.close()
         self.placements.close()
         self.arrays.close()
         if self.vertices.length > 0:

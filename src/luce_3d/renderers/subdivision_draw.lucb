@@ -1,0 +1,33 @@
+## Drawing a subdivided cage (geocore subdivision): the surface pass draws
+## its limit-surface display mesh (made by the compute worker, a cache hit
+## here), wires stay on the cage, and a face selection of the cage tints the
+## display faces that came from the selected cage faces.
+import geocore
+from geocore import Matrix4
+from geocore_kernel import attribute_entry, Domain
+from luce_3d.renderers.mesh_batch import FaceHighlight
+
+## `cage`'s face highlight for `display`'s faces (by `.cage_face`), into
+## `out`; cheap when neither changed.
+pub func display_highlight(cage: const FaceHighlight*, display: const geocore.Mesh*, out: FaceHighlight*) -> !:
+    out.color = cage.color
+    out.weight = cage.weight
+    let topology = display.corners_id()
+    let key = (cage.key *% 0x9E3779B97F4A7C15) ^ topology
+    if key == out.key and topology == out.topology: return
+    out.topology = topology
+    out.key = key
+    if cage.words.count == 0:
+        out.words.clear()
+        return
+    let index = display.find_attribute(".cage_face", (i64)(u8)Domain.face)
+    let faces = (usize)display.face_count()
+    try out.words.fill((faces + 31) // 32, 0)
+    if index < 0: return
+    let entry = try attribute_entry(display, index)
+    let owners = u32[]((u32*)entry.data.view().data, faces)
+    let words = cage.words.view()
+    for face in 0..<faces:
+        let owner = (usize)owners[face]
+        if owner // 32 < words.length and (words[owner // 32] >> (u32)(owner % 32)) & 1 != 0:
+            out.words.items[face // 32] |= (u32)1 << (u32)(face % 32)
