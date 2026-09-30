@@ -9,7 +9,7 @@ import memory
 import luce_3d.errors as errors
 import geocore_parallel
 from geocore import Vector3, Matrix4, GeometrySet
-from geocore_kernel import Curves, CurveType, Float3, set_find, set_curves, evaluated_offsets, evaluated_positions, instances_component, Instances, curves_origin, curve_float3_span
+from geocore_kernel import Curves, CurveType, Float3, set_curves, evaluated_offsets, evaluated_positions, instances_component, Instances, curves_origin, curve_float3_span
 from geocore_growing import Growing
 from luce_3d.renderers.wire_batch import WireBatch, wire_batch_type
 
@@ -26,7 +26,7 @@ func append_nested(set: const GeometrySet*, matrix: Matrix4, lines: Growing[Vect
     if let curves = set_curves(set):
         if let out = lines: try append_lines(curves, matrix, out)
         if let out = hulls: try append_hull(curves, matrix, out)
-    let data = set_find(set, instances_component()) else return
+    let data = set.find(instances_component()) else return
     let instances = (const Instances*)data
     for index in 0..<instances.count():
         let item = instances.item(index)

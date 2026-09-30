@@ -5,7 +5,6 @@
 ## shaders, so changing lights or shading uploads nothing.
 import gpu
 import memory
-import geocore_native as native
 from geocore import Mesh, Matrix4, Vector3
 from luce_3d.core.material import Color
 from luce_3d.cameras.perspective import Projection
@@ -175,7 +174,7 @@ func parameters(mesh: const Mesh*, world: Matrix4, projection: Projection, light
     let view = projection_matrix(projection)
     # Positions are f32 offsets from the mesh's f64 origin; the origin joins
     # the placement here, in f64.
-    let origin = native.origin(mesh)
+    let origin = mesh.position_origin()
     let placed = world.translation.add(world.x.multiply_scalar(origin.x)).add(world.y.multiply_scalar(origin.y)).add(world.z.multiply_scalar(origin.z))
     let columns: Vector3[4] = [world.x, world.y, world.z, placed]
     for column in 0..<(usize)4:
@@ -240,29 +239,29 @@ func positions(arrays: GpuArrays*, mesh: const Mesh*) -> gpu.Buffer!:
     let key = ArrayKey(mesh.points_id(), tag_positions, 0)
     if let found = arrays.find(key): return found
     let count = (usize)mesh.point_count()
-    let parent = native.points_parent(mesh)
-    let changed = native.points_changed(mesh)
+    let parent = mesh.points_parent()
+    let changed = mesh.points_changed()
     # A Move rewrites only its neighbourhood of the previous buffer.
     if parent != 0 and changed.1 - changed.0 < count:
         let part = try arrays.staging((changed.1 - changed.0) * 12)
-        try native.pack_positions_range(mesh, changed.0, changed.1, as_f32(part))
+        try mesh.pack_positions_range(changed.0, changed.1, as_f32(part))
         if let patched = try arrays.patch(key, parent, count * 12, changed.0 * 12, part): return patched
     let bytes = try arrays.staging(count * 12)
-    try native.pack_positions(mesh, as_f32(bytes))
+    try mesh.pack_positions(as_f32(bytes))
     return try arrays.store(key, bytes, parent)
 
 func corner_points(arrays: GpuArrays*, mesh: const Mesh*) -> gpu.Buffer!:
     let key = ArrayKey(mesh.corners_id(), tag_corners, 0)
     if let found = arrays.find(key): return found
     let bytes = try arrays.staging((usize)mesh.vertex_count() * 4)
-    try native.pack_corner_points(mesh, as_u32(bytes))
+    try mesh.pack_corner_points(as_u32(bytes))
     return try arrays.store(key, bytes)
 
 func triangles(arrays: GpuArrays*, mesh: const Mesh*, first: usize, count: usize, part: u32) -> gpu.Buffer!:
     let key = ArrayKey(mesh.triangles_id(), tag_triangles, part)
     if let found = arrays.find(key): return found
     let bytes = try arrays.staging(count * 12)
-    try native.pack_triangles(mesh, first, as_u32(bytes))
+    try mesh.pack_triangles(first, as_u32(bytes))
     return try arrays.store(key, bytes)
 
 ## Faces follow triangles and corners: keyed by both ids.
@@ -270,14 +269,14 @@ func triangle_faces(arrays: GpuArrays*, mesh: const Mesh*, first: usize, count: 
     let key = ArrayKey(mesh.triangles_id() *% 0x9E3779B97F4A7C15 ^ mesh.corners_id(), tag_faces, part)
     if let found = arrays.find(key): return found
     let bytes = try arrays.staging(count * 4)
-    try native.pack_triangle_faces(mesh, first, as_u32(bytes))
+    try mesh.pack_triangle_faces(first, as_u32(bytes))
     return try arrays.store(key, bytes)
 
 func edges(arrays: GpuArrays*, mesh: const Mesh*) -> gpu.Buffer!:
     let key = ArrayKey(mesh.edges_id(), tag_edges, 0)
     if let found = arrays.find(key): return found
     let bytes = try arrays.staging((usize)(try mesh.edge_count()) * 8)
-    try native.pack_edges(mesh, as_u32(bytes))
+    try mesh.pack_edges(as_u32(bytes))
     return try arrays.store(key, bytes)
 
 ## The shading normals and their domain: an authored N (corner, then point,
@@ -287,36 +286,36 @@ func normal_buffer(arrays: GpuArrays*, mesh: const Mesh*) -> (gpu.Buffer, i64)!:
     let found = try preferred(mesh, "N", 3)
     if found.0 >= 0:
         return (try attribute_buffer(arrays, mesh, found.0, tag_normals), found.1)
-    let ids = try native.smooth_ids(mesh)
-    let domain = try native.smooth_domain(mesh)
+    let ids = try mesh.smooth_ids()
+    let domain = try mesh.smooth_domain()
     let key = ArrayKey(ids.0, tag_smooth_normals, 0)
     if let buffer = arrays.find(key): return (buffer, domain)
     let count = (usize)(mesh.vertex_count() if domain == 1 else mesh.point_count())
-    let changed = try native.smooth_changed(mesh)
+    let changed = try mesh.smooth_changed()
     if ids.1 != 0 and changed.1 - changed.0 < count:
         let part = try arrays.staging((changed.1 - changed.0) * 12)
-        try native.pack_smooth_range(mesh, changed.0, changed.1, as_f32(part))
+        try mesh.pack_smooth_range(changed.0, changed.1, as_f32(part))
         if let patched = try arrays.patch(key, ids.1, count * 12, changed.0 * 12, part): return (patched, domain)
     let bytes = try arrays.staging(count * 12)
-    try native.pack_smooth_normals(mesh, as_f32(bytes))
+    try mesh.pack_smooth_normals(as_f32(bytes))
     return (try arrays.store(key, bytes, ids.1), domain)
 
 ## Principal curvatures (k1, k2) for the curvature map: the CAD analytic
 ## attributes (corners), else the discrete estimate (points); their domain;
 ## and the range the map spans.
 func curvature_buffer(arrays: GpuArrays*, mesh: const Mesh*, shading: const MeshShading*) -> (gpu.Buffer, i64, f64)!:
-    let source = try native.curvature_source(mesh)
+    let source = try mesh.curvature_source()
     var range = shading.curvature_range
     if range <= 0.0:
         if let known = arrays.range(source.key, shading.curvature): range = known
         else:
-            range = try native.curvature_range(mesh, &source, shading.curvature)
+            range = try mesh.curvature_range(&source, shading.curvature)
             arrays.remember_range(source.key, shading.curvature, range)
     let key = ArrayKey(source.key, tag_curvature, 0)
     if let found = arrays.find(key): return (found, source.domain, range)
     let count = (usize)mesh.vertex_count() if source.domain == 1 else (usize)mesh.point_count()
     let bytes = try arrays.staging(count * 12)
-    try native.pack_curvature(mesh, &source, as_f32(bytes))
+    try mesh.pack_curvature(&source, as_f32(bytes))
     return (try arrays.store(key, bytes), source.domain, range)
 
 ## The highlight's bits, one u32 per 32 faces.
@@ -337,18 +336,18 @@ func color_buffer(arrays: GpuArrays*, mesh: const Mesh*) -> (gpu.Buffer?, i64)!:
 func attribute_buffer(arrays: GpuArrays*, mesh: const Mesh*, index: i64, tag: u8) -> gpu.Buffer!:
     let key = ArrayKey(try mesh.attribute_id(index), tag, 0)
     if let found = arrays.find(key): return found
-    let tuples = try native.attribute_tuples(mesh, index)
-    let parent = try native.attribute_parent(mesh, index)
+    let tuples = try mesh.attribute_tuples(index)
+    let parent = try mesh.attribute_parent(index)
     # An edited column (N after a Move) rewrites its predecessor's buffer:
     # just the edited range when the attribute is plain float triples.
     if parent != 0 and (try mesh.attribute_width(index)) == 3 and (try mesh.attribute_storage(index)) == 0 and not (try mesh.attribute_integer(index)):
-        let changed = try native.attribute_changed(mesh, index)
+        let changed = try mesh.attribute_changed(index)
         if changed.1 - changed.0 < tuples:
             let part = try arrays.staging((changed.1 - changed.0) * 12)
-            try native.pack_attribute3_range(mesh, index, changed.0, changed.1, as_f32(part))
+            try mesh.pack_attribute3_range(index, changed.0, changed.1, as_f32(part))
             if let patched = try arrays.patch(key, parent, tuples * 12, changed.0 * 12, part): return patched
     let bytes = try arrays.staging(tuples * 12)
-    try native.pack_attribute3(mesh, index, as_f32(bytes))
+    try mesh.pack_attribute3(index, as_f32(bytes))
     return try arrays.store(key, bytes, parent)
 
 ## The attribute `name` of at least `width` components on the highest-priority

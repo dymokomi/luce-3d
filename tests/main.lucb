@@ -6,7 +6,7 @@ import ownership
 import window
 import three
 from three import append_curve_segments
-from geocore_kernel import arc_curves, empty_set, set_put, curves_type, adopt_set
+from geocore_kernel import arc_curves, empty_set, curves_type, adopt_set
 from geocore_growing import Growing
 from three import SphereGeometry, BufferGeometry, Vertex, Vector3, Matrix4, MeshLambertMaterial, Color, Scene, Group, Mesh, Object3D, Geometry, Material, PerspectiveCamera, Renderer
 
@@ -214,7 +214,7 @@ func curve_lines() -> !:
     for kind in 0..<(i64)2:
         let circle = try arc_curves(1.0, 0.0, 360.0, 16, kind, 2, 4)
         let storage = try empty_set()
-        try set_put(storage, curves_type(), (void*)circle)
+        try storage.put(curves_type(), (void*)circle)
         let set = try adopt_set(storage)
         defer set.release()
         var lines = Growing[Vector3]()

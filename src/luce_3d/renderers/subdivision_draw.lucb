@@ -4,7 +4,7 @@
 ## display faces that came from the selected cage faces.
 import geocore
 from geocore import Matrix4
-from geocore_kernel import attribute_entry, Domain
+from geocore_kernel import Domain
 from luce_3d.renderers.mesh_batch import FaceHighlight
 
 ## `cage`'s face highlight for `display`'s faces (by `.cage_face`), into
@@ -24,7 +24,7 @@ pub func display_highlight(cage: const FaceHighlight*, display: const geocore.Me
     let faces = (usize)display.face_count()
     try out.words.fill((faces + 31) // 32, 0)
     if index < 0: return
-    let entry = try attribute_entry(display, index)
+    let entry = try display.attribute_entry(index)
     let owners = u32[]((u32*)entry.data.view().data, faces)
     let words = cage.words.view()
     for face in 0..<faces:
@@ -37,6 +37,6 @@ pub func cage_face_of(display: const geocore.Mesh*, face: i64) -> i64!:
     if face < 0: return face
     let index = display.find_attribute(".cage_face", (i64)(u8)Domain.face)
     if index < 0: return face
-    let entry = try attribute_entry(display, index)
+    let entry = try display.attribute_entry(index)
     let owners = u32[]((u32*)entry.data.view().data, (usize)display.face_count())
     return (i64)owners[(usize)face] if (usize)face < owners.length else -1

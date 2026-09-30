@@ -8,7 +8,7 @@ import math
 import memory
 import luce_3d.errors as errors
 from geocore import Vector3, Mesh, Selection
-from geocore_kernel import BitsBuilder, GroupReport, Domain, adopt_selection, point_span, mesh_origin, offset_span, corner_span
+from geocore_kernel import BitsBuilder, GroupReport, Domain, adopt_selection
 from luce_3d.cameras.perspective import PerspectiveCamera, Projection
 from luce_3d.renderers.edit_screen import project
 
@@ -45,13 +45,13 @@ pub struct Knife:
     pub static func faces_under(mesh: interop.Reference[Mesh], camera: interop.Reference[PerspectiveCamera], x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64) -> interop.Reference[Selection]!:
         let geometry = try mesh.get()
         let p = try camera.value().projection(math.max(1.0, width) / math.max(1.0, height))
-        let points = point_span(geometry)
-        let origin = mesh_origin(geometry)
+        let points = geometry.point_span()
+        let origin = geometry.position_origin()
         let screen = try alloc Vector3[points.length] in memory.heap
         defer free(screen) in memory.heap
         for at in 0..<points.length: screen[at] = project(points[at].vector().add(origin), p, width, height)
-        let offsets = offset_span(geometry)
-        let corners = corner_span(geometry)
+        let offsets = geometry.offset_span()
+        let corners = geometry.corner_span()
         let faces = offsets.length - 1
         var bits = try BitsBuilder.zeros(faces)
         errdefer bits.close()
