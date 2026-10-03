@@ -1,14 +1,14 @@
-import gpu
+import luce_gpu.gpu
 import interop
-import math
+import luce_std.math
 import memory
 import ownership
-import window
-import three
-from three import append_curve_segments
-from geocore_kernel import arc_curves, empty_set, curves_type, adopt_set
-from geocore_growing import Growing
-from three import SphereGeometry, BufferGeometry, Vertex, Vector3, Matrix4, MeshLambertMaterial, Color, Scene, Group, Mesh, Object3D, Geometry, Material, PerspectiveCamera, Renderer
+import luce_window.window
+import luce_3d.graphics as three
+from luce_3d.graphics import append_curve_segments
+from luce_geocore.kernel import arc_curves, empty_set, curves_type, adopt_set
+from luce_geocore.core.growing import Growing
+from luce_3d.graphics import SphereGeometry, BufferGeometry, Vertex, Vector3, Matrix4, MeshLambertMaterial, Color, Scene, Group, Mesh, Object3D, Geometry, Material, PerspectiveCamera, Renderer
 
 struct Tracker: memory.Allocator:
     var upstream: memory.Allocator

@@ -1,9 +1,9 @@
-import geocore
-from three import Knife, EditOverlay, SurfaceHits, Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
-from gpu import Frame
-import gpu
-import window
-import math
+import luce_geocore.geocore
+from luce_3d.graphics import Knife, EditOverlay, SurfaceHits, Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
+from luce_gpu.gpu import Frame
+import luce_gpu.gpu
+import luce_window.window
+import luce_std.math
 
 pub func main(arguments: list[str]) -> int!:
     let geometry = SphereGeometry(1.0, 16, 8)

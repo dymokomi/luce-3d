@@ -1,8 +1,8 @@
-from three import Geometry, Material, Vertex, Bounds, Vector3, Color, Mesh, Scene, Renderer, PerspectiveCamera
-from gpu import Frame
-import gpu
-import window
-import three
+from luce_3d.graphics import Geometry, Material, Vertex, Bounds, Vector3, Color, Mesh, Scene, Renderer, PerspectiveCamera
+from luce_gpu.gpu import Frame
+import luce_gpu.gpu
+import luce_window.window
+import luce_3d.graphics as three
 
 ## Open interfaces are exercised by application-owned implementations. Their
 ## failures must keep dynamically constructed messages alive across native cleanup.

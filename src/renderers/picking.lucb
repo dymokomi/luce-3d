@@ -1,0 +1,59 @@
+## GPU face picking: the id pass of one mesh (face + 1 per pixel, zero where
+## nothing is) drawn into an offscreen texture from the mesh's retained GPU
+## arrays and read back once. Later picks over the same mesh, placement and
+## view read the copy, so hovering costs a lookup; a camera move or an edit
+## costs one id pass. No CPU spatial index is needed for picking.
+import luce_gpu.gpu
+import memory
+import luce_geocore.geocore
+from luce_geocore.geocore import Matrix4
+from luce_geocore.core.growing import Growing
+from cameras.perspective import Projection
+from renderers.gpu_arrays import GpuArrays
+from renderers.mesh_batch import draw_polygon_ids
+
+pub struct FacePicker:
+    var texture: gpu.Texture
+    var width: u32
+    var height: u32
+    var key: u64
+    var pixels: Growing[u8]
+
+    pub func init():
+        self.texture = gpu.Texture()
+        self.width = 0
+        self.height = 0
+        self.key = 0
+        self.pixels = Growing[u8]()
+
+    ## The face of `mesh` (placed by `world`, seen through `projection` in a
+    ## `width` x `height` view) under (x, y), or -1. `key` names everything the
+    ## id image depends on; an equal key reuses the last one.
+    pub mutating func face(arrays: GpuArrays*, device: gpu.Device, mesh: const geocore.Mesh*, world: Matrix4, projection: Projection,
+                           key: u64, x: f64, y: f64, width: u32, height: u32) -> i64!:
+        if width == 0 or height == 0 or not (x >= 0.0 and y >= 0.0 and x < (f64)width and y < (f64)height): return -1
+        if key != self.key or width != self.width or height != self.height:
+            self.key = 0
+            if width != self.width or height != self.height:
+                self.texture.destroy()
+                self.texture = try gpu.Texture.create(device, width, height, gpu.Format.rgba8_linear)
+                self.width = width
+                self.height = height
+            let recording = try self.texture.frame()
+            defer recording.release()
+            let target = try recording.value().target()
+            defer target.release()
+            try draw_polygon_ids(arrays, try target.get(), mesh, world, projection, 0)
+            discard(try recording.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0)))
+            try self.pixels.fill((usize)(width * height * 4), 0)
+            try self.texture.read(self.pixels.items[..<self.pixels.count])
+            self.key = key
+        let at = ((usize)y * (usize)width + (usize)x) * 4
+        let bytes = self.pixels.items
+        let id = (u32)bytes[at] | ((u32)bytes[at + 1] << 8) | ((u32)bytes[at + 2] << 16) | ((u32)bytes[at + 3] << 24)
+        return (i64)id - 1
+
+    pub mutating func close():
+        self.texture.destroy()
+        self.pixels.close()
+        self.key = 0

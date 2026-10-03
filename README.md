@@ -8,8 +8,8 @@ hands the renderer a render target. All platform resources belong to the
 standard library.
 
 ```luce
-from three import Scene, Mesh, SphereGeometry, MeshLambertMaterial, Color, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
-from gpu import Frame
+from luce_3d.graphics import Scene, Mesh, SphereGeometry, MeshLambertMaterial, Color, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
+from luce_gpu.gpu import Frame
 import window
 
 pub func main(arguments: list[str]) -> int!:

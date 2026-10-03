@@ -1,0 +1,81 @@
+## The three export: scenes, objects, materials, cameras, lights and the
+## renderer. Geometry comes from luce-geocore; its vectors, matrices and the
+## Geometry interface are re-exported, since scene code names them throughout.
+import luce_geocore.geocore
+pub type Vector3 = geocore.Vector3
+pub type Matrix4 = geocore.Matrix4
+pub type Geometry = geocore.Geometry
+pub type Vertex = geocore.Vertex
+pub type Bounds = geocore.Bounds
+import core.material
+import geometries.buffer
+import geometries.sphere
+import geometries.box
+import geometries.mesh_geometry
+pub type MeshGeometry = mesh_geometry.MeshGeometry
+pub let mesh_geometry_type = mesh_geometry.mesh_geometry_type
+import materials.lambert
+import materials.basic
+import errors
+import renderers.wire
+pub type WireRenderer = wire.WireRenderer
+import renderers.wire_batch
+pub type WireBatch = wire_batch.WireBatch
+pub let wire_batch_type = wire_batch.wire_batch_type
+import renderers.curve_lines
+pub type CurveLines = curve_lines.CurveLines
+pub let append_curve_segments = curve_lines.append_curve_segments
+import renderers.edit_overlay
+pub type EditOverlay = edit_overlay.EditOverlay
+pub let edit_overlay_type = edit_overlay.edit_overlay_type
+import renderers.knife
+pub type Knife = knife.Knife
+pub type KnifePlane = knife.KnifePlane
+
+pub type Material = material.Material
+pub type Color = material.Color
+pub type BufferGeometry = buffer.BufferGeometry
+pub type SphereGeometry = sphere.SphereGeometry
+pub type BoxGeometry = box.BoxGeometry
+pub let box_geometry_type = box.box_geometry_type
+pub type MeshLambertMaterial = lambert.MeshLambertMaterial
+pub type MeshBasicMaterial = basic.MeshBasicMaterial
+pub let invalid: ErrorCode = errors.invalid
+pub let busy: ErrorCode = errors.busy
+pub let buffer_geometry_type = buffer.buffer_geometry_type
+pub let sphere_geometry_type = sphere.sphere_geometry_type
+pub let lambert_material_type = lambert.lambert_material_type
+pub let basic_material_type = basic.basic_material_type
+
+import core.object
+pub type Object3D = object.Object3D
+pub type ObjectNode = object.ObjectNode
+pub type Light = object.Light
+pub type LightKind = object.LightKind
+pub let object_node_type = object.object_node_type
+import scenes.scene
+pub type Scene = scene.Scene
+pub let scene_type = scene.scene_type
+import objects.group
+pub type Group = group.Group
+pub let group_type = group.group_type
+import objects.mesh
+pub type Mesh = mesh.Mesh
+pub let mesh_type = mesh.mesh_type
+import objects.surface_hits
+## Where a view ray meets the scene's surfaces, or a construction plane.
+pub type SurfaceHits = surface_hits.SurfaceHits
+pub type SurfaceHit = surface_hits.SurfaceHit
+import lights.ambient
+pub type AmbientLight = ambient.AmbientLight
+pub let ambient_type = ambient.ambient_type
+import lights.directional
+pub type DirectionalLight = directional.DirectionalLight
+pub let directional_type = directional.directional_type
+import cameras.perspective
+pub type PerspectiveCamera = perspective.PerspectiveCamera
+pub let perspective_camera_type = perspective.perspective_camera_type
+
+import renderers.renderer
+pub type Renderer = renderer.Renderer
+pub let renderer_type = renderer.renderer_type

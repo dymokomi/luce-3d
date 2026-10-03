@@ -1,11 +1,11 @@
 ## Independent Metal readback checks depth, clipping and a host view's region scope.
-import gpu
+import luce_gpu.gpu
 import interop
 import memory
-import window
+import luce_window.window
 import native
-import three
-from three import Scene, Mesh, BufferGeometry, Geometry, Material, Object3D, Vertex, Vector3, Color, MeshBasicMaterial, PerspectiveCamera, Renderer
+import luce_3d.graphics as three
+from luce_3d.graphics import Scene, Mesh, BufferGeometry, Geometry, Material, Object3D, Vertex, Vector3, Color, MeshBasicMaterial, PerspectiveCamera, Renderer
 
 func rendered(result: interop.Outcome[unit]) -> !:
     defer result.release()

@@ -4,11 +4,11 @@
 import memory
 import time
 import interop
-import gpu
-import three
-import geocore_parallel
-from geocore import Vector3, Mesh, mesh_type, detached_mesh
-from three import EditOverlay
+import luce_gpu.gpu
+import luce_3d.graphics as three
+import luce_geocore.core.parallel as geocore_parallel
+from luce_geocore.geocore import Vector3, Mesh, mesh_type, detached_mesh
+from luce_3d.graphics import EditOverlay
 from fixtures import Counter, GridArrays, make_mesh, chosen_faces, face_points, since, report, report_bytes, side
 from display import Viewport
 
