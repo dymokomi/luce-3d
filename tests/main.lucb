@@ -1,10 +1,10 @@
-import luce_gpu.gpu
+from luce_gpu import gpu
 import interop
-import luce_std.math
+from luce_std import math
 import memory
 import ownership
-import luce_window.window
-import luce_3d.graphics as three
+from luce_window import window
+from luce_3d import graphics as three
 from luce_3d.graphics import append_curve_segments
 from luce_geocore.kernel import arc_curves, empty_set, curves_type, adopt_set
 from luce_geocore.core.growing import Growing

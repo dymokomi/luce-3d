@@ -6,15 +6,15 @@
 ## change keeps the prepared data of every object whose geometry, material,
 ## world transform and lights are unchanged. Standalone frames keep a CPU
 ## projection fallback for portable recording and tests.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import interop
-import luce_std.math
+from luce_std import math
 import memory
 import ownership
 import core.object
 import errors
 from core.object import Object3D, ObjectNode, Light, LightKind
-import luce_geocore.geocore
+from luce_geocore import geocore
 from luce_geocore.geocore import Geometry, Vector3, Matrix4, Selection
 from luce_geocore.kernel import selection_bits, subdivided_display, mesh_dispose
 from renderers.subdivision_draw import display_highlight, cage_face_of

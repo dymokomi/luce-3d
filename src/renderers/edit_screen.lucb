@@ -1,6 +1,6 @@
 ## Screen projection for Edit overlays: every point once per camera, for the
 ## point markers, and single points for picking.
-import luce_std.math
+from luce_std import math
 from luce_geocore.geocore import Vector3, Mesh
 from cameras.perspective import Projection
 from luce_geocore.core.growing import Growing

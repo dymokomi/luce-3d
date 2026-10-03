@@ -3,7 +3,7 @@
 ## vertex is a corner: its point, shading normal, uv and color.
 import interop
 import ownership
-import luce_geocore.geocore
+from luce_geocore import geocore
 from luce_geocore.geocore import Geometry, Vertex, Bounds
 
 pub struct MeshGeometry: Geometry:

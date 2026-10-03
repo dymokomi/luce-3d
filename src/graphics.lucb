@@ -1,7 +1,7 @@
 ## The three export: scenes, objects, materials, cameras, lights and the
 ## renderer. Geometry comes from luce-geocore; its vectors, matrices and the
 ## Geometry interface are re-exported, since scene code names them throughout.
-import luce_geocore.geocore
+from luce_geocore import geocore
 pub type Vector3 = geocore.Vector3
 pub type Matrix4 = geocore.Matrix4
 pub type Geometry = geocore.Geometry

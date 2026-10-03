@@ -1,7 +1,7 @@
 ## Screen-space-width, depth-tested world-space lines. No UI dependency.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import interop
-import luce_std.math
+from luce_std import math
 import memory
 import errors
 from luce_geocore.geocore import Vector3

@@ -10,7 +10,7 @@ standard library.
 ```luce
 from luce_3d.graphics import Scene, Mesh, SphereGeometry, MeshLambertMaterial, Color, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
 from luce_gpu.gpu import Frame
-import luce_window.window
+from luce_window import window
 
 pub func main(arguments: list[str]) -> int!:
     let scene = Scene()

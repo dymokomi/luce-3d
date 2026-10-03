@@ -1,6 +1,6 @@
 ## Bound retained batches below Vulkan's guaranteed 128 MiB storage-buffer range.
 ## Chunking also makes large imported meshes independent of UI frame budgets.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import memory
 
 pub struct RetainedBatch:

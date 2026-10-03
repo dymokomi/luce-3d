@@ -1,6 +1,6 @@
 ## UV sphere with duplicated seam vertices and no degenerate polar triangles.
 import interop
-import luce_std.math
+from luce_std import math
 import memory
 import ownership
 import errors

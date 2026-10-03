@@ -2,7 +2,7 @@
 ## its limit-surface display mesh (made by the compute worker, a cache hit
 ## here), wires stay on the cage, and a face selection of the cage tints the
 ## display faces that came from the selected cage faces.
-import luce_geocore.geocore
+from luce_geocore import geocore
 from luce_geocore.geocore import Matrix4
 from luce_geocore.kernel import Domain
 from renderers.mesh_batch import FaceHighlight

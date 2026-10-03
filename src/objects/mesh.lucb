@@ -4,7 +4,7 @@ import ownership
 import errors
 import core.object
 from core.object import Object3D, ObjectNode, Light, LightKind
-import luce_geocore.geocore
+from luce_geocore import geocore
 from luce_geocore.geocore import Geometry, Vector3
 from core.material import Material, Color, check_color
 from geometries.mesh_geometry import MeshGeometry, mesh_geometry_type

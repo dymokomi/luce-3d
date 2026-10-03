@@ -3,7 +3,7 @@
 ## through its BVH), or a construction plane. Editors place things on
 ## surfaces with it: a sketch plane from a face, PolyDraw's corners.
 import interop
-import luce_std.math
+from luce_std import math
 import errors
 from core.object import Object3D
 from luce_geocore.geocore import Vector3, Matrix4, Mesh

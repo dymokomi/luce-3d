@@ -1,8 +1,8 @@
 ## Retained native line endpoints avoid rebuilding Luce lists on camera frames.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import interop
 import memory
-import luce_std.math
+from luce_std import math
 import errors
 from luce_geocore.geocore import Vector3, Bounds
 from cameras.perspective import PerspectiveCamera

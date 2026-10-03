@@ -1,12 +1,12 @@
 ## An offscreen viewport for display timings: a scene with the editor's two
 ## lights and one Lambert mesh, drawn into a 1400x900 texture. A timed draw
 ## ends with a one-pixel read, so it covers the GPU's work, not just recording.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import interop
 import memory
 import time
-import luce_3d.graphics as three
-import luce_geocore.geocore
+from luce_3d import graphics as three
+from luce_geocore import geocore
 from luce_3d.graphics import Vector3, Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer
 from fixtures import since
 

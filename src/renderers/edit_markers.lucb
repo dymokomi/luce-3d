@@ -1,7 +1,7 @@
 ## Depth-tested point markers for Edit mode, thinned to one per marker-sized
 ## screen cell. Visibility comes from the depth buffer, not a ray per point.
-import luce_gpu.gpu
-import luce_std.math
+from luce_gpu import gpu
+from luce_std import math
 from cameras.perspective import Projection
 from luce_geocore.core.growing import Growing
 from renderers.edit_screen import Screen

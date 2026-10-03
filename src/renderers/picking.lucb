@@ -3,9 +3,9 @@
 ## arrays and read back once. Later picks over the same mesh, placement and
 ## view read the copy, so hovering costs a lookup; a camera move or an edit
 ## costs one id pass. No CPU spatial index is needed for picking.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import memory
-import luce_geocore.geocore
+from luce_geocore import geocore
 from luce_geocore.geocore import Matrix4
 from luce_geocore.core.growing import Growing
 from cameras.perspective import Projection

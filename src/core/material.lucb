@@ -1,4 +1,4 @@
-import luce_gpu.gpu
+from luce_gpu import gpu
 import errors
 
 pub type Color = gpu.Color

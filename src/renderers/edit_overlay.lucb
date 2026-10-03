@@ -2,9 +2,9 @@
 ## per mesh, selection geometry is rebuilt only when the selection changes, and
 ## point markers only when the camera does. A Luce loop over a CAD mesh's 1.4M
 ## edges cost 0.6-2.4 s per frame.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import interop
-import luce_std.math
+from luce_std import math
 import memory
 import ownership
 import errors

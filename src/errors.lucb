@@ -1,7 +1,7 @@
 import interop
 import memory
 
-import luce_geocore.geocore
+from luce_geocore import geocore
 
 ## One identity with luce-geocore's codes, so a failure reads the same whether
 ## a mesh kernel or the renderer raised it.

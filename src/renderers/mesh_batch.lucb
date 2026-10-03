@@ -3,7 +3,7 @@
 ## mesh array it came from, and the vertex stage pulls from them. Nothing is
 ## prepared per vertex on the CPU; lighting and the analysis modes run in the
 ## shaders, so changing lights or shading uploads nothing.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import memory
 from luce_geocore.geocore import Mesh, Matrix4, Vector3
 from core.material import Color

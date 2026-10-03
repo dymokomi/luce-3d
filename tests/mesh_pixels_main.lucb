@@ -2,12 +2,12 @@
 ## it matches the per-vertex path in lit and flat modes, uploads only the
 ## positions after a Move, and its zebra stripes scale with their count, break
 ## at a crease (separate normals per face) and flow across a smooth seam.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import interop
-import luce_std.math
+from luce_std import math
 import memory
-import luce_3d.graphics as three
-import luce_geocore.geocore
+from luce_3d import graphics as three
+from luce_geocore import geocore
 from luce_geocore.geocore import MeshNormals, MeshPrimitives, AttributeKernels, Vector3, Verbs, Subdivision
 from luce_3d.graphics import Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer, Color, WireRenderer, MeshGeometry
 

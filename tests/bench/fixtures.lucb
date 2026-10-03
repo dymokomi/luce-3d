@@ -1,7 +1,7 @@
 ## Benchmark fixtures: the 837x837 quad grid of the geometry-core design, a
 ## byte-counting allocator for memory figures, and the report format the
 ## runner (run.py) reads: one "name<TAB>value" line per measurement.
-import luce_std.math
+from luce_std import math
 import memory
 import time
 import interop

@@ -3,7 +3,7 @@
 ## or a moved mesh sharing its topology finds its buffers here and uploads only
 ## what changed: a Move re-uploads positions (8 MB for 700k points), not the
 ## whole mesh. Copies unused for a while are dropped.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import memory
 from luce_geocore.core.growing import Growing
 

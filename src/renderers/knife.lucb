@@ -4,7 +4,7 @@
 ## end with its angle snapped to 15 degrees. The editor records the plane
 ## (a point and a normal) in its step, so replaying never needs the camera.
 import interop
-import luce_std.math
+from luce_std import math
 import memory
 import errors
 from luce_geocore.geocore import Vector3, Mesh, Selection
