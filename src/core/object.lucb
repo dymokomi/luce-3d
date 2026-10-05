@@ -110,7 +110,7 @@ pub struct ObjectNode:
         self.visible = visible
         ObjectNode.invalidate()
 
-    func invalidate():
+    static func invalidate():
         revision = revision +? 1 else trap("scene revision exhausted")
 
     pub func child_count() -> i64:

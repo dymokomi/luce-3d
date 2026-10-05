@@ -201,7 +201,7 @@ pub struct EditOverlay:
 
     ## Mean of the distinct points under a selection, or the bounds center when
     ## nothing is selected: the Move gizmo's origin, without Luce list scans.
-    pub func center(mesh: interop.Reference[Mesh], mode: i64, selection: const i64[]) -> Vector3!:
+    pub static func center(mesh: interop.Reference[Mesh], mode: i64, selection: const i64[]) -> Vector3!:
         let geometry = try mesh.get()
         let marked = try new bool[(usize)geometry.point_count()] --- in memory.heap
         defer free(marked) in memory.heap

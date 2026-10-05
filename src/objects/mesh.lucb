@@ -31,7 +31,7 @@ pub struct Mesh: Object3D:
         self.source = retained
 
     ## A scene object for a polygon mesh.
-    pub func of(mesh: interop.Reference[geocore.Mesh], material: interop.Interface[Material]) -> interop.Reference[Mesh]!:
+    pub static func of(mesh: interop.Reference[geocore.Mesh], material: interop.Interface[Material]) -> interop.Reference[Mesh]!:
         let wrapped = try interop.Reference[MeshGeometry].adopt(new MeshGeometry(mesh) in memory.heap, mesh_geometry_type, memory.heap)
         defer wrapped.release()
         let geometry = wrapped.as_interface[Geometry](wrapped.value())
