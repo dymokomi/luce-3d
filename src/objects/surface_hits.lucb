@@ -20,7 +20,7 @@ pub struct SurfaceHits:
 
     ## The nearest visible face under `root` along the ray from `origin`
     ## in `direction`.
-    pub static func cast(root: interop.Interface[Object3D], origin: Vector3, direction: Vector3) -> SurfaceHit!:
+    pub func cast(root: interop.Interface[Object3D], origin: Vector3, direction: Vector3) -> SurfaceHit!:
         let ray = direction.normalized() catch failure: error(errors.invalid, "a view ray needs a direction")
         if not origin.is_finite(): error(errors.invalid, "a view ray needs a finite origin")
         var best = SurfaceHit()
@@ -29,7 +29,7 @@ pub struct SurfaceHits:
 
     ## Where the ray meets the plane through `point` facing `normal` (not
     ## behind the origin), or not found.
-    pub static func plane(origin: Vector3, direction: Vector3, point: Vector3, normal: Vector3) -> SurfaceHit!:
+    pub func plane(origin: Vector3, direction: Vector3, point: Vector3, normal: Vector3) -> SurfaceHit!:
         let ray = direction.normalized() catch failure: error(errors.invalid, "a view ray needs a direction")
         let facing = normal.normalized() catch failure: error(errors.invalid, "a plane needs a normal")
         let along = ray.dot(facing)

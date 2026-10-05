@@ -51,7 +51,7 @@ struct View:
         self.shown_object = none
 
     ## Show `mesh` through the per-vertex interface (`legacy`) or its GPU arrays.
-    mutating func show(mesh: interop.Reference[geocore.Mesh], legacy: bool) -> !:
+    func show(mesh: interop.Reference[geocore.Mesh], legacy: bool) -> !:
         self.hide()
         let material = try interop.Reference[MeshLambertMaterial].adopt(new MeshLambertMaterial(gpu.Color(0.8, 0.7, 0.6)) in memory.heap, three.lambert_material_type, memory.heap)
         defer material.release()
@@ -72,21 +72,21 @@ struct View:
         self.shown = made
         self.shown_object = node
 
-    mutating func hide():
+    func hide():
         if let node = self.shown_object:
-            discard(self.scene.value().remove(node) catch failure: recover false)
+            _ = self.scene.value().remove(node) catch failure: recover false
             node.release()
         if let object = self.shown: object.release()
         self.shown = none
         self.shown_object = none
 
-    mutating func draw(image: u8[]) -> !:
+    func draw(image: u8[]) -> !:
         var none_lines: Vector3[]
         try self.draw_lines(image, none_lines)
 
     ## Draw the scene, then depth-tested `lines` in red, as the viewport draws
     ## its grid after the meshes.
-    mutating func draw_lines(image: u8[], lines: const Vector3[]) -> !:
+    func draw_lines(image: u8[], lines: const Vector3[]) -> !:
         let recording = try self.texture.frame()
         defer recording.release()
         let target = try recording.value().target()
@@ -95,10 +95,10 @@ struct View:
         defer result.release()
         try result.get()
         if lines.length > 0: try WireRenderer.lines(lines, self.camera, target, gpu.Color(1.0, 0.0, 0.0), 2.0, 0.0)
-        discard(try recording.value().present(gpu.Color(0.0, 0.0, 0.0)))
+        _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0))
         try self.texture.read(image)
 
-    mutating func close():
+    func close():
         self.hide()
         self.renderer.release()
         self.camera.release()
@@ -382,9 +382,9 @@ pub func main(arguments: str[]) -> i32!:
     defer device.destroy()
     var view = try View(device)
     defer view.close()
-    let legacy_image = try alloc u8[(usize)(width * height * 4)] in memory.heap
+    let legacy_image = try new u8[(usize)(width * height * 4)] --- in memory.heap
     defer free(legacy_image) in memory.heap
-    let image = try alloc u8[(usize)(width * height * 4)] in memory.heap
+    let image = try new u8[(usize)(width * height * 4)] --- in memory.heap
     defer free(image) in memory.heap
     let cube = try geocore.Mesh.cube(1.5)
     defer cube.release()

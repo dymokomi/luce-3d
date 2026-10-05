@@ -29,8 +29,8 @@ pub struct FacePicker:
     ## The face of `mesh` (placed by `world`, seen through `projection` in a
     ## `width` x `height` view) under (x, y), or -1. `key` names everything the
     ## id image depends on; an equal key reuses the last one.
-    pub mutating func face(arrays: GpuArrays*, device: gpu.Device, mesh: const geocore.Mesh*, world: Matrix4, projection: Projection,
-                           key: u64, x: f64, y: f64, width: u32, height: u32) -> i64!:
+    pub func face(arrays: GpuArrays*, device: gpu.Device, mesh: const geocore.Mesh*, world: Matrix4, projection: Projection,
+                  key: u64, x: f64, y: f64, width: u32, height: u32) -> i64!:
         if width == 0 or height == 0 or not (x >= 0.0 and y >= 0.0 and x < (f64)width and y < (f64)height): return -1
         if key != self.key or width != self.width or height != self.height:
             self.key = 0
@@ -44,7 +44,7 @@ pub struct FacePicker:
             let target = try recording.value().target()
             defer target.release()
             try draw_polygon_ids(arrays, try target.get(), mesh, world, projection, 0)
-            discard(try recording.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0)))
+            _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))
             try self.pixels.fill((usize)(width * height * 4), 0)
             try self.texture.read(self.pixels.items[..<self.pixels.count])
             self.key = key
@@ -53,7 +53,7 @@ pub struct FacePicker:
         let id = (u32)bytes[at] | ((u32)bytes[at + 1] << 8) | ((u32)bytes[at + 2] << 16) | ((u32)bytes[at + 3] << 24)
         return (i64)id - 1
 
-    pub mutating func close():
+    pub func close():
         self.texture.destroy()
         self.pixels.close()
         self.key = 0

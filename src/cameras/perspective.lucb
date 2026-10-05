@@ -35,26 +35,26 @@ pub struct PerspectiveCamera:
     pub func position() -> Vector3:
         return self.location
 
-    pub mutating func set_position(position: Vector3) -> !:
+    pub func set_position(position: Vector3) -> !:
         if not position.is_finite():
             error(errors.invalid, "camera position must be finite")
-        discard(try position.subtract(self.target).normalized())
+        _ = try position.subtract(self.target).normalized()
         self.location = position
 
-    pub mutating func look_at(target: Vector3) -> !:
+    pub func look_at(target: Vector3) -> !:
         if not target.is_finite():
             error(errors.invalid, "camera target must be finite")
-        discard(try self.location.subtract(target).normalized())
+        _ = try self.location.subtract(target).normalized()
         self.target = target
 
     pub func aspect() -> f64:
         return self.ratio
 
-    pub mutating func set_aspect(aspect: f64) -> !:
+    pub func set_aspect(aspect: f64) -> !:
         try lens(self.field_of_view, aspect, self.near_plane, self.far_plane)
         self.ratio = aspect
 
-    pub mutating func set_projection(fov: f64, near: f64, far: f64) -> !:
+    pub func set_projection(fov: f64, near: f64, far: f64) -> !:
         try lens(fov, self.ratio, near, far)
         self.field_of_view = fov
         self.near_plane = near
@@ -69,10 +69,10 @@ pub struct PerspectiveCamera:
             right = Vector3(0.0, 0.0, 1.0).cross(backward)
         right = try right.normalized()
         return Projection(self.location, right, backward.cross(right), backward,
-            1.0 / math.tan(self.field_of_view * math.pi / 360.0), ratio, self.near_plane, self.far_plane)
+                          1.0 / math.tan(self.field_of_view * math.pi / 360.0), ratio, self.near_plane, self.far_plane)
 
-    pub mutating func close():
-        discard(self.location)
+    pub func close():
+        _ = self.location
 
 pub let perspective_camera_type: interop.Type[PerspectiveCamera] = interop.Type[PerspectiveCamera]("PerspectiveCamera", PerspectiveCamera.close, closeable = true, main_thread = true)
 

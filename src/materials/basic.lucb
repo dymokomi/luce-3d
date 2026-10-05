@@ -11,15 +11,15 @@ pub struct MeshBasicMaterial: Material:
     pub func color() -> Color:
         return self.tint
 
-    pub mutating func set_color(color: Color) -> !:
+    pub func set_color(color: Color) -> !:
         try check_color(color)
         self.tint = color
 
     pub func is_lit() -> bool:
         return false
 
-    pub mutating func close():
+    pub func close():
         # Color is inline; the shared owner enforces closure across mesh aliases.
-        discard(self.tint)
+        _ = self.tint
 
 pub let basic_material_type: interop.Type[MeshBasicMaterial] = interop.Type[MeshBasicMaterial]("MeshBasicMaterial", MeshBasicMaterial.close, closeable = true, main_thread = true)

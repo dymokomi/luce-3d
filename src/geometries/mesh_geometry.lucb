@@ -27,7 +27,7 @@ pub struct MeshGeometry: Geometry:
     pub func bounds() -> Bounds:
         return self.mesh.value().bounds()
 
-    pub mutating func close():
+    pub func close():
         self.mesh.release()
 
     func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):

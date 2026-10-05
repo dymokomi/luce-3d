@@ -23,7 +23,7 @@ func object_mesh(shape: interop.Reference[BufferGeometry], color: Color) -> inte
 func frame(scene: interop.Interface[Object3D], camera: interop.Reference[PerspectiveCamera],
            renderer: interop.Reference[Renderer], host: window.Window, surface: gpu.Surface, blue: bool) -> !:
     while let event = try host.poll():
-        discard(event)
+        _ = event
     native.begin("3D pixel contracts")
     defer native.end()
     let recording = try surface.frame()
@@ -31,7 +31,7 @@ func frame(scene: interop.Interface[Object3D], camera: interop.Reference[Perspec
     let target = try recording.value().target()
     defer target.release()
     try rendered(renderer.value().render(scene, camera, target, true))
-    discard(try recording.value().present())
+    _ = try recording.value().present()
     try surface.wait_idle()
     let size = try host.size()
     native.pixel((u64)(size.width * size.scale / 2.0), (u64)(size.height * size.scale / 2.0),
@@ -95,7 +95,7 @@ pub func main(arguments: str[]) -> i32!:
     let region = try (try target.get()).region(gpu.Rect(8.0, 8.0, 64.0, 64.0))
     defer region.release()
     try rendered(renderer.value().render(scene_object, camera, region, true))
-    discard(try recording.value().present())
+    _ = try recording.value().present()
     try surface.wait_idle()
     let size = try host.size()
     native.pixel((u64)(40.0 * size.scale), (u64)(40.0 * size.scale), 0, 0, 255)

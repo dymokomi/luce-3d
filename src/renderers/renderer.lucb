@@ -94,14 +94,14 @@ pub struct Renderer:
         return (i64)self.reuses
 
     ## Display state only: switching normals never invalidates geometry buffers.
-    pub mutating func set_flat(value: bool):
+    pub func set_flat(value: bool):
         self.flat = value
 
     ## Surface shading of polygon meshes: 0 lit, 1 flat, 2 zebra, 3 isophotes,
     ## 4 normals, 5 unlit. Zebra and isophote stripes: `stripes` over a turn
     ## (or across the planar model), `duty` the dark share, around `axis`.
     ## Shading is draw state: changing it uploads nothing.
-    pub mutating func set_shading(mode: i64, stripes: f64 = 20.0, duty: f64 = 0.5, axis: Vector3 = Vector3(0.0, 1.0, 0.0), planar: bool = false, stripes_only: bool = false) -> !:
+    pub func set_shading(mode: i64, stripes: f64 = 20.0, duty: f64 = 0.5, axis: Vector3 = Vector3(0.0, 1.0, 0.0), planar: bool = false, stripes_only: bool = false) -> !:
         if mode < 0 or mode > 6 or not (stripes >= 1.0 and stripes <= 256.0) or not (duty > 0.0 and duty < 1.0) or not axis.is_finite() or axis.length() < 0.000001:
             error(errors.invalid, "shading needs a mode 0..6, 1..256 stripes, a duty in (0,1) and a nonzero axis")
         let kind = self.shading.curvature
@@ -111,7 +111,7 @@ pub struct Renderer:
     ## The curvature map (shading mode 6): which value (0 mean, 1 Gaussian,
     ## 2 k1, 3 k2, 4 the larger |k|) and the value it spans (0: automatic,
     ## the 98th percentile of the mesh's values).
-    pub mutating func set_curvature(kind: i64, range: f64 = 0.0) -> !:
+    pub func set_curvature(kind: i64, range: f64 = 0.0) -> !:
         if kind < 0 or kind > 4 or not (range >= 0.0 and range < 1.0e12):
             error(errors.invalid, "curvature needs a value kind 0..4 and a finite range, 0 for automatic")
         self.shading.curvature = kind
@@ -120,7 +120,7 @@ pub struct Renderer:
     ## Draw every polygon mesh's edges `width` logical pixels wide (0: none),
     ## from the same GPU arrays as its surfaces; `surfaces` false leaves only
     ## the wires.
-    pub mutating func set_edges(width: f64, color: Color, surfaces: bool = true) -> !:
+    pub func set_edges(width: f64, color: Color, surfaces: bool = true) -> !:
         if not (width >= 0.0 and width <= 32.0): error(errors.invalid, "edge width must be finite and in 0..32")
         try check_color(color)
         self.edge_width = width
@@ -133,7 +133,7 @@ pub struct Renderer:
     ## last frame did not draw `mesh`'s points (a pick mesh of its own), and
     ## fails `unavailable` before a frame has drawn on a device: callers fall
     ## back to a CPU ray.
-    pub mutating func pick_face(mesh: interop.Reference[geocore.Mesh], camera: interop.Reference[PerspectiveCamera], x: f64, y: f64, width: f64, height: f64) -> i64!:
+    pub func pick_face(mesh: interop.Reference[geocore.Mesh], camera: interop.Reference[PerspectiveCamera], x: f64, y: f64, width: f64, height: f64) -> i64!:
         if not self.arrays.has_device(): error(gpu.unavailable, "no frame has drawn on a GPU device")
         if not (width >= 1.0 and height >= 1.0 and width <= 16384.0 and height <= 16384.0): return -1
         let geometry = try mesh.get()
@@ -150,7 +150,7 @@ pub struct Renderer:
             return try cage_face_of(display, face)
         return try self.pick_mesh(geometry, world, projection, x, y, width, height)
 
-    mutating func pick_mesh(geometry: const geocore.Mesh*, world: Matrix4, projection: Projection, x: f64, y: f64, width: f64, height: f64) -> i64!:
+    func pick_mesh(geometry: const geocore.Mesh*, world: Matrix4, projection: Projection, x: f64, y: f64, width: f64, height: f64) -> i64!:
         var key = geometry.points_id() *% 0x9E3779B97F4A7C15 ^ geometry.triangles_id()
         let values: f64[25] = [world.x.x, world.x.y, world.x.z, world.y.x, world.y.y, world.y.z, world.z.x, world.z.y, world.z.z,
                                world.translation.x, world.translation.y, world.translation.z, projection.position.x, projection.position.y,
@@ -163,7 +163,7 @@ pub struct Renderer:
     ## its Moves) with `color` at `weight` in the surface shading: a face
     ## selection costs one bit per face on the GPU, whatever its size. An
     ## empty list clears it.
-    pub mutating func set_face_selection(mesh: interop.Reference[geocore.Mesh], faces: const i64[], color: Color = Color(1.0, 0.5, 0.0), weight: f64 = 0.45) -> !:
+    pub func set_face_selection(mesh: interop.Reference[geocore.Mesh], faces: const i64[], color: Color = Color(1.0, 0.5, 0.0), weight: f64 = 0.45) -> !:
         try check_color(color)
         if not (weight >= 0.0 and weight <= 1.0): error(errors.invalid, "selection tint weight must be in 0..1")
         let geometry = try mesh.get()
@@ -171,7 +171,7 @@ pub struct Renderer:
 
     ## Tint the faces of a face `selection` (luce-geocore); other component
     ## types clear the tint.
-    pub mutating func set_selected_faces(mesh: interop.Reference[geocore.Mesh], selection: interop.Reference[Selection], color: Color = Color(1.0, 0.5, 0.0), weight: f64 = 0.45) -> !:
+    pub func set_selected_faces(mesh: interop.Reference[geocore.Mesh], selection: interop.Reference[Selection], color: Color = Color(1.0, 0.5, 0.0), weight: f64 = 0.45) -> !:
         try check_color(color)
         if not (weight >= 0.0 and weight <= 1.0): error(errors.invalid, "selection tint weight must be in 0..1")
         let chosen = try selection.get()
@@ -182,7 +182,7 @@ pub struct Renderer:
         let bits = selection_bits(chosen)
         try self.highlight.set_words(geometry.corners_id(), (usize)geometry.face_count(), bits.words, chosen.key(), color, weight)
 
-    pub mutating func clear_face_selection():
+    pub func clear_face_selection():
         self.highlight.words.clear()
         self.highlight.key = 0
         self.highlight.topology = 0
@@ -190,25 +190,26 @@ pub struct Renderer:
     ## GPU array uploads so far and their bytes (tests, benchmarks).
     pub func uploads() -> i64:
         return (i64)self.arrays.uploads
+
     pub func uploaded_bytes() -> i64:
         return (i64)self.arrays.uploaded
 
     ## Reserve the depth footprint of a coplanar screen-width wire overlay.
     ## Zero disables it. This is draw state; retained geometry stays unchanged.
-    pub mutating func set_wire_overlay(width: f64 = 0.0) -> !:
-        if not (width >= 0.0 and width <= 32.0): error(errors.invalid,"wire overlay width must be finite and in 0..32")
+    pub func set_wire_overlay(width: f64 = 0.0) -> !:
+        if not (width >= 0.0 and width <= 32.0): error(errors.invalid, "wire overlay width must be finite and in 0..32")
         self.wire_width = width
 
     ## Opt-in immutable geometry/material cache. Scene transforms invalidate it
     ## automatically; owners call invalidate after custom material/geometry edits.
     pub func init(static_scene: bool = false) -> !:
-        self.items = try alloc Item[1024] in memory.heap
-        self.prepared = try alloc Prepared[1024] in memory.heap
-        self.spare = try alloc Prepared[1024] in memory.heap
+        self.items = try new Item[1024] --- in memory.heap
+        self.prepared = try new Prepared[1024] --- in memory.heap
+        self.spare = try new Prepared[1024] --- in memory.heap
         self.spare_count = 0
         self.lighting = 0
         self.reuses = 0
-        self.lights = try alloc Light[1024] in memory.heap
+        self.lights = try new Light[1024] --- in memory.heap
         self.static_scene = static_scene
         self.prepared_count = 0
         self.prepared_epoch = 0
@@ -231,8 +232,8 @@ pub struct Renderer:
 
     ## A frame retains the scene traversal while custom interfaces execute.
     ## Reusing the output buffer avoids per-mesh allocation after capacity grows.
-    pub mutating func render(scene: interop.Interface[Object3D], camera: interop.Reference[PerspectiveCamera],
-                             target: interop.View[gpu.RenderTarget], fit_aspect: bool = false) -> interop.Outcome[unit]:
+    pub func render(scene: interop.Interface[Object3D], camera: interop.Reference[PerspectiveCamera],
+                    target: interop.View[gpu.RenderTarget], fit_aspect: bool = false) -> interop.Outcome[unit]:
         if self.rendering:
             return errors.failure[unit](errors.busy, "the renderer cannot reenter a render pass")
         self.rendering = true
@@ -300,8 +301,8 @@ pub struct Renderer:
         if device.is_open(): self.arrays.trim()
         return errors.success[unit](())
 
-    mutating func draw_mesh(item: const Item*, polygon: interop.Reference[geocore.Mesh], material: interop.Interface[Material], projection: Projection,
-                            lighting: const FrameLighting*, target: const gpu.RenderTarget*) -> !:
+    func draw_mesh(item: const Item*, polygon: interop.Reference[geocore.Mesh], material: interop.Interface[Material], projection: Projection,
+                   lighting: const FrameLighting*, target: const gpu.RenderTarget*) -> !:
         try material.enter()
         defer material.leave()
         let appearance = material.value()
@@ -343,7 +344,7 @@ pub struct Renderer:
         lighting.ambient = Color(red, green, blue)
         return lighting
 
-    mutating func gather(source: interop.Interface[Object3D], parent: Matrix4, visible: bool, depth: usize, parent_id: u64) -> !:
+    func gather(source: interop.Interface[Object3D], parent: Matrix4, visible: bool, depth: usize, parent_id: u64) -> !:
         if depth >= 64 or self.count >= self.items.length:
             error(errors.limit, "a renderer supports at most 1024 objects and 64 levels")
         try source.enter()
@@ -381,18 +382,18 @@ pub struct Renderer:
             try self.gather(child, world, shown, depth + 1, state.id())
             index += 1
 
-    mutating func reserve(count: usize) -> !:
+    func reserve(count: usize) -> !:
         if count <= self.vertices.length:
             return
         let doubled = self.vertices.length * 2 if self.vertices.length <= 98304 else 196608
         let capacity = count if count > doubled else doubled
-        let replacement = try alloc gpu.Vertex[capacity] in memory.heap
+        let replacement = try new gpu.Vertex[capacity] --- in memory.heap
         if self.vertices.length > 0:
             free(self.vertices) in memory.heap
         self.vertices = replacement
 
-    mutating func draw(item: const Item*, geometry: interop.Interface[Geometry], material: interop.Interface[Material],
-                       projection: Projection, target: interop.View[gpu.RenderTarget], drawable: usize) -> interop.Outcome[unit]:
+    func draw(item: const Item*, geometry: interop.Interface[Geometry], material: interop.Interface[Material],
+              projection: Projection, target: interop.View[gpu.RenderTarget], drawable: usize) -> interop.Outcome[unit]:
         geometry.enter() catch failure:
             return errors.failure[unit](failure.code, failure.message)
         defer geometry.leave()
@@ -414,12 +415,12 @@ pub struct Renderer:
         if drawable == self.prepared_count and self.reuse(item, geometry, tint, lit, drawable):
             self.prepared_count += 1
         elif drawable == self.prepared_count:
-            let points = alloc Vector3[(usize)count] in memory.heap catch failure:
+            let points = new Vector3[(usize)count] --- in memory.heap catch failure:
                 return errors.failure[unit](failure.code, failure.message)
-            let colors = alloc Color[(usize)count] in memory.heap catch failure:
+            let colors = new Color[(usize)count] --- in memory.heap catch failure:
                 free(points) in memory.heap
                 return errors.failure[unit](failure.code, failure.message)
-            let flat_colors = alloc Color[(usize)count] in memory.heap catch failure:
+            let flat_colors = new Color[(usize)count] --- in memory.heap catch failure:
                 free(points) in memory.heap
                 free(colors) in memory.heap
                 return errors.failure[unit](failure.code, failure.message)
@@ -455,7 +456,7 @@ pub struct Renderer:
             return errors.failure[unit](failure.code, failure.message)
         return errors.success[unit](())
 
-    mutating func draw_retained(drawable: usize, device: gpu.Device, target: const gpu.RenderTarget*, projection: Projection) -> !:
+    func draw_retained(drawable: usize, device: gpu.Device, target: const gpu.RenderTarget*, projection: Projection) -> !:
         let cached = &self.prepared[drawable]
         let retained = &cached.flat_gpu if self.flat else &cached.smooth_gpu
         if not retained.is_open():
@@ -517,7 +518,7 @@ pub struct Renderer:
             illumination = illumination.add(Vector3(light.color.red, light.color.green, light.color.blue).multiply_scalar(intensity))
         return Color(math.min(1.0, tint.red * illumination.x), math.min(1.0, tint.green * illumination.y), math.min(1.0, tint.blue * illumination.z))
 
-    mutating func finish():
+    func finish():
         for item in self.items[..<self.count]:
             release_geometry(item.geometry)
             release_polygon(item.polygon)
@@ -527,7 +528,7 @@ pub struct Renderer:
         self.count = 0
         self.rendering = false
 
-    pub mutating func close():
+    pub func close():
         self.finish()
         self.invalidate()
         free(self.prepared) in memory.heap
@@ -543,7 +544,7 @@ pub struct Renderer:
             free(self.vertices) in memory.heap
 
     ## Drop immutable draw data after a geometry/material mutation.
-    pub mutating func invalidate():
+    pub func invalidate():
         for cached in self.prepared[..<self.prepared_count]:
             dispose(cached)
         self.prepared_count = 0
@@ -552,7 +553,7 @@ pub struct Renderer:
 
     ## After a scene change, keep prepared data aside for reuse by identity.
     ## Data unused across two changes is freed.
-    mutating func retire():
+    func retire():
         var kept: usize = 0
         for index in 0..<self.spare_count:
             var cached = self.spare[index]
@@ -575,7 +576,7 @@ pub struct Renderer:
 
     ## Adopt a spare entry drawn from the same geometry object with an equal
     ## material under the same world transform and lights.
-    mutating func reuse(item: const Item*, geometry: interop.Interface[Geometry], tint: Color, lit: bool, drawable: usize) -> bool:
+    func reuse(item: const Item*, geometry: interop.Interface[Geometry], tint: Color, lit: bool, drawable: usize) -> bool:
         for index in 0..<self.spare_count:
             let cached = self.spare[index]
             let shape = cached.geometry else continue
@@ -589,7 +590,7 @@ pub struct Renderer:
             return true
         return false
 
-    mutating func drop_spare():
+    func drop_spare():
         for cached in self.spare[..<self.spare_count]:
             dispose(cached)
         self.spare_count = 0

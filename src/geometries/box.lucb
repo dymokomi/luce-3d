@@ -59,7 +59,7 @@ pub struct BoxGeometry: Geometry:
     pub func bounds() -> Bounds:
         return Bounds(self.half.multiply_scalar(-1.0), self.half)
 
-    pub mutating func close():
-        return
+    pub func close():
+        _ = self
 
 pub let box_geometry_type: interop.Type[BoxGeometry] = interop.Type[BoxGeometry]("BoxGeometry", BoxGeometry.close, main_thread = true)

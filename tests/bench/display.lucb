@@ -50,7 +50,7 @@ pub struct Viewport:
 
     ## Display `mesh` instead of the previous one, as the editor does when a
     ## cook publishes a new result.
-    pub mutating func show(mesh: interop.Reference[geocore.Mesh]) -> !:
+    pub func show(mesh: interop.Reference[geocore.Mesh]) -> !:
         self.hide()
         let material = try interop.Reference[MeshLambertMaterial].adopt(new MeshLambertMaterial(gpu.Color(0.7, 0.7, 0.7)) in memory.heap, three.lambert_material_type, memory.heap)
         defer material.release()
@@ -62,20 +62,20 @@ pub struct Viewport:
         self.shown = object
         self.shown_object = node
 
-    mutating func hide():
+    func hide():
         if let node = self.shown_object:
-            discard(self.scene.value().remove(node) catch failure: recover false)
+            _ = self.scene.value().remove(node) catch failure: recover false
             node.release()
         if let object = self.shown: object.release()
         self.shown = none
         self.shown_object = none
 
     ## Orbit a little, so a redraw is a camera change.
-    pub mutating func orbit(step: f64) -> !:
+    pub func orbit(step: f64) -> !:
         try self.camera.value().set_position(Vector3(step, 1.2, 1.2))
 
     ## One complete frame, including GPU completion. Milliseconds.
-    pub mutating func draw() -> f64!:
+    pub func draw() -> f64!:
         let start = time.now()
         let recording = try self.texture.frame()
         defer recording.release()
@@ -84,12 +84,12 @@ pub struct Viewport:
         target.release()
         defer result.release()
         try result.get()
-        discard(try recording.value().present(gpu.Color(0.1, 0.1, 0.1)))
+        _ = try recording.value().present(gpu.Color(0.1, 0.1, 0.1))
         var pixel: u8[4]
         try self.texture.read(pixel, gpu.Region(700, 450, 1, 1))
         return since(start)
 
-    pub mutating func close():
+    pub func close():
         self.hide()
         self.renderer.release()
         self.camera.release()

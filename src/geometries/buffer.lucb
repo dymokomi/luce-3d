@@ -26,9 +26,9 @@ pub struct BufferGeometry: Geometry:
         for index in indices:
             if index < 0 or (usize)index >= vertices.length:
                 error(errors.invalid, "a geometry index is outside its vertex buffer")
-        let copied_vertices = try alloc Vertex[vertices.length] in memory.heap
+        let copied_vertices = try new Vertex[vertices.length] --- in memory.heap
         errdefer free(copied_vertices) in memory.heap
-        let copied_indices = try alloc i64[indices.length] in memory.heap
+        let copied_indices = try new i64[indices.length] --- in memory.heap
         for offset in 0..<vertices.length:
             copied_vertices[offset] = vertices[offset]
         for offset in 0..<indices.length:
@@ -56,7 +56,7 @@ pub struct BufferGeometry: Geometry:
     pub func bounds() -> Bounds:
         return self.extent
 
-    pub mutating func close():
+    pub func close():
         free(self.vertices) in memory.heap
         free(self.indices) in memory.heap
 

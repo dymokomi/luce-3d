@@ -15,9 +15,9 @@ pub struct SphereGeometry: Geometry:
             error(errors.invalid, "sphere radius must be in (0,1000000], segments in 3..256 by 2..128")
         let columns = (usize)width_segments
         let rows = (usize)height_segments
-        let vertices = try alloc Vertex[(columns + 1) * (rows + 1)] in memory.heap
+        let vertices = try new Vertex[(columns + 1) * (rows + 1)] --- in memory.heap
         defer free(vertices) in memory.heap
-        let indices = try alloc i64[columns * (rows - 1) * 6] in memory.heap
+        let indices = try new i64[columns * (rows - 1) * 6] --- in memory.heap
         defer free(indices) in memory.heap
         for y in 0..<rows + 1:
             let v = (f64)y / (f64)rows
@@ -64,7 +64,7 @@ pub struct SphereGeometry: Geometry:
     pub func bounds() -> Bounds:
         return self.buffer.value().bounds()
 
-    pub mutating func close():
+    pub func close():
         self.buffer.release()
 
     func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):

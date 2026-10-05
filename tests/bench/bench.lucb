@@ -48,12 +48,12 @@ pub func main(arguments: str[]) -> i32!:
 func baselines(grid: const GridArrays*) -> !:
     let count = grid.points.length
     var start = time.now()
-    let copy = try alloc Vector3[count] in memory.heap
+    let copy = try new Vector3[count] --- in memory.heap
     defer free(copy) in memory.heap
     memory.copy(copy, grid.points, count)
     report("baseline: memcpy f64 positions", since(start))
     start = time.now()
-    let packed = try alloc f32[count * 3] in memory.heap
+    let packed = try new f32[count * 3] --- in memory.heap
     defer free(packed) in memory.heap
     for at in 0..<count:
         packed[at * 3] = (f32)grid.points[at].x
@@ -64,14 +64,14 @@ func baselines(grid: const GridArrays*) -> !:
 ## Adding an attribute should cost that attribute alone, not every other one.
 func attributes(mesh: interop.Reference[Mesh], counter: const Counter*) -> !:
     let m = mesh.value()
-    let weights = try alloc f64[(usize)m.point_count()] in memory.heap
+    let weights = try new f64[(usize)m.point_count()] --- in memory.heap
     defer free(weights) in memory.heap
     for at in 0..<weights.length: weights[at] = (f64)at
     var start = time.now()
     let weighted = try m.with_attribute("weight", 0, 1, weights)
     defer weighted.release()
     report("attribute add: point f64", since(start))
-    let uv = try alloc f64[(usize)m.vertex_count() * 2] in memory.heap
+    let uv = try new f64[(usize)m.vertex_count() * 2] --- in memory.heap
     defer free(uv) in memory.heap
     for at in 0..<uv.length: uv[at] = (f64)(at % 7) * 0.125
     let before = counter.live
@@ -91,7 +91,7 @@ func selection(mesh: interop.Reference[Mesh], faces: const i64[]) -> !:
     defer overlay.close()
     let start = time.now()
     try overlay.update(mesh, 2, faces, -1)
-    discard(try EditOverlay.center(mesh, 2, faces))
+    _ = try EditOverlay.center(mesh, 2, faces)
     report("select 1k faces (overlay + centre)", since(start))
 
 ## A Move of 1k faces (4k points), bare and with attributes, and the worker
@@ -103,7 +103,7 @@ func moves(mesh: interop.Reference[Mesh], points: const i64[]) -> !:
     let moved = try m.moved_points(points, delta)
     defer moved.release()
     report("move 1k faces: bare mesh", since(start))
-    let values = try alloc f64[(usize)m.vertex_count() * 2] in memory.heap
+    let values = try new f64[(usize)m.vertex_count() * 2] --- in memory.heap
     defer free(values) in memory.heap
     for at in 0..<values.length: values[at] = (f64)(at % 5)
     let uv = try m.with_attribute("uv", 1, 2, values)

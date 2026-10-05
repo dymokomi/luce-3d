@@ -82,7 +82,7 @@ pub struct EditOverlay:
 
     ## Cheap when nothing changed: an identity compare and one pass over the
     ## selection list. The mesh is retained, so its address cannot be reused.
-    pub mutating func update(mesh: interop.Reference[Mesh], mode: i64, selection: const i64[], hovered: i64) -> !:
+    pub func update(mesh: interop.Reference[Mesh], mode: i64, selection: const i64[], hovered: i64) -> !:
         if mode < 0 or mode > 3: error(errors.invalid, "edit component mode must be 0, 1, 2 or 3")
         let geometry = try mesh.get()
         var changed_mesh = true
@@ -109,7 +109,7 @@ pub struct EditOverlay:
 
     ## Show a luce-geocore selection (none: nothing selected) in `mode`; its
     ## bits are listed only when the selection object changed.
-    pub mutating func show(mesh: interop.Reference[Mesh], mode: i64, selection: interop.Reference[Selection]?, hovered: i64) -> !:
+    pub func show(mesh: interop.Reference[Mesh], mode: i64, selection: interop.Reference[Selection]?, hovered: i64) -> !:
         var key: u64 = 0
         if let chosen = selection: key = (try chosen.get()).key()
         if key != self.shown_key or mode != self.mode:
@@ -131,7 +131,7 @@ pub struct EditOverlay:
     ## are tinted by their weight (`falloff` 0 linear, 1 quadratic, 2 cubic,
     ## 3 smooth; `symmetry` 0 none, 1..3 mirrors across X, Y, Z), as
     ## Transform Components moves them. A radius of 0 turns it off.
-    pub mutating func set_soft(radius: f64, falloff: i64 = 3, symmetry: i64 = 0) -> !:
+    pub func set_soft(radius: f64, falloff: i64 = 3, symmetry: i64 = 0) -> !:
         if not (radius >= 0.0) or not math.is_finite(radius): error(errors.invalid, "the soft radius must be finite and not negative")
         if falloff < 0 or falloff > 3: error(errors.invalid, "falloff must be 0..3")
         if symmetry < 0 or symmetry > 3: error(errors.invalid, "symmetry must be 0..3")
@@ -153,7 +153,7 @@ pub struct EditOverlay:
         if point < 0 or (usize)point >= self.weights.count: return 0.0
         return (f64)self.weights.items[(usize)point]
 
-    mutating func weigh(mesh: interop.Reference[Mesh], selection: interop.Reference[Selection]?) -> !:
+    func weigh(mesh: interop.Reference[Mesh], selection: interop.Reference[Selection]?) -> !:
         if self.weighed == self.builds: return
         self.weighed = self.builds
         self.markers.invalidate()
@@ -165,7 +165,7 @@ pub struct EditOverlay:
         try selection_weights(geometry, try chosen.get(), self.soft_radius, self.soft_falloff, self.soft_symmetry, self.weights.items[..<self.weights.count])
 
     ## Fill selected faces here (true) or leave them to the renderer's tint.
-    pub mutating func set_fill(on: bool):
+    pub func set_fill(on: bool):
         if on != self.fill:
             self.fill = on
             self.mode = -1
@@ -176,8 +176,8 @@ pub struct EditOverlay:
     ## everything in that color, so a selection behind or inside a surface
     ## (a pick mesh the viewport does not draw, such as SDF proxies) still
     ## shows; the visible parts then draw in `accent` over it.
-    pub mutating func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget],
-                           wire: gpu.Color, accent: gpu.Color, point: gpu.Color, wires: bool = true, hidden: gpu.Color? = none) -> !:
+    pub func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget],
+                  wire: gpu.Color, accent: gpu.Color, point: gpu.Color, wires: bool = true, hidden: gpu.Color? = none) -> !:
         let current = self.mesh else return
         let mesh = try current.get()
         let native = try target.get()
@@ -201,9 +201,9 @@ pub struct EditOverlay:
 
     ## Mean of the distinct points under a selection, or the bounds center when
     ## nothing is selected: the Move gizmo's origin, without Luce list scans.
-    pub static func center(mesh: interop.Reference[Mesh], mode: i64, selection: const i64[]) -> Vector3!:
+    pub func center(mesh: interop.Reference[Mesh], mode: i64, selection: const i64[]) -> Vector3!:
         let geometry = try mesh.get()
-        let marked = try alloc bool[(usize)geometry.point_count()] in memory.heap
+        let marked = try new bool[(usize)geometry.point_count()] --- in memory.heap
         defer free(marked) in memory.heap
         for at in 0..<marked.length: marked[at] = false
         var sum = Vector3()
@@ -227,8 +227,10 @@ pub struct EditOverlay:
     ## Selection batch sizes, for tests and diagnostics.
     pub func accent_segments() -> i64:
         return (i64)self.accent.count // 2
+
     pub func selected_triangles() -> i64:
         return (i64)self.faces.count // 3
+
     ## Selection rebuilds so far: hover and camera changes must not add any.
     pub func selection_builds() -> i64:
         return self.builds
@@ -250,7 +252,7 @@ pub struct EditOverlay:
             if (try mesh.face_point(hit, at)) == found: return (try mesh.face_offset(hit)) + at
         return -1
 
-    mutating func draw_wires(mesh: const Mesh*, camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color) -> !:
+    func draw_wires(mesh: const Mesh*, camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color) -> !:
         let native = try target.get()
         var device = gpu.device_of(native) catch failure:
             if failure.code != gpu.unavailable: error(failure.code, failure.message)
@@ -260,7 +262,7 @@ pub struct EditOverlay:
         if edges == 0: return
         if device.is_open():
             if not self.wires.is_open():
-                let vertices = try alloc gpu.Vertex[edges] in memory.heap
+                let vertices = try new gpu.Vertex[edges] --- in memory.heap
                 defer free(vertices) in memory.heap
                 for edge in 0..<edges:
                     let a = try mesh.point(try mesh.edge_point((i64)edge, 0))
@@ -284,7 +286,7 @@ pub struct EditOverlay:
     ## Selection geometry costs O(selection), never O(mesh): selected faces add
     ## their triangles (a contiguous range per face) and edges; selected points
     ## light the edges whose ends are both selected, found by adjacency.
-    mutating func rebuild_selection(mesh: const Mesh*) -> !:
+    func rebuild_selection(mesh: const Mesh*) -> !:
         self.accent.clear()
         self.faces.clear()
         let points = (usize)mesh.point_count()
@@ -338,7 +340,7 @@ pub struct EditOverlay:
                 defer value.release()
                 try self.faces.push(try mesh.point(try mesh.corner_point(try value.get())))
 
-    mutating func adjacency(mesh: const Mesh*) -> !:
+    func adjacency(mesh: const Mesh*) -> !:
         if self.edge_starts.count > 0: return
         let points = (usize)mesh.point_count()
         let edges = (try mesh.edge_count())
@@ -348,7 +350,7 @@ pub struct EditOverlay:
             self.edge_starts.items[(usize)(try mesh.edge_point(edge, 1)) + 1] += 1
         for at in 0..<points: self.edge_starts.items[at + 1] += self.edge_starts.items[at]
         try self.point_edges.fill((usize)edges * 2, 0)
-        var cursor = try alloc u32[points] in memory.heap
+        var cursor = try new u32[points] --- in memory.heap
         defer free(cursor) in memory.heap
         memory.copy(cursor, self.edge_starts.items, points)
         for edge in 0..<edges:
@@ -358,7 +360,7 @@ pub struct EditOverlay:
                 cursor[point] += 1
 
     ## The hovered edge, or the outline of a hovered unselected face.
-    mutating func rebuild_hover(mesh: const Mesh*) -> !:
+    func rebuild_hover(mesh: const Mesh*) -> !:
         self.hover.clear()
         let id = self.hovered
         if id < 0: return
@@ -373,7 +375,7 @@ pub struct EditOverlay:
                 try self.hover.push(try mesh.point(try mesh.face_point(id, at)))
                 try self.hover.push(try mesh.point(try mesh.face_point(id, (at + 1) % size)))
 
-    pub mutating func close():
+    pub func close():
         if let current = self.mesh: current.release()
         self.mesh = none
         self.wires.close()

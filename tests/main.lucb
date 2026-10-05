@@ -15,7 +15,7 @@ struct Tracker: memory.Allocator:
     var live: usize
     var remaining: usize?
 
-    pub mutating func allocate(size: usize, alignment: usize) -> u8[]?:
+    pub func allocate(size: usize, alignment: usize) -> u8[]?:
         if size == 0: return self.upstream.allocate(size, alignment)
         if let remaining = self.remaining:
             if remaining == 0:
@@ -25,10 +25,10 @@ struct Tracker: memory.Allocator:
         self.live += 1
         return block
 
-    pub mutating func resize(block: u8[], size: usize) -> bool:
+    pub func resize(block: u8[], size: usize) -> bool:
         return self.upstream.resize(block, size)
 
-    pub mutating func release(block: u8[]):
+    pub func release(block: u8[]):
         if block.length == 0: return
         assert(self.live > 0)
         self.live -= 1
@@ -152,7 +152,7 @@ func allocations(tracker: Tracker*) -> !:
             value.close()
             succeeded = true
         ownership.collect()
-        discard(ownership.finish_run(0))
+        _ = ownership.finish_run(0)
         assert(tracker.live == 0)
     assert(succeeded and failures >= 6)
 
@@ -243,7 +243,7 @@ pub func main(arguments: str[]) -> i32!:
     try allocations(&tracker)
     try scene_membership(&tracker)
     ownership.collect()
-    discard(ownership.finish_run(0))
+    _ = ownership.finish_run(0)
     assert(tracker.live == 0)
     print("ok geometry, transforms, camera, membership and allocation failures")
     return 0

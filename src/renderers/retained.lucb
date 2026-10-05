@@ -6,12 +6,14 @@ import memory
 pub struct RetainedBatch:
     var buffers: gpu.Geometry[]
     var count: usize = 0
+
     pub func is_open() -> bool:
         return self.count > 0
-    pub mutating func upload(device: gpu.Device, vertices: const gpu.Vertex[], lines: bool = false) -> !:
+
+    pub func upload(device: gpu.Device, vertices: const gpu.Vertex[], lines: bool = false) -> !:
         self.close()
         let chunk: usize = 3145728
-        self.buffers = try alloc gpu.Geometry[(vertices.length + chunk - 1) // chunk] in memory.heap
+        self.buffers = try new gpu.Geometry[(vertices.length + chunk - 1) // chunk] --- in memory.heap
         self.count = 0
         errdefer self.close()
         var offset: usize = 0
@@ -20,9 +22,11 @@ pub struct RetainedBatch:
             self.buffers[self.count] = try gpu.Geometry.create(device, vertices[offset..<end], lines)
             self.count += 1
             offset = end
+
     pub func draw(target: const gpu.RenderTarget*, matrix: const f32[], color: gpu.Color = gpu.Color(1.0, 1.0, 1.0), width: f64 = 1.0, slope_bias: f64 = 0.0) -> !:
         for buffer in self.buffers[..<self.count]: try gpu.draw_geometry(target, buffer, matrix, color, width, slope_bias = slope_bias)
-    pub mutating func close():
+
+    pub func close():
         for at in 0..<self.count: self.buffers[at].destroy()
         if self.buffers.length > 0: free(self.buffers) in memory.heap
         var empty: gpu.Geometry[]

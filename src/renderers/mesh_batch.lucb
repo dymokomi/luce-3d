@@ -54,7 +54,7 @@ pub struct FaceHighlight:
 
     ## Mark `faces` (ids outside `count` faces are ignored) of the topology
     ## `topology`; cheap when nothing changed.
-    pub mutating func set(topology: u64, count: usize, faces: const i64[], color: Color, weight: f64) -> !:
+    pub func set(topology: u64, count: usize, faces: const i64[], color: Color, weight: f64) -> !:
         var key: u64 = 0xCBF29CE484222325 ^ topology
         for face in faces: key = (key ^ (u64)face) *% 0x100000001B3
         self.color = color
@@ -71,7 +71,7 @@ pub struct FaceHighlight:
 
     ## Mark the set bits of `words` (64 faces a word); `key` names the bits'
     ## contents (a selection's column id), so an unchanged selection is free.
-    pub mutating func set_words(topology: u64, count: usize, words: const u64[], key: u64, color: Color, weight: f64) -> !:
+    pub func set_words(topology: u64, count: usize, words: const u64[], key: u64, color: Color, weight: f64) -> !:
         self.color = color
         self.weight = weight
         let combined = (key *% 0x9E3779B97F4A7C15) ^ topology
@@ -83,7 +83,7 @@ pub struct FaceHighlight:
             let word = words[at // 2] if at // 2 < words.length else 0
             self.words.items[at] = (u32)(word >> 32) if at % 2 == 1 else (u32)(word & 0xFFFFFFFF)
 
-    pub mutating func close():
+    pub func close():
         self.words.close()
 
 ## What every object in a frame shares: the camera and the lights. Up to four

@@ -13,13 +13,16 @@ from renderers.retained import RetainedBatch
 pub struct WireBatch:
     let points: Vector3[]
     var retained: RetainedBatch
+
     pub func init(points: const Vector3[]) -> !:
-        self.points = try alloc Vector3[points.length] in memory.heap
+        self.points = try new Vector3[points.length] --- in memory.heap
         self.retained = RetainedBatch()
         for index in 0..<points.length:
             self.points[index] = points[index]
+
     pub func count() -> i64:
         return (i64)self.points.length // 2
+
     ## The box around every endpoint (framing); fails when there are none.
     pub func bounds() -> Bounds!:
         if self.points.length == 0: error(errors.invalid, "an empty wire batch has no bounds")
@@ -29,7 +32,8 @@ pub struct WireBatch:
             low = Vector3(math.min(low.x, p.x), math.min(low.y, p.y), math.min(low.z, p.z))
             high = Vector3(math.max(high.x, p.x), math.max(high.y, p.y), math.max(high.z, p.z))
         return Bounds(low, high)
-    pub mutating func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color, width: f64 = 1.0) -> !:
+
+    pub func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color, width: f64 = 1.0) -> !:
         let native = try target.get()
         var device = gpu.device_of(native) catch failure:
             if failure.code != gpu.unavailable: error(failure.code, failure.message)
@@ -37,7 +41,7 @@ pub struct WireBatch:
         defer device.destroy()
         if device.is_open() and self.points.length > 0:
             if not self.retained.is_open():
-                let vertices = try alloc gpu.Vertex[self.points.length // 2] in memory.heap
+                let vertices = try new gpu.Vertex[self.points.length // 2] --- in memory.heap
                 defer free(vertices) in memory.heap
                 for at in 0..<vertices.length:
                     let a = self.points[at * 2]
@@ -49,7 +53,8 @@ pub struct WireBatch:
             try self.retained.draw(native, matrix, color, width)
             return
         try WireRenderer.lines(self.points, camera, target, color, width)
-    pub mutating func close():
+
+    pub func close():
         self.retained.close()
         free(self.points) in memory.heap
 

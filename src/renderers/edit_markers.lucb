@@ -25,13 +25,13 @@ pub struct Markers:
         self.version = 0
         self.valid = false
 
-    pub mutating func invalidate():
+    pub func invalidate():
         self.valid = false
 
     ## `selected` and `weights` are per point or empty (none selected, soft
     ## selection off).
-    pub mutating func draw(target: const gpu.RenderTarget*, screen: const Screen*, selected: const bool[], weights: const f32[], ordinary_too: bool,
-                           hovered: i64, p: Projection, width: f64, height: f64, ordinary: gpu.Color, accent: gpu.Color) -> !:
+    pub func draw(target: const gpu.RenderTarget*, screen: const Screen*, selected: const bool[], weights: const f32[], ordinary_too: bool,
+                  hovered: i64, p: Projection, width: f64, height: f64, ordinary: gpu.Color, accent: gpu.Color) -> !:
         if not self.valid or self.version != screen.version:
             self.vertices.clear()
             # Selected markers first: at equal depth the first one drawn wins.
@@ -57,7 +57,7 @@ pub struct Markers:
 
     ## The nearest point of marker class `round` (0 selected, 1 soft, 2 the
     ## rest) in each screen cell.
-    mutating func nearest_per_cell(screen: const Screen*, selected: const bool[], weights: const f32[], round: usize, width: f64, height: f64) -> !:
+    func nearest_per_cell(screen: const Screen*, selected: const bool[], weights: const f32[], round: usize, width: f64, height: f64) -> !:
         let columns = (usize)math.ceil(width / cell)
         let rows = (usize)math.ceil(height / cell)
         try self.nearest.fill(columns * rows, -1)
@@ -72,7 +72,7 @@ pub struct Markers:
             if other < 0 or screen.depths.items[(usize)other] > depth:
                 self.nearest.items[slot] = (i64)id
 
-    mutating func quad(screen: const Screen*, id: usize, radius: f64, p: Projection, width: f64, height: f64, color: gpu.Color) -> !:
+    func quad(screen: const Screen*, id: usize, radius: f64, p: Projection, width: f64, height: f64, color: gpu.Color) -> !:
         let w = (f64)screen.depths.items[id]
         let x = ((f64)screen.xs.items[id] / (width * 0.5) - 1.0) * w
         let y = (1.0 - (f64)screen.ys.items[id] / (height * 0.5)) * w
@@ -86,7 +86,7 @@ pub struct Markers:
             try self.vertices.push(gpu.Vertex(x = (f32)(x + corners[at * 2]), y = (f32)(y + corners[at * 2 + 1]), z = (f32)z, w = (f32)w,
                                               red = (f32)color.red, green = (f32)color.green, blue = (f32)color.blue))
 
-    pub mutating func close():
+    pub func close():
         self.vertices.close()
         self.nearest.close()
 

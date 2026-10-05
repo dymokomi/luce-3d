@@ -18,25 +18,25 @@ pub struct Group: Object3D:
     pub func position() -> Vector3:
         return self.transform.value().position()
 
-    pub mutating func set_position(position: Vector3) -> !:
+    pub func set_position(position: Vector3) -> !:
         try self.transform.value().set_position(position)
 
     pub func rotation() -> Vector3:
         return self.transform.value().rotation()
 
-    pub mutating func set_rotation(rotation: Vector3) -> !:
+    pub func set_rotation(rotation: Vector3) -> !:
         try self.transform.value().set_rotation(rotation)
 
-    pub mutating func set_scale(scale: Vector3) -> !:
+    pub func set_scale(scale: Vector3) -> !:
         try self.transform.value().set_scale(scale)
 
-    pub mutating func add(child: interop.Interface[Object3D]) -> !:
+    pub func add(child: interop.Interface[Object3D]) -> !:
         try self.transform.value().add(child)
 
-    pub mutating func remove(child: interop.Interface[Object3D]) -> bool!:
+    pub func remove(child: interop.Interface[Object3D]) -> bool!:
         return try self.transform.value().remove(child)
 
-    pub mutating func clear():
+    pub func clear():
         self.transform.value().clear()
 
     pub func geometry() -> interop.Interface[Geometry]?:
@@ -51,7 +51,7 @@ pub struct Group: Object3D:
     pub func light() -> Light:
         return Light()
 
-    pub mutating func close():
+    pub func close():
         self.transform.value().clear()
         self.transform.release()
 

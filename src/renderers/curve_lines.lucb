@@ -38,7 +38,7 @@ func append_lines(curves: const Curves*, matrix: Matrix4, out: Growing[Vector3]*
     let offsets = try evaluated_offsets(curves)
     let points = try evaluated_positions(curves)
     let count = curves.curve_count()
-    let firsts = try alloc usize[count + 1] in memory.heap
+    let firsts = try new usize[count + 1] --- in memory.heap
     defer free(firsts) in memory.heap
     var total = out.count
     for curve in 0..<count:
@@ -115,14 +115,14 @@ pub struct CurveLines:
     let reserved: u8 = 0
 
     ## Segments of every curve in `geometry` (0: nothing to draw).
-    pub static func count(geometry: interop.Reference[GeometrySet]) -> i64!:
+    pub func count(geometry: interop.Reference[GeometrySet]) -> i64!:
         var lines = Growing[Vector3]()
         defer lines.close()
         try append_curve_segments(try geometry.get(), Matrix4(), &lines, none)
         return (i64)(lines.count // 2)
 
     ## The evaluated curves of `geometry` as a batch, or their hulls.
-    pub static func batch(geometry: interop.Reference[GeometrySet], hull: bool = false) -> interop.Reference[WireBatch]!:
+    pub func batch(geometry: interop.Reference[GeometrySet], hull: bool = false) -> interop.Reference[WireBatch]!:
         var points = Growing[Vector3]()
         defer points.close()
         try append_curve_segments(try geometry.get(), Matrix4(), &points if not hull else none, &points if hull else none)

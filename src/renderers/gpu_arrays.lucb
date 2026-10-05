@@ -54,7 +54,7 @@ pub struct GpuArrays:
         self.uploaded = 0
 
     ## Start a frame on `device`; a different device drops every copy.
-    pub mutating func begin(device: gpu.Device) -> !:
+    pub func begin(device: gpu.Device) -> !:
         if self.device.is_open() and not self.device.same(&device):
             self.clear()
         if not self.device.is_open():
@@ -67,7 +67,7 @@ pub struct GpuArrays:
             if entry.key == key and entry.kind == kind and entry.value > 0.0: return entry.value
         return none
 
-    pub mutating func remember_range(key: u64, kind: i64, value: f64):
+    pub func remember_range(key: u64, kind: i64, value: f64):
         self.ranges[self.next_range] = Range(key, kind, value)
         self.next_range = (self.next_range + 1) % self.ranges.length
 
@@ -80,7 +80,7 @@ pub struct GpuArrays:
         return self.device
 
     ## The copy of `key`, marked used this frame.
-    pub mutating func find(key: ArrayKey) -> gpu.Buffer?:
+    pub func find(key: ArrayKey) -> gpu.Buffer?:
         for at in 0..<self.entries.count:
             let entry = &self.entries.items[at]
             if entry.key == key:
@@ -89,7 +89,7 @@ pub struct GpuArrays:
         return none
 
     ## Room to pack `bytes` bytes before `store`; reused between arrays.
-    pub mutating func staging(bytes: usize) -> u8[]!:
+    pub func staging(bytes: usize) -> u8[]!:
         try self.scratch.reserve(bytes)
         return self.scratch.items[..<bytes]
 
@@ -100,7 +100,7 @@ pub struct GpuArrays:
     ## Rewrite bytes `offset`.. of the copy of `parent` (same tag and part,
     ## `total` bytes, unused this frame) with `data` and rename it `key`: a
     ## local edit uploads its neighbourhood. None when there is no such copy.
-    pub mutating func patch(key: ArrayKey, parent: u64, total: usize, offset: usize, data: const u8[]) -> gpu.Buffer?!:
+    pub func patch(key: ArrayKey, parent: u64, total: usize, offset: usize, data: const u8[]) -> gpu.Buffer?!:
         for at in 0..<self.entries.count:
             let entry = &self.entries.items[at]
             if entry.key.id == parent and entry.key.tag == key.tag and entry.key.part == key.part and entry.bytes == total and entry.used != self.frame:
@@ -112,7 +112,7 @@ pub struct GpuArrays:
                 return entry.buffer
         return none
 
-    pub mutating func store(key: ArrayKey, data: const u8[], parent: u64 = 0) -> gpu.Buffer!:
+    pub func store(key: ArrayKey, data: const u8[], parent: u64 = 0) -> gpu.Buffer!:
         self.uploads += 1
         self.uploaded += (u64)data.length
         if parent != 0:
@@ -132,7 +132,7 @@ pub struct GpuArrays:
 
     ## Drop copies unused for `keep_frames` frames, or unused this frame when
     ## the copies exceed the budget.
-    pub mutating func trim():
+    pub func trim():
         var total: usize = 0
         for entry in self.entries.view(): total += entry.bytes
         var kept: usize = 0
@@ -151,12 +151,12 @@ pub struct GpuArrays:
     pub func count() -> usize:
         return self.entries.count
 
-    pub mutating func clear():
+    pub func clear():
         for at in 0..<self.entries.count: self.entries.items[at].buffer.destroy()
         self.entries.clear()
         self.device.destroy()
 
-    pub mutating func close():
+    pub func close():
         self.clear()
         self.entries.close()
         self.scratch.close()

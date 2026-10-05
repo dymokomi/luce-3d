@@ -26,10 +26,10 @@ pub struct Screen:
         self.key = key
         self.version = 0
 
-    pub mutating func invalidate():
+    pub func invalidate():
         self.key[0] = math.nan
 
-    pub mutating func update(mesh: const Mesh*, p: Projection, width: f64, height: f64) -> !:
+    pub func update(mesh: const Mesh*, p: Projection, width: f64, height: f64) -> !:
         let key: f64[20] = [p.position.x, p.position.y, p.position.z, p.right.x, p.right.y, p.right.z, p.up.x, p.up.y, p.up.z,
                             p.backward.x, p.backward.y, p.backward.z, p.focal, p.aspect, p.near, p.far, width, height, (f64)mesh.point_count(), 0.0]
         var same = true
@@ -49,7 +49,7 @@ pub struct Screen:
         self.key = key
         self.version += 1
 
-    pub mutating func close():
+    pub func close():
         self.xs.close()
         self.ys.close()
         self.depths.close()
