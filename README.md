@@ -38,8 +38,8 @@ Import `three`. A window or widget toolkit hosts the renderer: luced-3d's
 `SceneView` shows how a `luce-ui` Viewport passes its region to
 `Renderer.render(scene, camera, target, fit_aspect = true)`.
 
-Use the exact compiler and library revisions in `bootstrap/BASE`, `bootstrap/LUCE`
-and `bootstrap/PACKAGES`, checked out alongside this repository. Run `./test.sh` for Base
+Check out luce-base, luce and the packages this one uses beside this repository, at main
+(`python3 ../luce-base/tools/checkout_main.py . ../luce` clones the missing ones). Run `./test.sh` for Base
 and Luce tests at native optimization levels 0–3 and both C comparison modes.
 `python3 tests/gpu.py` additionally requires a macOS Metal desktop. Build a Base
 consumer with `python3 tools/build.py tests/main.lucb -o build/test`.
