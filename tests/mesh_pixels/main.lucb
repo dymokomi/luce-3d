@@ -379,7 +379,7 @@ pub func main(arguments: str[]) -> i32!:
     try os.set_env("MTL_DEBUG_LAYER", "1")
     var device = gpu.Device.open() catch failure:
         if failure.code == gpu.unavailable:
-            print("skip no GPU device")
+            print("skip: no GPU device")
             return 0
         error(failure.code, failure.message)
     defer device.destroy()

@@ -1,0 +1,26 @@
+# Metal pixel readback: depth, near-plane and behind-camera clipping, resize and a host
+# view's region scope, read back through a test-only Metal observer (native.lucb). The
+# check, readback.lucb, is Base built with LUCE_BASE and run as its own process on macOS;
+# elsewhere there is no Metal and the check is skipped.
+from luce_std import files, paths, process
+import platform
+
+let failed = ErrorCode.package(1)
+
+pub func main(arguments: list[str]) -> int!:
+    if not platform.macos:
+        print("skip: Metal readback needs macOS")
+        return 0
+    let here = process.variable("LUC_TEST_DIR") else process.current_directory()
+    let base = process.variable("LUCE_BASE") else "luce-base"
+    let work = "build/tests/pixels"
+    files.ensure_directory(work)
+    let output = paths.join(work, "readback")
+    let built = process.run(base, ["build", paths.join(here, "readback.lucb"), "--native", "-o", output])
+    if built.exit_code != 0:
+        error(failed, f"readback.lucb does not build:\n{built.output}{built.error_output}")
+    let ran = process.run(output, [])
+    print(ran.output.trim_end())
+    if ran.exit_code != 0:
+        error(failed, f"readback: exit status {ran.exit_code}\n{ran.error_output}")
+    return 0

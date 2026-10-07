@@ -1,4 +1,4 @@
-## Independent Metal readback checks depth, clipping and a host view's region scope.
+## Independent Metal readback checks (built and run by main.luc on macOS): depth, clipping and a host view's region scope.
 from luce_gpu import gpu
 import interop
 import os

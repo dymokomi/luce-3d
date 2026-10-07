@@ -66,6 +66,6 @@ Base consumers use explicit `interop.Reference`, `interop.Interface` and
 `sphere_geometry_type` and `renderer_type` are available from `three`. Reference/interface return values
 transfer one retained edge. Outcome values own their results or error messages;
 release the carrier after use. The Luce compiler supplies the matching ARC and
-error conversion automatically. See `tests/geometry/main.lucb` and `tests/pixels/main.lucb` for
+error conversion automatically. See `tests/geometry/main.lucb` and `tests/pixels/readback.lucb` for
 compiled direct Base consumers, and `tests/custom/main.luc` for application-defined
 geometry and materials.

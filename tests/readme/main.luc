@@ -6,6 +6,9 @@ from luce_std import files, paths, process
 let failed = ErrorCode.package(1)
 
 pub func main(arguments: list[str]) -> int!:
+    # run from this program's own directory, wherever luc test starts it
+    if let here = process.variable("LUC_TEST_DIR"):
+        process.change_directory(here)
     let root = paths.directory(paths.directory(process.current_directory()))
     let workspace = paths.directory(root)
     let luce = process.variable("LUCE") else "luce"
