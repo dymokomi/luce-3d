@@ -39,10 +39,9 @@ Import `three`. A window or widget toolkit hosts the renderer: luced-3d's
 `Renderer.render(scene, camera, target, fit_aspect = true)`.
 
 Check out luce-base, luce and the packages this one uses beside this repository, at main
-(`python3 ../luce-base/tools/checkout_main.py . ../luce` clones the missing ones). Run `./test.sh` for Base
-and Luce tests at native optimization levels 0–3 and both C comparison modes.
-`python3 tests/gpu.py` additionally requires a macOS Metal desktop. Build a Base
-consumer with `python3 tools/build.py tests/main.lucb -o build/test`.
+(`python3 ../luce-base/tools/checkout_main.py . ../luce` clones the missing ones). Run `luc test`
+for the Base and Luce test programs under `tests/`; `tests/pixels` reads back Metal
+pixels and needs a macOS Metal desktop.
 
 See [the API](docs/API.md), [design and ownership](docs/DESIGN.md),
 [validation](docs/VALIDATION.md) and [benchmarks](docs/BENCHMARKS.md)
@@ -61,5 +60,5 @@ Licensed under MIT or Apache-2.0, at your option.
 
 ## Windows x64
 
-Build sibling `luce-base` and `luce` checkouts with `python tools/build_windows.py` in each compiler repository. Run `python tests/run.py` in this repository; the runner selects the sibling Windows executables.
+Build sibling `luce-base` and `luce` checkouts with `python tools/build_windows.py` in each compiler repository, then run `luc test` in this repository.
 For real windows and rendering, install the Vulkan SDK and start a fresh terminal with `VULKAN_SDK` set. luced-3d and the sibling `luce-demos` applications exercise Win32/Vulkan presentation. CPU tests run in hosted Windows CI; GPU smoke tests require an interactive desktop and Vulkan hardware.

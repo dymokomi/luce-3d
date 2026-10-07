@@ -4,6 +4,7 @@
 ## at a crease (separate normals per face) and flow across a smooth seam.
 from luce_gpu import gpu
 import interop
+import os
 from luce_std import math
 import memory
 from luce_3d import graphics as three
@@ -374,6 +375,8 @@ func curvature_map(view: View*, image: u8[]) -> !:
     try view.camera.value().look_at(Vector3(0.0, 1.0, 0.0))
 
 pub func main(arguments: str[]) -> i32!:
+    # Metal's validation, read when the device is made
+    try os.set_env("MTL_DEBUG_LAYER", "1")
     var device = gpu.Device.open() catch failure:
         if failure.code == gpu.unavailable:
             print("skip no GPU device")

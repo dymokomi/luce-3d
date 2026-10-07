@@ -1,7 +1,9 @@
 # Validation
 
-`./test.sh` builds the direct Base fixture and two Luce consumers in native
-optimization modes 0, 1, 2, 3 and supplemental C debug/release modes.
+`luc test` builds and runs the test programs under `tests/`: the direct Base
+fixture (`tests/geometry`) and two Luce consumers (`tests/objects`,
+`tests/custom`), the GPU pixel programs (`tests/pixels`, `tests/mesh_pixels`) and
+the README check (`tests/readme`).
 
 - Sphere counts, radii, normalized normals, exact seams, UV bounds, outward
   nondegenerate triangles at both poles, and out-of-range access.
@@ -16,7 +18,7 @@ optimization modes 0, 1, 2, 3 and supplemental C debug/release modes.
 - Application-defined geometry and material interfaces, dynamic error messages,
   invalid indices, successful reuse after failed rendering, reentrant rendering
   rejection and deferred renderer closure from inside a callback.
-- Edit overlays (`tests/objects.luc`): selection geometry rebuilt only when
+- Edit overlays (`tests/objects`): selection geometry rebuilt only when
   the selection changes (never for hover or camera), see-through drawing,
   point and edge picks on a known face, point-cloud picks, a new mesh
   replacing every retained batch, knife planes, the faces under a stroke and
@@ -24,19 +26,17 @@ optimization modes 0, 1, 2, 3 and supplemental C debug/release modes.
 - Mesh construction, operators, display triangulations, dissolves and
   spatial queries are validated in luce-geocore (its docs/VALIDATION.md).
 
-`python3 tests/gpu.py` uses the pinned Base standard GPU test observer solely in
-a temporary test consumer. The package itself has no native framework imports.
+`tests/pixels` uses a copy of luce-gpu's test observer (`tests/pixels/native.lucb`),
+in the test program only. The package itself has no native framework imports.
 With Metal API/shader validation enabled it reads back pixels for overlapping
 triangles in both submission orders, near-plane and behind-camera clipping,
 resize, and rendering into a host view's region. These tests require a macOS Metal desktop;
 portable scene/geometry tests run on macOS and Linux.
 
-The public README's Luce example is compiled by `tests/docs.py`. CI executes the
-portable suite and this documentation check on ARM64 macOS and x86-64 Linux, and
-the Metal suite on macOS. Exact toolchain and library revisions are recorded in bootstrap
-pins. Tests use temporary output directories and release them on success/failure.
+The public README's Luce examples are compiled by `tests/readme`. Tests use
+temporary output directories and release them on success/failure.
 
-`python3 tests/gpu.py` also renders tests/mesh_pixels_main.lucb offscreen: the
+`tests/mesh_pixels` renders offscreen: the
 polygon-mesh path matches the per-vertex path within 3/255 in lit and flat
 modes (with authored normals and point colors), a Move uploads exactly two
 arrays, zebra bands double with the stripe count on a cylinder, break at a

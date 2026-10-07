@@ -1,0 +1,26 @@
+# The README's complete Luce examples compile against the package's real exports: each
+# ```luce block is built with the Luce compiler under test (LUCE) as a project that depends
+# on this checkout and its siblings.
+from luce_std import files, paths, process
+
+let failed = ErrorCode.package(1)
+
+pub func main(arguments: list[str]) -> int!:
+    let root = paths.directory(paths.directory(process.current_directory()))
+    let workspace = paths.directory(root)
+    let luce = process.variable("LUCE") else "luce"
+    let examples = files.read_text(paths.join(root, "README.md")).split("```luce\n")
+    if examples.length < 2:
+        error(failed, "the README has no Luce example")
+    var dependencies: list[str] = []
+    for name in ["luce-3d", "luce-geocore", "luce-std", "luce-window", "luce-gpu"]:
+        dependencies.append(f"    def dependency \"{name}\" {{\n        str owner = \"dymokomi\"\n        str path = \"{paths.join(workspace, name)}\"\n    }}\n")
+    with files.TemporaryDirectory() as directory:
+        let project = directory.path()
+        files.write_text(paths.join(project, "package.prisma"), "#prisma 4.0\ndef package \"documentation\" {\n    str source = \".\"\n" + dependencies.join("") + "}\n")
+        for example in examples[1..<examples.length]:
+            files.write_text(paths.join(project, "main.luc"), example.split("```")[0])
+            let built = process.run(luce, ["build", paths.join(project, "main.luc"), "-o", paths.join(project, "example")], project)
+            if built.exit_code != 0:
+                error(failed, f"a README example does not build:\n{built.output}{built.error_output}")
+    return 0

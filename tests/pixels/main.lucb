@@ -1,6 +1,7 @@
 ## Independent Metal readback checks depth, clipping and a host view's region scope.
 from luce_gpu import gpu
 import interop
+import os
 import memory
 from luce_window import window
 import native
@@ -39,6 +40,9 @@ func frame(scene: interop.Interface[Object3D], camera: interop.Reference[Perspec
     native.pixel(0, 0, 0, 0, 0)
 
 pub func main(arguments: str[]) -> i32!:
+    # Metal's validation, read when the device is made
+    try os.set_env("MTL_DEBUG_LAYER", "1")
+    try os.set_env("MTL_SHADER_VALIDATION", "1")
     let pool = native.pool()
     defer native.drain(pool)
     let vertices = [Vertex(Vector3(-1.0, -1.0, 0.0), Vector3(0.0, 0.0, 1.0)),
