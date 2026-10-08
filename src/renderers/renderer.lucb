@@ -518,15 +518,18 @@ pub struct Renderer:
             illumination = illumination.add(Vector3(light.color.red, light.color.green, light.color.blue).multiply_scalar(intensity))
         return Color(math.min(1.0, tint.red * illumination.x), math.min(1.0, tint.green * illumination.y), math.min(1.0, tint.blue * illumination.z))
 
+    ## Counts drop before the releases in these clean-ups: a last release can run a
+    ## collection that traces this renderer, and it must not visit what is gone.
     func finish():
-        for item in self.items[..<self.count]:
+        let count = self.count
+        self.count = 0
+        self.rendering = false
+        for item in self.items[..<count]:
             release_geometry(item.geometry)
             release_polygon(item.polygon)
             release_material(item.material)
             item.node.release()
             item.object.release()
-        self.count = 0
-        self.rendering = false
 
     pub func close():
         self.finish()
@@ -545,26 +548,29 @@ pub struct Renderer:
 
     ## Drop immutable draw data after a geometry/material mutation.
     pub func invalidate():
-        for cached in self.prepared[..<self.prepared_count]:
-            dispose(cached)
+        let count = self.prepared_count
         self.prepared_count = 0
         self.prepared_epoch = 0
+        for cached in self.prepared[..<count]:
+            dispose(cached)
         self.drop_spare()
 
     ## After a scene change, keep prepared data aside for reuse by identity.
     ## Data unused across two changes is freed.
     func retire():
-        var kept: usize = 0
-        for index in 0..<self.spare_count:
+        let spare_count = self.spare_count
+        let prepared_count = self.prepared_count
+        self.spare_count = 0
+        self.prepared_count = 0
+        for index in 0..<spare_count:
             var cached = self.spare[index]
             cached.age += 1
             if cached.age >= 2:
                 dispose(cached)
             else:
-                self.spare[kept] = cached
-                kept += 1
-        self.spare_count = kept
-        for cached in self.prepared[..<self.prepared_count]:
+                self.spare[self.spare_count] = cached
+                self.spare_count += 1
+        for cached in self.prepared[..<prepared_count]:
             if self.spare_count == self.spare.length:
                 dispose(cached)
                 continue
@@ -572,7 +578,6 @@ pub struct Renderer:
             entry.age = 0
             self.spare[self.spare_count] = entry
             self.spare_count += 1
-        self.prepared_count = 0
 
     ## Adopt a spare entry drawn from the same geometry object with an equal
     ## material under the same world transform and lights.
@@ -591,9 +596,10 @@ pub struct Renderer:
         return false
 
     func drop_spare():
-        for cached in self.spare[..<self.spare_count]:
-            dispose(cached)
+        let count = self.spare_count
         self.spare_count = 0
+        for cached in self.spare[..<count]:
+            dispose(cached)
 
     ## Prepared colors bake the lights in; a different set invalidates them.
     func light_signature() -> u64:
