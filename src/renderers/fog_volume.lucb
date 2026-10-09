@@ -1,0 +1,331 @@
+## Fog volumes (density grids) in the viewport, ray-marched on the GPU as
+## Houdini's viewport shows smoke. A FogVolume is made once per grid on the CPU
+## (renderers/fog_texels.lucb: dense texels, optical depths toward the light and
+## the sky) and uploads its atlas on its first draw; later draws (a camera drag)
+## upload nothing. A draw cuts the volume's box into view-aligned slabs, back to
+## front, and shades them in one draw with shaders/fog.frag: each fragment
+## marches its stretch of the eye ray, jittered per pixel, with Beer–Lambert
+## absorption and single scattering of the key light and the sky. The slabs are
+## depth tested without writing depth, so meshes in front hide the fog and fog
+## in front veils meshes behind it, to within one slab (four steps).
+from luce_gpu import gpu
+import interop
+import memory
+from luce_std import math
+import errors
+from luce_geocore.geocore import Vector3, Matrix4, GeometrySet
+from luce_geocore.kernel import SparseGrid, GridClass, set_volume
+from cameras.perspective import PerspectiveCamera, Projection
+from core.material import Color, check_color
+from renderers.fog_texels import FogTexels, fog_texels
+from renderers.fog_shaders import fog_frag_words, fog_frag_msl, fog_frag_fast_math
+
+## Ray-marching steps in one slab: how finely meshes inside the fog cut it.
+let slab_steps: f64 = 4.0
+## The most slabs a draw makes; past it, slabs (and steps) grow longer.
+let most_slabs: usize = 1024
+## The key light's direction luced-3d's viewport uses, toward the light.
+let default_light: Vector3 = Vector3(3.0, 5.0, 2.0)
+
+## How a fog volume looks; a node or the view sets it.
+pub struct FogLook:
+    ## Extinction per world unit at density 1: multiplies every density.
+    pub var density: f64 = 1.0
+    ## The smoke's scattering color (white smoke), or the emitted color.
+    pub var color: Color = Color(1.0, 1.0, 1.0)
+    ## The ray-marching step, in voxels (0.25..8).
+    pub var step: f64 = 1.0
+    ## Emit `color` where there is density rather than scatter the lights.
+    pub var emission: bool = false
+
+## One fog grid ready to draw: its texels until the first draw uploads
+## them, then its atlas texture.
+pub struct FogVolume:
+    var data: FogTexels
+    ## The world direction toward the light its optical depths were swept for.
+    var light: Vector3
+    var settings: FogLook
+    var texture: gpu.Texture?
+    var uploads: i64
+
+    ## The fog grid `index` (among the non-empty fog grids of `geometry`'s
+    ## own volume, see `count`), placed by `matrix`, lit from `light` (a world
+    ## direction toward the key light).
+    pub static func of(geometry: interop.Reference[GeometrySet], index: i64, matrix: Matrix4 = Matrix4(), light: Vector3 = default_light) -> interop.Reference[FogVolume]!:
+        let made = try fog_volume(try geometry.get(), index, matrix, light)
+        return try interop.Reference[FogVolume].adopt(made, fog_volume_type, memory.heap)
+
+    ## How many non-empty fog grids `geometry`'s own volume holds (level sets
+    ## keep their surface preview; instances are counted by their own sets).
+    pub static func count(geometry: interop.Reference[GeometrySet]) -> i64!:
+        return (i64)fog_grid_count(try geometry.get())
+
+    ## The look it draws with.
+    pub func look() -> FogLook:
+        return self.settings
+
+    ## Draw with `look` from now on: uploads nothing.
+    pub func set_look(look: FogLook) -> !:
+        try check_color(look.color)
+        if not (look.density >= 0.0 and look.density <= 1.0e6) or not (look.step >= 0.25 and look.step <= 8.0):
+            error(errors.invalid, "a fog look needs a density scale in 0..1e6 and a step of 0.25..8 voxels")
+        self.settings = look
+
+    ## The highest density.
+    pub func peak() -> f64:
+        return self.data.peak
+
+    ## Texels across the box along `axis` (0 x, 1 y, 2 z).
+    pub func texels(axis: i64) -> i64:
+        return (i64)self.data.counts[(usize)axis % 3]
+
+    ## How many times its atlas went to the GPU (once, on its first draw).
+    pub func upload_count() -> i64:
+        return self.uploads
+
+    ## Draw over what `target` holds, through `camera`: the key light colored
+    ## `key` (intensity folded in) and a sky light of `ambient`. A standalone
+    ## frame (no device) draws nothing.
+    pub func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], key: Color = Color(0.85, 0.85, 0.85), ambient: f64 = 0.35) -> !:
+        try check_color(key)
+        if not (ambient >= 0.0 and ambient <= 100.0): error(errors.invalid, "ambient light must be in 0..100")
+        let native = try target.get()
+        var device = gpu.device_of(native) catch failure:
+            if failure.code != gpu.unavailable: error(failure.code, failure.message)
+            recover gpu.Device()
+        defer device.destroy()
+        let size = try native.size()
+        if not device.is_open() or size.width <= 0.0 or size.height <= 0.0: return
+        let texture = try self.upload(device)
+        let projection = try camera.value().projection(size.width / size.height)
+        let plan = self.plan(projection) else return
+        let vertices = try self.slabs(projection, plan)
+        defer free(vertices) in memory.heap
+        if vertices.length == 0: return
+        let pipeline = try fog_pipeline(device, try native.pixel_format())
+        var uniforms = self.uniforms(projection, plan, key, ambient)
+        try gpu.shade_triangles(native, pipeline, vertices, u8[]((u8*)&uniforms[0], 128), [texture], gpu.Filter.linear)
+
+    ## The atlas on the GPU: sent on the first draw, when the CPU copy is
+    ## freed. Volumes draw on the device they were first drawn on.
+    func upload(device: gpu.Device) -> gpu.Texture!:
+        if let texture = self.texture: return texture
+        var texture = try gpu.Texture.create(device, (u32)self.data.width, (u32)self.data.height, gpu.Format.rgba16_float)
+        errdefer texture.destroy()
+        try texture.upload(u8[]((u8*)self.data.texels.data, self.data.texels.length * 2))
+        self.texture = texture
+        self.uploads += 1
+        self.data.close()
+        return texture
+
+    ## Where the slabs lie along the view axis through `projection`: from the
+    ## box's near side (or the near plane) to its far side, `slab_steps` steps
+    ## apart, or farther apart when that would take more than `most_slabs`.
+    ## None when the box is behind the eye or past the far plane.
+    func plan(projection: Projection) -> SlabPlan?:
+        let forward = projection.backward.multiply_scalar(-1.0)
+        var nearest = 1.0e300
+        var farthest = -1.0e300
+        for corner in 0..<(usize)8:
+            let depth = self.data.box.transform_point(corner_of(corner)).subtract(projection.position).dot(forward)
+            nearest = math.min(nearest, depth)
+            farthest = math.max(farthest, depth)
+        var thickness = slab_steps * self.settings.step * self.data.voxel
+        let start = math.max(nearest + thickness * 0.001, projection.near * 1.001)
+        let finish = math.min(farthest, projection.far * 0.999)
+        if finish <= start: return none
+        var count = (usize)math.ceil((finish - start) / thickness)
+        if count > most_slabs:
+            count = most_slabs
+            thickness = (finish - start) / (f64)most_slabs
+        return SlabPlan(start, thickness, count)
+
+    ## The slab polygons of `plan` from back to front as clip-space triangles,
+    ## each vertex colored with its box coordinates. Heap storage, owned by
+    ## the caller.
+    func slabs(projection: Projection, plan: SlabPlan) -> gpu.Vertex[]!:
+        let forward = projection.backward.multiply_scalar(-1.0)
+        # A slab is at most a hexagon: four triangles.
+        let out = try new gpu.Vertex[plan.count * 12] --- in memory.heap
+        var written: usize = 0
+        var index = plan.count
+        while index > 0:
+            index -= 1
+            written += cut(self.data.box, projection, forward, plan.start + (f64)index * plan.thickness, out[written..])
+        return out[..<written]
+
+    ## The fragment stage's uniforms (shaders/fog.frag's Params).
+    func uniforms(projection: Projection, plan: SlabPlan, key: Color, ambient: f64) -> f32[32]:
+        let box = self.data.box
+        let inverse = box.inverse() catch failure: trap(failure.message)
+        let eye = inverse.transform_point(projection.position)
+        let forward = projection.backward.multiply_scalar(-1.0)
+        let light = self.light
+        let look = self.settings
+        let counts = self.data.counts
+        return [(f32)eye.x, (f32)eye.y, (f32)eye.z, (f32)plan.thickness,
+                (f32)box.x.dot(forward), (f32)box.y.dot(forward), (f32)box.z.dot(forward), (f32)slab_steps,
+                (f32)box.x.length(), (f32)box.y.length(), (f32)box.z.length(), (f32)look.density,
+                (f32)box.x.dot(light), (f32)box.y.dot(light), (f32)box.z.dot(light), 0.0,
+                (f32)key.red, (f32)key.green, (f32)key.blue, (f32)ambient,
+                (f32)look.color.red, (f32)look.color.green, (f32)look.color.blue, 1.0 if look.emission else 0.0,
+                (f32)counts[0], (f32)counts[1], (f32)counts[2], (f32)self.data.columns,
+                (f32)self.data.width, (f32)self.data.height, 0.0, 0.0]
+
+    ## Free the texels and the texture.
+    pub func close():
+        self.data.close()
+        if let texture = self.texture:
+            var owned = texture
+            owned.destroy()
+        self.texture = none
+
+pub let fog_volume_type: interop.Type[FogVolume] = interop.Type[FogVolume]("FogVolume", FogVolume.close, closeable = true, main_thread = true)
+
+## A heap FogVolume of fog grid `index` of `set`'s own volume (Base callers,
+## such as a worker handing it to the UI thread: adopt it with
+## `fog_volume_type` there). Fails when there is no such grid.
+pub func fog_volume(set: const GeometrySet*, index: i64, matrix: Matrix4, light: Vector3) -> FogVolume*!:
+    let grid = fog_grid(set, index) else error(errors.invalid, "the geometry has no such fog grid")
+    let direction = try light.normalized()
+    var data = try fog_texels(grid, matrix, direction)
+    errdefer data.close()
+    return try new FogVolume(data = data, light = direction, settings = FogLook(), texture = none, uploads = 0) in memory.heap
+
+## The non-empty fog grids of `set`'s own volume.
+pub func fog_grid_count(set: const GeometrySet*) -> usize:
+    let volume = set_volume(set) else return 0
+    var count: usize = 0
+    for at in 0..<volume.grid_count():
+        let grid = volume.grid(at)
+        if grid.class == GridClass.fog and grid.leaf_count() > 0: count += 1
+    return count
+
+func fog_grid(set: const GeometrySet*, index: i64) -> const SparseGrid*?:
+    let volume = set_volume(set) else return none
+    var seen: i64 = 0
+    for at in 0..<volume.grid_count():
+        let grid = volume.grid(at)
+        if grid.class != GridClass.fog or grid.leaf_count() == 0: continue
+        if seen == index: return grid
+        seen += 1
+    return none
+
+# mark: Slabs
+
+## Where a draw's slabs lie along the view axis: the first plane's depth, the
+## world distance between planes, and how many.
+struct SlabPlan:
+    let start: f64
+    let thickness: f64
+    let count: usize
+
+## Corner `index` of the unit box: bit 0 x, bit 1 y, bit 2 z.
+func corner_of(index: usize) -> Vector3:
+    return Vector3((f64)(index & 1), (f64)((index >> 1) & 1), (f64)((index >> 2) & 1))
+
+## The box's twelve edges as corner pairs.
+let edges: usize[24] = [0, 1, 2, 3, 4, 5, 6, 7, 0, 2, 1, 3, 4, 6, 5, 7, 0, 4, 1, 5, 2, 6, 3, 7]
+
+## Write the polygon where the plane at view depth `depth` cuts `box`, as a
+## triangle fan, into `out`; how many vertices it wrote (0 when it misses).
+func cut(box: Matrix4, projection: Projection, forward: Vector3, depth: f64, out: gpu.Vertex[]) -> usize:
+    let origin = Vector3()
+    var points: Vector3[6] = [origin, origin, origin, origin, origin, origin]
+    var coordinates = points
+    var count: usize = 0
+    for edge in 0..<(usize)12:
+        let a = corner_of(edges[edge * 2])
+        let b = corner_of(edges[edge * 2 + 1])
+        let pa = box.transform_point(a)
+        let pb = box.transform_point(b)
+        let da = pa.subtract(projection.position).dot(forward) - depth
+        let db = pb.subtract(projection.position).dot(forward) - depth
+        if (da < 0.0) == (db < 0.0) or count == 6: continue
+        let t = da / (da - db)
+        points[count] = pa.add(pb.subtract(pa).multiply_scalar(t))
+        coordinates[count] = a.add(b.subtract(a).multiply_scalar(t))
+        count += 1
+    if count < 3: return 0
+    # Order the points around their center, in the view plane.
+    var center = Vector3()
+    for at in 0..<count: center = center.add(points[at])
+    center = center.multiply_scalar(1.0 / (f64)count)
+    var angles: f64[6]
+    for at in 0..<count:
+        let offset = points[at].subtract(center)
+        angles[at] = math.atan2(offset.dot(projection.up), offset.dot(projection.right))
+    for at in 1..<count:
+        var probe = at
+        while probe > 0 and angles[probe - 1] > angles[probe]:
+            let angle = angles[probe]
+            angles[probe] = angles[probe - 1]
+            angles[probe - 1] = angle
+            let point = points[probe]
+            points[probe] = points[probe - 1]
+            points[probe - 1] = point
+            let coordinate = coordinates[probe]
+            coordinates[probe] = coordinates[probe - 1]
+            coordinates[probe - 1] = coordinate
+            probe -= 1
+    var written: usize = 0
+    for at in 1..<count - 1:
+        for corner in [(usize)0, at, at + 1]:
+            out[written] = clip_vertex(points[corner], coordinates[corner], projection)
+            written += 1
+    return written
+
+## `point` in clip space (as WireRenderer projects), colored with its box
+## coordinates.
+func clip_vertex(point: Vector3, coordinate: Vector3, projection: Projection) -> gpu.Vertex:
+    let relative = point.subtract(projection.position)
+    let distance = -relative.dot(projection.backward)
+    return gpu.Vertex(x = (f32)(relative.dot(projection.right) * projection.focal / projection.aspect),
+                      y = (f32)(relative.dot(projection.up) * projection.focal),
+                      z = (f32)(projection.far * (distance - projection.near) / (projection.far - projection.near)),
+                      w = (f32)distance, red = (f32)math.clamp(coordinate.x, 0.0, 1.0), green = (f32)math.clamp(coordinate.y, 0.0, 1.0),
+                      blue = (f32)math.clamp(coordinate.z, 0.0, 1.0))
+
+# mark: The shared pipeline
+
+## The fog shader and its pipelines on one device, per target format (slot 0
+## for presentation surfaces, 1 + the format otherwise): made on first use and
+## kept, so a new volume compiles nothing. Main thread only, as drawing is.
+struct FogPipelines:
+    var device: gpu.Device
+    var shader: gpu.Shader
+    var pipelines: (gpu.Pipeline?)[9]
+
+var shared: FogPipelines? = none
+
+## The fog pipeline drawing into targets of `pixel_format` on `device`.
+func fog_pipeline(device: gpu.Device, pixel_format: gpu.Format?) -> gpu.Pipeline!:
+    var wanted = device
+    if let held = shared:
+        if not held.device.same(&wanted): release_fog_pipelines()
+    if shared == none:
+        var shader = try gpu.Shader.create(device, fog_frag_words, fog_frag_msl, fog_frag_fast_math)
+        errdefer shader.destroy()
+        shared = FogPipelines(device = try device.share(), shader = shader)
+    var held = shared else trap("fog pipelines")
+    var slot: usize = 0
+    if let format = pixel_format: slot = (usize)(u8)format + 1
+    if let made = held.pipelines[slot]: return made
+    let made = try gpu.Pipeline.create(device, held.shader, gpu.Blend.over, pixel_format, depth_test = true)
+    held.pipelines[slot] = made
+    shared = held
+    return made
+
+## Release the shared fog shader and pipelines (they are made again on the
+## next draw): for a clean shutdown, or before closing the device.
+pub func release_fog_pipelines():
+    let held = shared else return
+    shared = none
+    for pipeline in held.pipelines:
+        if let made = pipeline:
+            var owned = made
+            owned.destroy()
+    var shader = held.shader
+    shader.destroy()
+    var device = held.device
+    device.destroy()

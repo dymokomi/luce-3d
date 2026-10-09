@@ -39,6 +39,7 @@ mesh is not a per-vertex `Geometry`; `MeshGeometry` wraps it for that path).
 | `Knife`, `KnifePlane` | A knife stroke on screen: `Knife.plane(camera,x0,y0,x1,y1,width,height)` is the plane through the eye holding the stroke (a point and a unit normal, for Clip's custom plane), `faces_under(mesh,camera,...)` the faces the line passes over, `snapped(x0,y0,x1,y1)` the end at the nearest 15 degrees. |
 | `WireRenderer` | `lines(points,camera,target,color,width=1,bias=0.000001,depth=true)` draws independent world endpoint pairs at constant logical-pixel width; near clipped and depth tested (`depth=false`: over everything). `triangles(points,camera,target,color)` draws depth-tested selection fills. Uses the existing target depth buffer; current GPU API also writes depth. |
 | `WireBatch` | Retained endpoint pairs drawn at constant pixel width (`draw(camera,target,color,width)`); `count()` segments and `bounds()` for framing. |
+| `FogVolume`, `FogLook` | A fog grid of a luce-geocore set, ray-marched on the GPU as smoke (see below): `FogVolume.of(geometry,index,matrix=identity,light=(3,5,2))` the `index`th non-empty fog grid of the set's own volume, placed by `matrix`, its self-shadowing swept toward `light`; `FogVolume.count(geometry)` how many there are. `draw(camera,target,key=(0.85,0.85,0.85),ambient=0.35)` draws it over what the target holds; `set_look(look)` sets `FogLook` (`density` scale, `color`, `step` in voxels 0.25..8, `emission`), uploading nothing; `peak()`, `texels(axis)` and `upload_count()` (one, on the first draw) for tests. Base callers: `fog_volume_of(set,index,matrix,light)` makes a heap volume (on a worker; adopt it with `fog_volume_type`), `fog_grid_count(set)`, and `release_fog_pipelines()` frees the shared shader. |
 | `CurveLines` | The curves of a luce-geocore `GeometrySet` as wire batches: `batch(geometry)` draws every evaluated curve (instances placed), `batch(geometry, true)` the control hulls (control polygons of smooth curves, Bezier handle arms, a cross per control point); `count(geometry)` segments. Base code appends the same endpoint pairs with `append_curve_segments(set, matrix, lines, hulls)`, extracted in parallel from the evaluated-curve cache. |
 | `SurfaceHits` | Where a view ray meets the scene: `cast(root,origin,direction)` returns the nearest face of any visible polygon object under `root` (each placed by its parents, hit through its BVH) as a `SurfaceHit` (`found`, world `point`, unit `normal`, `distance`); `plane(origin,direction,point,normal)` meets a construction plane. |
 
@@ -69,3 +70,35 @@ release the carrier after use. The Luce compiler supplies the matching ARC and
 error conversion automatically. See `tests/geometry/main.lucb` and `tests/pixels/readback.lucb` for
 compiled direct Base consumers, and `tests/custom/main.luc` for application-defined
 geometry and materials.
+
+## Fog volumes
+
+A fog grid has no surface, so it is drawn by ray marching (Houdini's viewport
+smoke), split between the CPU, once per grid, and the GPU, per frame:
+
+- **Texels** (`renderers/fog_texels.lucb`). The grid's leaves span a box of
+  voxels; the box, padded by a texel of background, becomes a dense texel box
+  whose z slices sit side by side in one `rgba16_float` atlas texture (red the
+  density, green the optical depth toward the key light, blue toward the sky).
+  luce-gpu has no 3D textures, and a 2D atlas of slices filters bilinearly in
+  hardware on every backend: the shader adds the linear step between two
+  slices. Leaves wider than 256³ texels (or an atlas past 16384 texels a side)
+  are averaged down by a whole factor. The optical depths, ∫ density along the
+  world length toward the light, are swept plane by plane on the CPU (in
+  parallel per plane), so lighting costs two reads per step and a new density
+  scale needs no new sweep.
+- **Slabs** (`renderers/fog_volume.lucb`, `shaders/fog.frag`). A draw cuts the
+  box into view-aligned slabs four steps thick, back to front, as one
+  `gpu.shade_triangles` draw whose vertex colors are box coordinates. Each
+  fragment marches its slab's stretch of the eye ray front to back, with
+  per-pixel jittered steps (interleaved gradient noise): Beer–Lambert
+  absorption, single scattering of the key light (`exp(-depth_light × scale)`)
+  and of the sky, or plain emission. It emits premultiplied color, so slabs
+  composite over one another and over the scene. The pipeline is depth tested
+  without writing depth: a mesh in front hides the fog, the fog veils what lies
+  behind it, and a mesh inside it cuts it to within one slab.
+
+The atlas uploads on the first draw and the CPU copy is freed; later draws
+(camera moves, a new look) upload nothing. The shader and its pipelines are
+shared by every volume. `tests/fog_pixels` checks a fog ball's pixels and
+reports a 128³ ball's GPU time at 2800×1800 (about 5 ms on an M4 Max).

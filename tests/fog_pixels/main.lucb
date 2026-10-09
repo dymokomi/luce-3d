@@ -1,0 +1,196 @@
+## Offscreen pixels of fog volumes: a fog ball made through luce-geocore's
+## grid API, ray-marched over a dark clear. Its middle is lit smoke, its edge
+## fades into the background, a quad in front hides it and one behind shows
+## through it, the atlas goes to the GPU once, and emission glows its color.
+## The run ends with the GPU time of a 128³ ball filling a 1400×900 view at
+## 2x (report only).
+from luce_gpu import gpu
+import interop
+import os
+from luce_std import math
+import memory
+from luce_3d import graphics as three
+from luce_3d.graphics import FogVolume, FogLook, PerspectiveCamera, WireRenderer, Vector3, Matrix4, release_fog_pipelines
+from luce_geocore.geocore import GeometrySet
+from luce_geocore.kernel import GridClass, grid_of_leaves, key_leaf, leaf_key, new_volume, add_grid, volume_type, empty_set, adopt_set, release_volume, dispose_set
+
+let width: u32 = 160
+let height: u32 = 120
+let clear: f64 = 0.1
+
+## A ball of fog `radius` voxels across its middle, density falling from 1
+## at its center to 0 at its edge.
+struct Ball:
+    let radius: f64
+
+func fill_ball(context: void*?, leaf: usize, key: u64, values: f32[], mask: u64[]):
+    _ = leaf
+    let ball = (Ball*)(context else return)
+    let (lx, ly, lz) = key_leaf(key)
+    for k in 0..<(i64)8:
+        for j in 0..<(i64)8:
+            for i in 0..<(i64)8:
+                let x = (f64)(lx * 8 + i)
+                let y = (f64)(ly * 8 + j)
+                let z = (f64)(lz * 8 + k)
+                let r = math.sqrt(x * x + y * y + z * z) / ball.radius
+                values[(usize)(i + j * 8 + k * 64)] = (f32)math.max(0.0, 1.0 - r)
+    for at in 0..<mask.length: mask[at] = 0xFFFFFFFFFFFFFFFF
+
+## A set holding one fog grid: a ball of `radius` voxels, each `voxel` wide.
+func fog_ball(radius: i64, voxel: f64) -> interop.Reference[GeometrySet]!:
+    let leaves = (radius + 7) // 8
+    let side = (usize)(leaves * 2)
+    let keys = try new u64[side * side * side] --- in memory.heap
+    defer free(keys) in memory.heap
+    var at: usize = 0
+    for z in -leaves..<leaves:
+        for y in -leaves..<leaves:
+            for x in -leaves..<leaves:
+                keys[at] = leaf_key(x, y, z)
+                at += 1
+    var ball = Ball((f64)radius)
+    let transform = Matrix4(Vector3(voxel, 0.0, 0.0), Vector3(0.0, voxel, 0.0), Vector3(0.0, 0.0, voxel), Vector3())
+    let grid = try grid_of_leaves("density", GridClass.fog, 0.0, transform, keys, fill_ball, (void*)&ball)
+    let volume = try new_volume()
+    errdefer release_volume(volume)
+    try add_grid(volume, grid)
+    let storage = try empty_set()
+    errdefer dispose_set(storage)
+    try storage.put(volume_type(), (void*)volume)
+    return try adopt_set(storage)
+
+struct View:
+    var texture: gpu.Texture
+    let camera: interop.Reference[PerspectiveCamera]
+
+    func init(device: gpu.Device, size_x: u32, size_y: u32) -> !:
+        self.texture = try gpu.Texture.create(device, size_x, size_y, gpu.Format.rgba8_linear)
+        self.camera = try interop.Reference[PerspectiveCamera].adopt(new PerspectiveCamera(40.0, (f64)size_x / (f64)size_y, 0.1, 100.0) in memory.heap,
+                                                                     three.perspective_camera_type, memory.heap)
+        try self.camera.value().set_position(Vector3(0.0, 0.0, 4.0))
+        try self.camera.value().look_at(Vector3())
+
+    ## Draw `volume` over quads at `quads` (x0, x1, z per quad, opaque blue),
+    ## read back into `image`; the frame's submission.
+    func draw(volume: interop.Reference[FogVolume], quads: const f64[], image: u8[]?) -> gpu.Submission!:
+        let recording = try self.texture.frame()
+        defer recording.release()
+        let target = try recording.value().target()
+        defer target.release()
+        for at in 0..<quads.length // 3:
+            let x0 = quads[at * 3]
+            let x1 = quads[at * 3 + 1]
+            let z = quads[at * 3 + 2]
+            let points: Vector3[6] = [Vector3(x0, -3.0, z), Vector3(x1, -3.0, z), Vector3(x1, 3.0, z), Vector3(x0, -3.0, z), Vector3(x1, 3.0, z), Vector3(x0, 3.0, z)]
+            try WireRenderer.triangles(points, self.camera, target, gpu.Color(0.0, 0.0, 1.0))
+        try volume.value().draw(self.camera, target)
+        _ = try recording.value().present(gpu.Color(clear, clear, clear))
+        if let out = image: try self.texture.read(out)
+        return recording.value().submission()
+
+    func close():
+        self.camera.release()
+        self.texture.destroy()
+
+func pixel(image: const u8[], x: u32, y: u32) -> (i64, i64, i64):
+    let at = (usize)((y * width + x) * 4)
+    return ((i64)image[at], (i64)image[at + 1], (i64)image[at + 2])
+
+func luminance(image: const u8[], x: u32, y: u32) -> i64:
+    let (r, g, b) = pixel(image, x, y)
+    return (r + g + b) // 3
+
+pub func main(arguments: str[]) -> i32!:
+    _ = arguments
+    try os.set_env("MTL_DEBUG_LAYER", "1")
+    var device = gpu.Device.open() catch failure:
+        if failure.code == gpu.unavailable:
+            print("skip: no GPU device")
+            return 0
+        error(failure.code, failure.message)
+    defer device.destroy()
+    defer release_fog_pipelines()
+    # A ball of radius 1: 32 voxels of 1/32.
+    let fog = try fog_ball(32, 1.0 / 32.0)
+    defer fog.release()
+    assert((try FogVolume.count(fog)) == 1)
+    let volume = try FogVolume.of(fog, 0)
+    defer volume.release()
+    # The leaves' 64 voxels plus a texel of padding each side.
+    assert(volume.value().texels(0) == 66 and volume.value().texels(2) == 66)
+    assert(volume.value().peak() > 0.95 and volume.value().peak() <= 1.0)
+    var look = FogLook()
+    look.density = 4.0
+    try volume.value().set_look(look)
+    var view = try View(device, width, height)
+    defer view.close()
+    let image = try new u8[(usize)(width * height * 4)] --- in memory.heap
+    defer free(image) in memory.heap
+    var none_quads: f64[]
+    _ = try view.draw(volume, none_quads, image)
+    # The clear (0.1 linear) where there is no fog.
+    let background = luminance(image, 4, 4)
+    assert(background >= 24 and background <= 28)
+    # Lit smoke in the middle, fading outward to the background past the
+    # ball's edge (about 41 pixels from the middle).
+    let middle = luminance(image, 80, 60)
+    let inner = luminance(image, 100, 60)
+    let rim = luminance(image, 116, 60)
+    let outside = luminance(image, 128, 60)
+    print(f"fog luminance: background {background}, middle {middle}, half radius {inner}, rim {rim}, outside {outside}")
+    assert(middle > background + 60 and inner > background + 20 and rim < inner and rim >= background and outside == background)
+    assert(volume.value().upload_count() == 1)
+    # Occlusion: a quad in front of the ball hides it on the left; a quad
+    # behind it on the right shows through the fog, and pure past its edge.
+    let quads: f64[6] = [-3.0, 0.0, 1.5, 0.0, 3.0, -1.5]
+    _ = try view.draw(volume, quads, image)
+    let (lr, lg, lb) = pixel(image, 60, 60)
+    assert(lr == 0 and lg == 0 and lb == 255)
+    let (rr, rg, rb) = pixel(image, 100, 60)
+    assert(rr > 40 and rg > 40 and rb < 255 and rb > rr)
+    let (pr, pg, pb) = pixel(image, 140, 60)
+    assert(pr == 0 and pg == 0 and pb == 255)
+    # Drawn again: nothing uploaded.
+    assert(volume.value().upload_count() == 1)
+    # Emission glows its color.
+    look.emission = true
+    look.color = gpu.Color(1.0, 0.2, 0.0)
+    try volume.value().set_look(look)
+    _ = try view.draw(volume, none_quads, image)
+    let (er, eg, eb) = pixel(image, 80, 60)
+    assert(er > 150 and eg < er and eb <= 30)
+    print("PASS fog volume: lit middle, fading edge, occlusion both ways, one upload, emission")
+    try timing(device)
+    return 0
+
+## The GPU time of a 128³ fog ball filling a 1400×900 view at 2x, mean of
+## 60 frames after 10 warm-up frames (report only).
+func timing(device: gpu.Device) -> !:
+    if not (try device.limits()).timestamps:
+        print("skip fog timing: the device keeps no GPU times")
+        return
+    let fog = try fog_ball(64, 1.0 / 64.0)
+    defer fog.release()
+    let volume = try FogVolume.of(fog, 0)
+    defer volume.release()
+    var look = FogLook()
+    look.density = 4.0
+    try volume.value().set_look(look)
+    var view = try View(device, 2800, 1800)
+    defer view.close()
+    try view.camera.value().set_position(Vector3(0.0, 0.0, 2.6))
+    var none_quads: f64[]
+    var total: u64 = 0
+    var timed: u64 = 0
+    for frame in 0..<70:
+        let submission = try view.draw(volume, none_quads, none)
+        try device.wait(submission)
+        if frame < 10: continue
+        if let time = try device.gpu_time(submission):
+            total += time.elapsed()
+            timed += 1
+    if timed == 0:
+        print("skip fog timing: no frame was timed")
+        return
+    print(f"fog timing: {volume.value().texels(0)}³ texels, 2800×1800 pixels, mean GPU frame {(f64)total / (f64)timed / 1.0e6} ms over {timed} frames")

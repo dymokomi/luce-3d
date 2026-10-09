@@ -52,7 +52,8 @@ Polygon meshes (`Mesh.of`) draw from GPU arrays retained by the arrays' change
 ids: vertex pulling, lighting and the zebra, isophote and normal analysis modes
 run in `gpu` shaders, and a changed mesh uploads only its changed arrays. Other
 geometry goes through the per-vertex `Geometry` interface, transformed and lit
-on the CPU. Metal and Vulkan are implemented. Textures, custom materials,
+on the CPU. Fog volumes (density grids) are ray-marched on the GPU as smoke
+(`FogVolume`; docs/API.md). Metal and Vulkan are implemented. Textures, custom materials,
 shadows, animation assets and asset loading are later work. This is development
 code with no compatibility commitment before its first release.
 

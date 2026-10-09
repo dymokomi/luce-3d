@@ -2,7 +2,7 @@
 
 `luc test` builds and runs the test programs under `tests/`: the direct Base
 fixture (`tests/geometry`) and two Luce consumers (`tests/objects`,
-`tests/custom`), the GPU pixel programs (`tests/pixels`, `tests/mesh_pixels`) and
+`tests/custom`), the GPU pixel programs (`tests/pixels`, `tests/mesh_pixels`, `tests/fog_pixels`) and
 the README check (`tests/readme`).
 
 - Sphere counts, radii, normalized normals, exact seams, UV bounds, outward
@@ -44,3 +44,9 @@ crease with a normal per face and flow across the same seam with shared
 normals, and change without one-pixel jumps on a sphere. The program uses only
 portable `gpu` calls, so it runs on Vulkan hosts too. This library has no
 texture, shadow, skinning, model-loading or general shader API.
+
+`tests/fog_pixels` builds a fog ball through luce-geocore's grid API and draws
+it offscreen: lit smoke in its middle, fading to the clear past its edge, a
+quad in front hiding it and one behind showing through it, one atlas upload
+over several draws, and emission glowing its color. It ends by printing the GPU
+time of a 128³ ball filling 2800×1800 pixels (report only).

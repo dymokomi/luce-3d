@@ -31,6 +31,17 @@ pub let edit_overlay_type = edit_overlay.edit_overlay_type
 import renderers.knife
 pub type Knife = knife.Knife
 pub type KnifePlane = knife.KnifePlane
+import renderers.fog_volume
+## A fog grid ray-marched on the GPU, and how it looks.
+pub type FogVolume = fog_volume.FogVolume
+pub type FogLook = fog_volume.FogLook
+pub let fog_volume_type = fog_volume.fog_volume_type
+## A heap FogVolume of a set's fog grid, for Base callers (a worker).
+pub let fog_volume_of = fog_volume.fog_volume
+## The non-empty fog grids of a set's own volume.
+pub let fog_grid_count = fog_volume.fog_grid_count
+## Release the shared fog shader and pipelines.
+pub let release_fog_pipelines = fog_volume.release_fog_pipelines
 
 pub type Material = material.Material
 pub type Color = material.Color
