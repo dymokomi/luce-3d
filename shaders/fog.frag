@@ -3,12 +3,12 @@
 // The volume is a dense box of texels, its z slices tiled side by side in one
 // rgba16_float atlas (image 1): r the density, g the optical depth toward the key
 // light, b the optical depth toward the sky (+Y), both integrated through the
-// densities on the CPU when the volume was made. The box is drawn as view-aligned
-// slabs, back to front; each fragment of a slab marches its stretch of the eye ray,
-// from the slab's plane to the next one's, front to back, and emits that stretch's
-// color and coverage premultiplied, so the slabs composite "over" one another and
-// over the scene. Slabs are depth tested without writing depth: a mesh in front
-// hides them, and they fog what lies behind.
+// densities on the CPU when the volume was made, a the emission field. The box is
+// drawn as view-aligned slabs, back to front; each fragment of a slab marches its
+// stretch of the eye ray, from the slab's plane to the next one's, front to back,
+// and emits that stretch's color and coverage premultiplied, so the slabs composite
+// "over" one another and over the scene. Slabs are depth tested without writing
+// depth: a mesh in front hides them, and they fog what lies behind.
 //
 // The vertex color is the fragment's position on the slab's plane in the box's
 // coordinates (0..1 across it); distances along the ray are in world units through
@@ -20,11 +20,11 @@ layout(push_constant) uniform Params {
     vec4 eye;       // the eye in box coordinates; w the slab thickness in world units, along the view axis
     vec4 forward;   // the view axis as box coordinates' depth gradient (depth = dot(p - eye, forward)); w steps per slab
     vec4 scale;     // world length of the box's x, y and z; w the density scale
-    vec4 light;     // the key light's direction as box coordinates' dot gradient; w the phase anisotropy (-0.9..0.9)
-    vec4 light_color; // the key light's color times intensity; w the ambient (sky) intensity
-    vec4 color;     // the smoke's scattering color, or the emitted color; w 1 for emission, 0 for smoke
+    vec4 key;       // the key light's color times intensity; w the ambient (sky) intensity
+    vec4 smoke;     // the smoke's scattering color; w the shadow scale
+    vec4 glow;      // the emission color times the emission scale; w unused
     vec4 atlas;     // texels across the box: x, y, z; w atlas columns
-    vec4 size;      // the atlas's width and height in texels; z the step jitter's seed
+    vec4 size;      // the atlas's width and height in texels; zw unused
 } params;
 layout(set = 0, binding = 1) uniform sampler2D volume;
 
@@ -50,7 +50,7 @@ vec4 texels(vec3 q) {
 // Interleaved gradient noise (Jimenez 2014): a per-pixel offset in 0..1 that
 // turns step banding into fine noise.
 float jitter(vec2 pixel) {
-    return fract(52.9829189 * fract(dot(pixel + params.size.z, vec2(0.06711056, 0.00583715))));
+    return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
 }
 
 void main() {
@@ -66,13 +66,9 @@ void main() {
     float span = length(ray * params.scale.xyz);
     float step_length = span * ds;
     float density_scale = params.scale.w;
-    bool emission = params.color.w > 0.5;
-    // Henyey-Greenstein, scaled so isotropic scattering is 1.
-    float g = params.light.w;
-    float cosine = dot(ray, params.light.xyz) / max(span, 1e-20);
-    float phase = (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cosine, 1e-6), 1.5);
-    vec3 key = params.light_color.rgb * phase;
-    float ambient = params.light_color.w;
+    float shadow_scale = params.smoke.w * density_scale;
+    vec3 key = params.key.rgb;
+    float ambient = params.key.w;
     vec3 radiance = vec3(0.0);
     float transmittance = 1.0;
     float offset = jitter(gl_FragCoord.xy);
@@ -83,17 +79,17 @@ void main() {
         }
         vec4 s = texels(q);
         float sigma = s.r * density_scale;
-        if (sigma <= 0.0) {
+        vec3 emitted = params.glow.rgb * max(s.a, 0.0);
+        if (sigma <= 0.0 && emitted == vec3(0.0)) {
             continue;
         }
         float alpha = 1.0 - exp(-sigma * step_length);
-        vec3 lit = emission ? params.color.rgb
-                            : params.color.rgb * (key * exp(-s.g * density_scale) + ambient * exp(-s.b * density_scale));
-        radiance += transmittance * alpha * lit;
+        vec3 lit = params.smoke.rgb * (key * exp(-s.g * shadow_scale) + ambient * exp(-s.b * density_scale));
+        radiance += transmittance * (alpha * lit + emitted * step_length);
         transmittance *= 1.0 - alpha;
     }
     float coverage = 1.0 - transmittance;
-    if (coverage <= 0.0) {
+    if (coverage <= 0.0 && radiance == vec3(0.0)) {
         discard;
     }
     fragment_color = vec4(radiance, coverage);

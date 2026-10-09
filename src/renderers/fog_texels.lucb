@@ -2,7 +2,8 @@
 ## grid's leaves span a box of voxels; the box, padded by one texel of the
 ## background on every side, becomes texels whose z slices lie side by side in
 ## one rgba16_float atlas: red the density, green the optical depth toward the
-## key light, blue toward the sky (+Y). The optical depths (density integrated
+## key light, blue toward the sky (+Y), alpha the emission field (a second
+## grid of the set, sampled at each texel's center; zero without one). The optical depths (density integrated
 ## along world length) are swept plane by plane on the CPU when the volume is
 ## made, so the shader's lighting is two texture reads, and a changed density
 ## scale needs no new sweep (the shader scales them). A box larger than
@@ -11,7 +12,7 @@ import memory
 from luce_std import math, parallel
 import errors
 from luce_geocore.geocore import Vector3, Matrix4
-from luce_geocore.kernel import SparseGrid, key_leaf
+from luce_geocore.kernel import SparseGrid, GridSampler, key_leaf
 
 ## The most texels a volume uploads: 256³, 128 MiB of half floats.
 let most_texels: usize = 16777216
@@ -44,8 +45,9 @@ pub struct FogTexels:
         self.texels = empty
 
 ## The texels of fog `grid` placed by `matrix`, its optical depths swept toward
-## `light` (a world direction toward the key light) and toward +Y.
-pub func fog_texels(grid: const SparseGrid*, matrix: Matrix4, light: Vector3) -> FogTexels!:
+## `light` (a world direction toward the key light) and toward +Y, and the
+## values of `emission` (a grid of the same set) in alpha.
+pub func fog_texels(grid: const SparseGrid*, emission: const SparseGrid*?, matrix: Matrix4, light: Vector3) -> FogTexels!:
     let keys = grid.keys.view()
     if keys.length == 0: error(errors.invalid, "an empty fog grid has nothing to draw")
     let (fx, fy, fz) = key_leaf(keys[0])
@@ -102,6 +104,9 @@ pub func fog_texels(grid: const SparseGrid*, matrix: Matrix4, light: Vector3) ->
     result.peak = peak
     try sweep(density, &layout, box, try light.normalized(), result.texels, 1)
     try sweep(density, &layout, box, Vector3(0.0, 1.0, 0.0), result.texels, 2)
+    if let field = emission:
+        var work = EmissionWork(grid, field, origin, factor, &layout, result.texels)
+        try parallel.for_each_range(counts[2], 1, (void*)&work, sample_emission)
     return result
 
 ## Slices per atlas row so that the atlas is about square and at most
@@ -179,6 +184,32 @@ func fill_leaves(context: void*, first: usize, end: usize, worker: usize):
                     let value = values[base + (usize)(i + j * 8 + k * 64)]
                     if work.factor == 1: work.out[row + tx] = value
                     else: work.out[row + tx] += (value - background) * weight
+
+# mark: Emission
+
+struct EmissionWork:
+    let grid: const SparseGrid*
+    let field: const SparseGrid*
+    let origin: i64[3]
+    let factor: i64
+    let layout: const Layout*
+    let texels: f16[]
+
+## The emission field at each texel's center (in the density grid's index
+## space, then the set's world, where both grids lie), slices `first..<end`.
+func sample_emission(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (EmissionWork*)context
+    let counts = work.layout.counts
+    var sampler = GridSampler.of(work.field)
+    let span = (f64)work.factor
+    for z in first..<end:
+        for y in 0..<counts[1]:
+            for x in 0..<counts[0]:
+                let index = Vector3((f64)work.origin[0] - 0.5 + ((f64)x + 0.5) * span, (f64)work.origin[1] - 0.5 + ((f64)y + 0.5) * span,
+                                    (f64)work.origin[2] - 0.5 + ((f64)z + 0.5) * span)
+                let value = sampler.sample(work.grid.transform.transform_point(index))
+                work.texels[work.layout.at(x, y, z) * 4 + 3] = (f16)math.clamp(value, 0.0, deepest)
 
 # mark: Optical depths
 

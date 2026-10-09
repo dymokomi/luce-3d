@@ -48,5 +48,7 @@ texture, shadow, skinning, model-loading or general shader API.
 `tests/fog_pixels` builds a fog ball through luce-geocore's grid API and draws
 it offscreen: lit smoke in its middle, fading to the clear past its edge, a
 quad in front hiding it and one behind showing through it, one atlas upload
-over several draws, and emission glowing its color. It ends by printing the GPU
+over several draws and a denser look, and a look on the geometry: a heat
+grid emitting orange, left out of the smoke grids, its look's scale outside
+the key. It ends by printing the GPU
 time of a 128³ ball filling 2800×1800 pixels (report only).

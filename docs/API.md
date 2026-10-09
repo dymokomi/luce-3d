@@ -39,7 +39,7 @@ mesh is not a per-vertex `Geometry`; `MeshGeometry` wraps it for that path).
 | `Knife`, `KnifePlane` | A knife stroke on screen: `Knife.plane(camera,x0,y0,x1,y1,width,height)` is the plane through the eye holding the stroke (a point and a unit normal, for Clip's custom plane), `faces_under(mesh,camera,...)` the faces the line passes over, `snapped(x0,y0,x1,y1)` the end at the nearest 15 degrees. |
 | `WireRenderer` | `lines(points,camera,target,color,width=1,bias=0.000001,depth=true)` draws independent world endpoint pairs at constant logical-pixel width; near clipped and depth tested (`depth=false`: over everything). `triangles(points,camera,target,color)` draws depth-tested selection fills. Uses the existing target depth buffer; current GPU API also writes depth. |
 | `WireBatch` | Retained endpoint pairs drawn at constant pixel width (`draw(camera,target,color,width)`); `count()` segments and `bounds()` for framing. |
-| `FogVolume`, `FogLook` | A fog grid of a luce-geocore set, ray-marched on the GPU as smoke (see below): `FogVolume.of(geometry,index,matrix=identity,light=(3,5,2))` the `index`th non-empty fog grid of the set's own volume, placed by `matrix`, its self-shadowing swept toward `light`; `FogVolume.count(geometry)` how many there are. `draw(camera,target,key=(0.85,0.85,0.85),ambient=0.35)` draws it over what the target holds; `set_look(look)` sets `FogLook` (`density` scale, `color`, `step` in voxels 0.25..8, `emission`), uploading nothing; `bounds()` (the world box, for framing), `peak()`, `texels(axis)` and `upload_count()` (one, on the first draw) for tests. Base callers: `fog_volume_of(set,index,matrix,light)` makes a heap volume (on a worker; adopt it with `fog_volume_type`), `fog_grid_count(set)`, and `release_fog_pipelines()` frees the shared shader. |
+| `FogVolume`, `FogLook` | A fog grid of a luce-geocore set, ray-marched on the GPU as smoke (see below): `FogVolume.of(geometry,index,matrix=identity,light=(3,5,2))` the `index`th smoke grid of the set's own volume (its non-empty fog grids but the look's emission field), placed by `matrix`, its self-shadowing swept toward `light`, drawn with the set's look; `FogVolume.count(geometry)` how many there are; `FogVolume.key(geometry,index,matrix,light)` what its texels are made from (grid contents, emission field, placement, light), equal for a changed look; `FogVolume.look_of(geometry)` the set's look. `draw(camera,target,key=(0.85,0.85,0.85),ambient=0.35)` draws it over what the target holds; `set_look(look)` sets `FogLook` (`density` scale, smoke `color`, `shadow` scale, `emission` scale and `emission_color`, `step` in voxels 0.25..8), uploading nothing; `bounds()` (the world box, for framing), `peak()`, `texels(axis)` and `upload_count()` (one, on the first draw) for tests. Base callers: `fog_volume_of(set,index,matrix,light)` makes a heap volume (on a worker; adopt it with `fog_volume_type`), `fog_volume_key`, `fog_look_of`, `fog_grid_count(set)`, and `release_fog_pipelines()` frees the shared shader. |
 | `CurveLines` | The curves of a luce-geocore `GeometrySet` as wire batches: `batch(geometry)` draws every evaluated curve (instances placed), `batch(geometry, true)` the control hulls (control polygons of smooth curves, Bezier handle arms, a cross per control point); `count(geometry)` segments. Base code appends the same endpoint pairs with `append_curve_segments(set, matrix, lines, hulls)`, extracted in parallel from the evaluated-curve cache. |
 | `SurfaceHits` | Where a view ray meets the scene: `cast(root,origin,direction)` returns the nearest face of any visible polygon object under `root` (each placed by its parents, hit through its BVH) as a `SurfaceHit` (`found`, world `point`, unit `normal`, `distance`); `plane(origin,direction,point,normal)` meets a construction plane. |
 
@@ -79,7 +79,8 @@ smoke), split between the CPU, once per grid, and the GPU, per frame:
 - **Texels** (`renderers/fog_texels.lucb`). The grid's leaves span a box of
   voxels; the box, padded by a texel of background, becomes a dense texel box
   whose z slices sit side by side in one `rgba16_float` atlas texture (red the
-  density, green the optical depth toward the key light, blue toward the sky).
+  density, green the optical depth toward the key light, blue toward the sky,
+  alpha the look's emission field, sampled from that grid at texel centers).
   luce-gpu has no 3D textures, and a 2D atlas of slices filters bilinearly in
   hardware on every backend: the shader adds the linear step between two
   slices. Leaves wider than 256³ texels (or an atlas past 16384 texels a side)
@@ -92,11 +93,17 @@ smoke), split between the CPU, once per grid, and the GPU, per frame:
   `gpu.shade_triangles` draw whose vertex colors are box coordinates. Each
   fragment marches its slab's stretch of the eye ray front to back, with
   per-pixel jittered steps (interleaved gradient noise): Beer–Lambert
-  absorption, single scattering of the key light (`exp(-depth_light × scale)`)
-  and of the sky, or plain emission. It emits premultiplied color, so slabs
+  absorption, single scattering of the key light
+  (`exp(-depth_light × density × shadow)`) and of the sky, and emission
+  (`field × emission × emission_color` per world unit). It emits premultiplied color, so slabs
   composite over one another and over the scene. The pipeline is depth tested
   without writing depth: a mesh in front hides the fog, the fog veils what lies
   behind it, and a mesh inside it cuts it to within one slab.
+
+The look comes from the geometry: luce-geocore's Volume Visualization verb
+puts volvis_* detail attributes on the set (`volume_look`), and `look_of`
+turns them into a `FogLook`. A new look keeps the grids, and so the key: a
+display holding volumes by `key` only calls `set_look`.
 
 The atlas uploads on the first draw and the CPU copy is freed; later draws
 (camera moves, a new look) upload nothing. The shader and its pipelines are

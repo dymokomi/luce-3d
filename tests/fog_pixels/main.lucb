@@ -12,7 +12,7 @@ import memory
 from luce_3d import graphics as three
 from luce_3d.graphics import FogVolume, FogLook, PerspectiveCamera, WireRenderer, Vector3, Matrix4, release_fog_pipelines
 from luce_geocore.geocore import GeometrySet
-from luce_geocore.kernel import GridClass, grid_of_leaves, key_leaf, leaf_key, new_volume, add_grid, volume_type, empty_set, adopt_set, release_volume, dispose_set
+from luce_geocore.kernel import GridClass, grid_of_leaves, key_leaf, leaf_key, new_volume, add_grid, volume_type, empty_set, adopt_set, release_volume, dispose_set, VolumeLook, put_volume_look
 
 let width: u32 = 160
 let height: u32 = 120
@@ -37,8 +37,9 @@ func fill_ball(context: void*?, leaf: usize, key: u64, values: f32[], mask: u64[
                 values[(usize)(i + j * 8 + k * 64)] = (f32)math.max(0.0, 1.0 - r)
     for at in 0..<mask.length: mask[at] = 0xFFFFFFFFFFFFFFFF
 
-## A set holding one fog grid: a ball of `radius` voxels, each `voxel` wide.
-func fog_ball(radius: i64, voxel: f64) -> interop.Reference[GeometrySet]!:
+## A set holding one fog grid: a ball of `radius` voxels, each `voxel` wide;
+## with `heat`, a second fog grid "heat" holding the same ball.
+func fog_ball(radius: i64, voxel: f64, heat: bool = false) -> interop.Reference[GeometrySet]!:
     let leaves = (radius + 7) // 8
     let side = (usize)(leaves * 2)
     let keys = try new u64[side * side * side] --- in memory.heap
@@ -51,13 +52,20 @@ func fog_ball(radius: i64, voxel: f64) -> interop.Reference[GeometrySet]!:
                 at += 1
     var ball = Ball((f64)radius)
     let transform = Matrix4(Vector3(voxel, 0.0, 0.0), Vector3(0.0, voxel, 0.0), Vector3(0.0, 0.0, voxel), Vector3())
-    let grid = try grid_of_leaves("density", GridClass.fog, 0.0, transform, keys, fill_ball, (void*)&ball)
     let volume = try new_volume()
     errdefer release_volume(volume)
-    try add_grid(volume, grid)
+    try add_grid(volume, try grid_of_leaves("density", GridClass.fog, 0.0, transform, keys, fill_ball, (void*)&ball))
+    if heat: try add_grid(volume, try grid_of_leaves("heat", GridClass.fog, 0.0, transform, keys, fill_ball, (void*)&ball))
     let storage = try empty_set()
     errdefer dispose_set(storage)
     try storage.put(volume_type(), (void*)volume)
+    return try adopt_set(storage)
+
+## `fog` with `look` as its volvis_* details (what Volume Visualization does).
+func with_look(fog: interop.Reference[GeometrySet], look: const VolumeLook*) -> interop.Reference[GeometrySet]!:
+    let storage = try fog.value().storage()
+    errdefer dispose_set(storage)
+    try put_volume_look(storage, look)
     return try adopt_set(storage)
 
 struct View:
@@ -156,14 +164,40 @@ pub func main(arguments: str[]) -> i32!:
     assert(pr == 0 and pg == 0 and pb == 255)
     # Drawn again: nothing uploaded.
     assert(volume.value().upload_count() == 1)
-    # Emission glows its color.
-    look.emission = true
-    look.color = gpu.Color(1.0, 0.2, 0.0)
+    # Thicker smoke: a look change redraws differently and uploads nothing.
+    look.density = 16.0
     try volume.value().set_look(look)
     _ = try view.draw(volume, none_quads, image)
+    let thick = luminance(image, 80, 60)
+    assert(math.abs((f64)(thick - middle)) > 10.0 and volume.value().upload_count() == 1)
+    # The look on the geometry (Volume Visualization's details): a heat grid
+    # (the ball again) emits orange and is not drawn as smoke itself. Looks
+    # naming the same field share a key; another emission scale is a look
+    # change only.
+    let hot = try fog_ball(32, 1.0 / 32.0, true)
+    defer hot.release()
+    assert((try FogVolume.count(hot)) == 2)
+    var glow = VolumeLook()
+    glow.density = 4.0
+    glow.emission = 6.0
+    glow.emission_color = Vector3(1.0, 0.4, 0.0)
+    glow.emission_field = "heat"
+    let glowing = try with_look(hot, &glow)
+    defer glowing.release()
+    glow.emission = 1.0
+    let dimmer = try with_look(hot, &glow)
+    defer dimmer.release()
+    assert((try FogVolume.count(glowing)) == 1 and (try FogVolume.key(glowing, 0)) == (try FogVolume.key(dimmer, 0)))
+    assert((try FogVolume.look_of(dimmer)).emission == 1.0 and (try FogVolume.look_of(hot)).emission == 0.0)
+    let fire = try FogVolume.of(glowing, 0)
+    defer fire.release()
+    assert(fire.value().look().emission == 6.0 and fire.value().look().density == 4.0)
+    _ = try view.draw(fire, none_quads, image)
     let (er, eg, eb) = pixel(image, 80, 60)
-    assert(er > 150 and eg < er and eb <= 30)
-    print("PASS fog volume: lit middle, fading edge, occlusion both ways, one upload, emission")
+    # Orange added to the white smoke (121 in the middle): red and green
+    # rise, blue stays.
+    assert(er > 200 and er >= eg and eg > eb + 60 and eb < 160)
+    print("PASS fog volume: lit middle, fading edge, occlusion both ways, one upload, density and emission looks from the geometry")
     try timing(device)
     return 0
 
