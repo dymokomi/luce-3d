@@ -143,6 +143,17 @@ pub struct GaussianSplats:
         self.marks_key = chosen.key()
         self.marks_changed = true
 
+    ## The id of the positions it was packed from, as luce-geocore's
+    ## `Mesh.positions_id` gives it: a mesh sharing the cloud's points (an
+    ## Edit node's pick mesh) has the same id. Its selection tints this cloud
+    ## and no other cloud of the same size.
+    pub func source_id() -> i64:
+        return (i64)(self.data.source >> 1)
+
+    ## Whether a selection is tinted on it (`set_marks`).
+    pub func has_marks() -> bool:
+        return self.marks.length > 0
+
     ## Points it draws.
     pub func size() -> i64:
         return (i64)self.data.count

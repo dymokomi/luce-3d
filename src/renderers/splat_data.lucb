@@ -56,6 +56,9 @@ pub struct SplatData:
     pub let srgb: bool
     ## Gaussian splats (orient, scale, opacity) rather than plain points.
     pub let splats: bool
+    ## The packed cloud's positions column id (luce-geocore's change ids):
+    ## which cloud it is, whatever else has as many points.
+    pub let source: u64
     ## Trained with Mip-Splatting's 2D filter (detail `gsplat_antialiased`):
     ## the projection compensates the low-pass's opacity.
     pub let antialiased: bool
@@ -172,7 +175,7 @@ pub func splat_data(set: const GeometrySet*, matrix: Matrix4) -> SplatData!:
     let sh_index = sh_attribute(store)
     if splats and sh_index >= 0: harmonics_source = store.entry((usize)sh_index)
     var data = SplatData(count = count, items = items, stride = stride, origin = origin, rotation = rotation, srgb = splats and space == ColorSpace.srgb,
-                         splats = splats, antialiased = splats and is_antialiased(set), low = Vector3(), high = Vector3())
+                         splats = splats, source = cloud_positions_id(cloud), antialiased = splats and is_antialiased(set), low = Vector3(), high = Vector3())
     errdefer data.close()
     data.centers = try new f32[count * 4] --- in memory.heap
     data.colors = try new f16[count * 4] --- in memory.heap
