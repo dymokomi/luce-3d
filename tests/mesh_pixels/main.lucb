@@ -167,7 +167,8 @@ func picking(view: View*, cube: interop.Reference[geocore.Mesh], image: u8[]) ->
 func two_sided(view: View*, cube: interop.Reference[geocore.Mesh], outward: u8[], image: u8[]) -> !:
     try view.show(cube, false)
     try view.draw(outward)
-    let reversing = try Verbs.run("Reverse", cube, "", 0, [0.0])
+    var nothing: f64[]
+    let reversing = try Verbs.run("Reverse", cube, "", 0, nothing)
     defer reversing.release()
     let reversed = try reversing.value().mesh()
     defer reversed.release()
