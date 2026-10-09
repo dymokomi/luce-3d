@@ -1,0 +1,37 @@
+## Offscreen checks of Gaussian splats (GaussianSplats): pixels against the
+## formulas they come from, depth order and occlusion both ways, SH colors
+## against luce-geocore's display_color, dots, one upload per cloud, and the
+## GPU radix sort against a CPU sort. The run ends with GPU times per step at
+## 1M, 3M and 6M synthetic splats in a 2800×1800 view (report only; set
+## SPLAT_TIMINGS=0 to skip them).
+from luce_gpu import gpu
+import os
+from luce_std import process
+from luce_3d.graphics import release_splat_pipelines
+import pixels
+import sorting
+import timings
+
+pub func main(arguments: str[]) -> i32!:
+    _ = arguments
+    try os.set_env("MTL_DEBUG_LAYER", "1")
+    var device = gpu.Device.open() catch failure:
+        if failure.code == gpu.unavailable:
+            print("skip: no GPU device")
+            return 0
+        error(failure.code, failure.message)
+    defer device.destroy()
+    defer release_splat_pipelines()
+    try sorting.checks(device)
+    try pixels.falloff(device)
+    try pixels.depth_order(device)
+    try pixels.occlusion(device)
+    try pixels.harmonics(device)
+    try pixels.dots(device)
+    try pixels.uploads(device)
+    print("PASS gaussian splats: analytic falloff, depth order both ways, occlusion both ways, display_color, dots, one upload, GPU sort")
+    let wanted = process.variable("SPLAT_TIMINGS") else "1"
+    if wanted != "0":
+        for count in [(usize)1000000, 3000000, 6000000]:
+            try timings.report(device, count)
+    return 0

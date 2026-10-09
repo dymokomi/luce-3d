@@ -1,0 +1,42 @@
+// LSD radix sort, pass step 1: each workgroup counts the 4-bit digits at
+// `shift` of its tile of 2048 keys. The counts go digit-major
+// (histogram[digit * tiles + tile]), so one exclusive scan of them gives
+// every tile's start for every digit. The key count and the tile count are
+// the arguments an earlier kernel wrote (arguments[7], arguments[4]).
+// Counters live in shared memory, one column per invocation: indexing a
+// private array by a key's digit would put it in slow scratch memory on some
+// GPUs, and one shared counter per digit would serialize atomics.
+#version 450
+layout(local_size_x = 128) in;
+layout(push_constant) uniform Params { uint shift; } p;
+layout(std430, binding = 0) readonly buffer Keys { uint keys[]; };
+layout(std430, binding = 1) writeonly buffer Histogram { uint histogram[]; };
+layout(std430, binding = 2) readonly buffer Arguments { uint arguments[]; };
+
+shared uint table[2048];  // [digit * 128 + invocation]
+shared uint partial[128];
+
+void main() {
+    uint local = gl_LocalInvocationID.x;
+    uint tile = gl_WorkGroupID.x;
+    uint count = arguments[7];
+    uint tiles = arguments[4];
+    for (uint d = 0u; d < 16u; d++) table[d * 128u + local] = 0u;
+    for (uint j = 0u; j < 16u; j++) {
+        uint i = tile * 2048u + j * 128u + local;
+        if (i < count) table[((keys[i] >> p.shift) & 15u) * 128u + local] += 1u;
+    }
+    barrier();
+    // Eight invocations a digit each sum sixteen columns, then one per digit sums those.
+    uint digit = local >> 3u;
+    uint part = local & 7u;
+    uint sum = 0u;
+    for (uint k = 0u; k < 16u; k++) sum += table[digit * 128u + part * 16u + k];
+    partial[local] = sum;
+    barrier();
+    if (local < 16u) {
+        uint total = 0u;
+        for (uint k = 0u; k < 8u; k++) total += partial[local * 8u + k];
+        histogram[local * tiles + tile] = total;
+    }
+}

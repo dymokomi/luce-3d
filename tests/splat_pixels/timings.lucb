@@ -1,0 +1,48 @@
+## GPU times per step of `count` synthetic splats (degree 3) in a 2800×1800
+## view, as a 1400×900 window at 2x shows them: CPU packing, then for a few
+## orbiting views the projection, gathering, sort and quad draw, and a view
+## at rest (the draw alone). Report only.
+from luce_gpu import gpu
+import interop
+from luce_std import math, clock
+from luce_3d.graphics import GaussianSplats, SplatTimes, Vector3
+import clouds
+from views import View, Wall
+
+let frames: usize = 6
+
+pub func report(device: gpu.Device, count: usize) -> !:
+    let set = try clouds.random_set(count, 2.0, 0.0005, 0.006, 15, 11)
+    defer set.release()
+    let packing = clock.now()
+    let cloud = try GaussianSplats.of(set)
+    defer cloud.release()
+    let packed = packing.elapsed().seconds() * 1000.0
+    var view = try View(device, 2800, 1800, false)
+    defer view.close()
+    let shown: interop.Reference[GaussianSplats][1] = [cloud]
+    var walls: Wall[]
+    var device_handle = device
+    # The first frame uploads.
+    try view.look_from(Vector3(0.0, 0.5, 5.0))
+    try device_handle.wait(try view.draw(shown, walls))
+    var total = SplatTimes(project = 0.0, compact = 0.0, sort = 0.0, visible = 0)
+    var raster = 0.0
+    for frame in 0..<frames:
+        let angle = 0.15 * (f64)(frame + 1)
+        try view.look_from(Vector3(5.0 * math.sin(angle), 0.5, 5.0 * math.cos(angle)))
+        let submission = try view.draw(shown, walls)
+        try device_handle.wait(submission)
+        let times = try cloud.value().timings()
+        total.project += times.project
+        total.compact += times.compact
+        total.sort += times.sort
+        total.visible += times.visible
+        if let span = try device_handle.gpu_time(submission): raster += (f64)span.elapsed() / 1.0e6
+    let n = (f64)frames
+    let rest_submission = try view.draw(shown, walls)
+    try device_handle.wait(rest_submission)
+    var rest = 0.0
+    if let span = try device_handle.gpu_time(rest_submission): rest = (f64)span.elapsed() / 1.0e6
+    let steps = (total.project + total.compact + total.sort) / n + raster / n
+    print(f"splats {count}: pack {packed:.0f} ms (CPU); per view: project {total.project / n:.2f} ms, gather {total.compact / n:.2f} ms, sort {total.sort / n:.2f} ms, draw {raster / n:.2f} ms, total {steps:.2f} ms ({1000.0 / steps:.0f} fps), visible {total.visible // (i64)frames}; at rest {rest:.2f} ms")

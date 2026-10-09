@@ -1,0 +1,100 @@
+## A GPU LSD radix sort of u32 keys with u32 values, 4 bits a pass, portable
+## across Metal and Vulkan: each pass counts digits per tile of 2048 keys
+## (shaders/radix_count.comp), scans the counts in one workgroup
+## (radix_scan.comp), and sorts each tile in shared memory stably before
+## writing its digits' runs out whole (radix_scatter.comp). It assumes no
+## forward progress between workgroups (Onesweep does, which Metal does not
+## promise), so it is reduce-then-scan, as FidelityFX's parallel sort is. The
+## key count comes from the GPU: an earlier kernel writes it into the
+## arguments buffer (`radix_arguments`), so a compute pass culls and sorts
+## without a round trip through the CPU. Gaussian splats sort their depth
+## keys with it, back to front.
+from luce_gpu import gpu
+import errors
+from renderers.splat_shaders import radix_count_comp_words, radix_count_comp_msl, radix_count_comp_group, radix_count_comp_bindings
+from renderers.splat_shaders import radix_scan_comp_words, radix_scan_comp_msl, radix_scan_comp_group, radix_scan_comp_bindings
+from renderers.splat_shaders import radix_scatter_comp_words, radix_scatter_comp_msl, radix_scatter_comp_group, radix_scatter_comp_bindings
+
+## Keys a workgroup of the sort takes.
+let tile_keys: usize = 2048
+## The most keys one sort takes: 2^26, 32768 tiles.
+pub let radix_limit: usize = 67108864
+
+## The arguments buffer's words for `count` keys, as an earlier kernel writes
+## them: a quad draw of the keys (luce-gpu's quad_arguments), the sort's workgroups
+## (tiles, 1, 1) and the count.
+pub func radix_arguments(count: u32) -> u32[8]:
+    return [4, count, 0, 0, (count + 2047) // 2048, 1, 1, count]
+
+## The sort's kernels and scratch for up to `capacity` keys on one device:
+## the second keys and values buffers the passes alternate with, and the
+## per-tile digit counts.
+pub struct RadixSort:
+    var count_kernel: gpu.Kernel
+    var scan_kernel: gpu.Kernel
+    var scatter_kernel: gpu.Kernel
+    var keys: gpu.Buffer
+    var values: gpu.Buffer
+    var histogram: gpu.Buffer
+    let capacity: usize
+
+    ## Scratch for `capacity` keys (1..radix_limit) on `device`.
+    pub static func create(device: gpu.Device, capacity: usize) -> RadixSort!:
+        if capacity == 0 or capacity > radix_limit:
+            error(errors.invalid, "a radix sort takes 1 to 2^26 keys")
+        var sort = RadixSort(capacity = capacity)
+        errdefer sort.destroy()
+        sort.count_kernel = try gpu.Kernel.create(device, radix_count_comp_words, radix_count_comp_msl, radix_count_comp_group, radix_count_comp_bindings)
+        sort.scan_kernel = try gpu.Kernel.create(device, radix_scan_comp_words, radix_scan_comp_msl, radix_scan_comp_group, radix_scan_comp_bindings)
+        sort.scatter_kernel = try gpu.Kernel.create(device, radix_scatter_comp_words, radix_scatter_comp_msl, radix_scatter_comp_group, radix_scatter_comp_bindings)
+        sort.keys = try gpu.Buffer.allocate(device, capacity * 4)
+        sort.values = try gpu.Buffer.allocate(device, capacity * 4)
+        let tiles = (capacity + tile_keys - 1) // tile_keys
+        sort.histogram = try gpu.Buffer.allocate(device, tiles * 16 * 4)
+        return sort
+
+    ## The most keys it sorts.
+    pub func size() -> usize:
+        return self.capacity
+
+    ## Record into `pass` the sort of `keys` and `values` (u32 each, at least
+    ## the count long) by their low `bits` bits (8, 16, 24 or 32): ascending,
+    ## stable, the result back in `keys` and `values`. The count and the
+    ## tiles are read from `arguments` when the pass runs (`radix_arguments`;
+    ## words 4 and 7), at most the capacity.
+    pub func record(pass: gpu.Compute*, keys: gpu.Buffer, values: gpu.Buffer, arguments: gpu.Buffer, bits: u32) -> !:
+        if bits == 0 or bits > 32 or bits % 8 != 0:
+            error(errors.invalid, "a radix sort orders 8, 16, 24 or 32 bits")
+        if keys.bytes() < self.capacity * 4 or values.bytes() < self.capacity * 4:
+            error(errors.invalid, "a radix sort's keys and values hold its capacity")
+        var source_keys = keys
+        var source_values = values
+        var target_keys = self.keys
+        var target_values = self.values
+        var shift: u32 = 0
+        while shift < bits:
+            var uniforms: u32[1] = [shift]
+            let shift_bytes = u8[]((u8*)&uniforms[0], 4)
+            let counting: gpu.Binding[3] = [gpu.Binding(buffer = source_keys), gpu.Binding(buffer = self.histogram), gpu.Binding(buffer = arguments)]
+            try pass.dispatch_indirect(self.count_kernel, counting, shift_bytes, arguments, 16)
+            let scanning: gpu.Binding[2] = [gpu.Binding(buffer = self.histogram), gpu.Binding(buffer = arguments)]
+            try pass.dispatch(self.scan_kernel, scanning, shift_bytes, 1)
+            let scattering: gpu.Binding[6] = [gpu.Binding(buffer = source_keys), gpu.Binding(buffer = source_values), gpu.Binding(buffer = target_keys),
+                                              gpu.Binding(buffer = target_values), gpu.Binding(buffer = self.histogram), gpu.Binding(buffer = arguments)]
+            try pass.dispatch_indirect(self.scatter_kernel, scattering, shift_bytes, arguments, 16)
+            let keys_now = source_keys
+            let values_now = source_values
+            source_keys = target_keys
+            source_values = target_values
+            target_keys = keys_now
+            target_values = values_now
+            shift += 4
+
+    ## Release the kernels and scratch.
+    pub func destroy():
+        self.count_kernel.destroy()
+        self.scan_kernel.destroy()
+        self.scatter_kernel.destroy()
+        self.keys.destroy()
+        self.values.destroy()
+        self.histogram.destroy()

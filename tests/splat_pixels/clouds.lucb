@@ -1,0 +1,139 @@
+## Splat clouds for the checks: a few hand-placed splats, or millions drawn
+## at random, as luce-geocore point clouds with the splat conventions
+## (orient, scale, opacity, linear Cd, the `sh` array, optional restorient).
+import interop
+import memory
+from luce_std import math
+from luce_geocore.geocore import Vector3, GeometrySet
+from luce_geocore.kernel import Attribute, AttributeStore, Domain, DataType, Float3, empty_set, adopt_set, dispose_set, points_component, cloud_assembled
+from luce_geocore.core.shared import Column
+from luce_geocore.splats import Quat
+
+## One splat as the checks describe it.
+pub struct Splat:
+    pub var center: Vector3
+    pub var orient: Quat = Quat(0.0, 0.0, 0.0, 1.0)
+    pub var scale: Vector3 = Vector3(0.1, 0.1, 0.1)
+    pub var opacity: f64 = 1.0
+    ## Linear.
+    pub var color: Vector3 = Vector3(0.5, 0.5, 0.5)
+
+## Seeded draws (SplitMix64), so every run sees the same clouds.
+pub struct Draws:
+    pub var state: u64
+
+    pub func next() -> u64:
+        self.state = self.state +% 0x9E3779B97F4A7C15
+        var z = self.state
+        z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) *% 0x94D049BB133111EB
+        return z ^ (z >> 31)
+
+    ## Uniform in [0, 1).
+    pub func unit() -> f64:
+        return (f64)(self.next() >> 11) / 9007199254740992.0
+
+    ## Uniform in [low, high).
+    pub func between(low: f64, high: f64) -> f64:
+        return low + (high - low) * self.unit()
+
+## A set holding `splats`, with `items` SH items each from `sh` (items × 3 per
+## splat, or none: zeros), and `restorient` per splat when given.
+pub func splat_set(splats: const Splat[], items: usize, sh: const f32[]? = none, restorient: const Quat[]? = none) -> interop.Reference[GeometrySet]!:
+    let count = splats.length
+    var store = AttributeStore()
+    let orient = try Attribute.create("orient", Domain.point, DataType.float32, 4, count)
+    let scale = try Attribute.create("scale", Domain.point, DataType.float32, 3, count)
+    let opacity = try Attribute.create("opacity", Domain.point, DataType.float32, 1, count)
+    let color = try Attribute.create("Cd", Domain.point, DataType.float32, 3, count)
+    let o = f32[]((f32*)orient.data.span().data, count * 4)
+    let s = f32[]((f32*)scale.data.span().data, count * 3)
+    let a = f32[]((f32*)opacity.data.span().data, count)
+    let c = f32[]((f32*)color.data.span().data, count * 3)
+    var positions = try Column[Float3].allocate(count)
+    let out = positions.span()
+    for at in 0..<count:
+        let splat = splats[at]
+        out[at] = Float3.of(splat.center)
+        o[at * 4] = (f32)splat.orient.x
+        o[at * 4 + 1] = (f32)splat.orient.y
+        o[at * 4 + 2] = (f32)splat.orient.z
+        o[at * 4 + 3] = (f32)splat.orient.w
+        s[at * 3] = (f32)splat.scale.x
+        s[at * 3 + 1] = (f32)splat.scale.y
+        s[at * 3 + 2] = (f32)splat.scale.z
+        a[at] = (f32)splat.opacity
+        c[at * 3] = (f32)splat.color.x
+        c[at * 3 + 1] = (f32)splat.color.y
+        c[at * 3 + 2] = (f32)splat.color.z
+    for made in [orient, scale, opacity, color]: try store.put(made)
+    if items > 0:
+        var offsets = try Column[u8].allocate((count + 1) * 4)
+        let bounds = u32[]((u32*)offsets.span().data, count + 1)
+        for at in 0..<count + 1: bounds[at] = (u32)(at * items)
+        var values = try Column[u8].allocate(count * items * 12)
+        let items_out = f32[]((f32*)values.span().data, count * items * 3)
+        for at in 0..<items_out.length: items_out[at] = 0.0
+        if let given = sh:
+            for at in 0..<items_out.length: items_out[at] = given[at]
+        try store.put(try Attribute.ragged("sh", Domain.point, DataType.float32, 3, offsets, values))
+    if let rest = restorient:
+        let made = try Attribute.create("restorient", Domain.point, DataType.float32, 4, count)
+        let r = f32[]((f32*)made.data.span().data, count * 4)
+        for at in 0..<count:
+            r[at * 4] = (f32)rest[at].x
+            r[at * 4 + 1] = (f32)rest[at].y
+            r[at * 4 + 2] = (f32)rest[at].z
+            r[at * 4 + 3] = (f32)rest[at].w
+        try store.put(made)
+    return try finish(positions, store)
+
+## A plain cloud: `points` colored `colors` (linear), no splat attributes.
+pub func point_set(points: const Vector3[], colors: const Vector3[]) -> interop.Reference[GeometrySet]!:
+    var store = AttributeStore()
+    let color = try Attribute.create("Cd", Domain.point, DataType.float32, 3, points.length)
+    let c = f32[]((f32*)color.data.span().data, points.length * 3)
+    var positions = try Column[Float3].allocate(points.length)
+    let out = positions.span()
+    for at in 0..<points.length:
+        out[at] = Float3.of(points[at])
+        c[at * 3] = (f32)colors[at].x
+        c[at * 3 + 1] = (f32)colors[at].y
+        c[at * 3 + 2] = (f32)colors[at].z
+    try store.put(color)
+    return try finish(positions, store)
+
+## `count` random splats in a ball of `radius`: random rotations, standard
+## deviations log-uniform in `smallest`..`largest`, opacities 0.05..1,
+## colors and `items` SH items of each band at random (degree 3 with 15).
+pub func random_set(count: usize, radius: f64, smallest: f64, largest: f64, items: usize, seed: u64) -> interop.Reference[GeometrySet]!:
+    var draws = Draws(state = seed)
+    let splats = try new Splat[count] --- in memory.heap
+    defer free(splats) in memory.heap
+    let low = math.log(smallest)
+    let high = math.log(largest)
+    for at in 0..<count:
+        var p = Vector3(draws.between(-1.0, 1.0), draws.between(-1.0, 1.0), draws.between(-1.0, 1.0))
+        while p.length() > 1.0:
+            p = Vector3(draws.between(-1.0, 1.0), draws.between(-1.0, 1.0), draws.between(-1.0, 1.0))
+        let q = Quat(draws.between(-1.0, 1.0), draws.between(-1.0, 1.0), draws.between(-1.0, 1.0), draws.between(-1.0, 1.0)).normalized()
+        splats[at] = Splat(center = p.multiply_scalar(radius), orient = q,
+                           scale = Vector3(math.exp(draws.between(low, high)), math.exp(draws.between(low, high)), math.exp(draws.between(low, high))),
+                           opacity = draws.between(0.05, 1.0), color = Vector3(draws.unit(), draws.unit(), draws.unit()))
+    if items == 0: return try splat_set(splats, 0)
+    let sh = try new f32[count * items * 3] --- in memory.heap
+    defer free(sh) in memory.heap
+    for at in 0..<sh.length: sh[at] = (f32)draws.between(-0.15, 0.15)
+    return try splat_set(splats, items, sh)
+
+## The set holding a cloud of `positions` and `store` (both taken).
+func finish(positions: Column[Float3], store: AttributeStore) -> interop.Reference[GeometrySet]!:
+    let cloud = try cloud_assembled(positions, Vector3(), store)
+    let storage = empty_set() catch failure:
+        let close = points_component().close
+        close((void*)cloud)
+        error(failure.code, failure.message)
+    storage.put(points_component(), (void*)cloud) catch failure:
+        dispose_set(storage)
+        error(failure.code, failure.message)
+    return try adopt_set(storage)

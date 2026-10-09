@@ -1,0 +1,96 @@
+// LSD radix sort, pass step 3: each workgroup sorts its tile of 2048 keys by
+// the digit at `shift` in shared memory, then writes each digit's run where
+// the scanned histogram puts it, consecutive invocations writing consecutive
+// places. Invocation n ranks the tile's keys n*16..n*16+15 in order after
+// those of invocations before it (a scan over the workgroup per digit), so the
+// pass is stable, as LSD needs. Counters live in shared memory columns, never
+// in private arrays indexed by a digit (scratch memory on some GPUs).
+#version 450
+layout(local_size_x = 128) in;
+layout(push_constant) uniform Params { uint shift; } p;
+layout(std430, binding = 0) readonly buffer KeysIn { uint keys_in[]; };
+layout(std430, binding = 1) readonly buffer ValuesIn { uint values_in[]; };
+layout(std430, binding = 2) writeonly buffer KeysOut { uint keys_out[]; };
+layout(std430, binding = 3) writeonly buffer ValuesOut { uint values_out[]; };
+layout(std430, binding = 4) readonly buffer Histogram { uint histogram[]; };
+layout(std430, binding = 5) readonly buffer Arguments { uint arguments[]; };
+
+shared uint tile_keys[2048];
+shared uint tile_values[2048];
+shared uint table[2048];  // [digit * 128 + invocation]
+shared uint digit_start[16];   // where each digit's run starts in the sorted tile
+shared uint digit_target[16];  // and in the output
+
+void main() {
+    uint local = gl_LocalInvocationID.x;
+    uint tile = gl_WorkGroupID.x;
+    uint count = arguments[7];
+    uint tiles = arguments[4];
+    uint base = tile * 2048u;
+    uint size = min(count - min(base, count), 2048u);
+    // The tile, read coalesced, then each invocation's 16 keys in order.
+    for (uint j = 0u; j < 16u; j++) {
+        uint e = j * 128u + local;
+        if (e < size) {
+            tile_keys[e] = keys_in[base + e];
+            tile_values[e] = values_in[base + e];
+        }
+    }
+    for (uint d = 0u; d < 16u; d++) table[d * 128u + local] = 0u;
+    barrier();
+    uint own_keys[16];
+    uint own_values[16];
+    for (uint j = 0u; j < 16u; j++) {
+        uint e = local * 16u + j;
+        own_keys[j] = e < size ? tile_keys[e] : 0u;
+        own_values[j] = e < size ? tile_values[e] : 0u;
+        if (e < size) table[((own_keys[j] >> p.shift) & 15u) * 128u + local] += 1u;
+    }
+    barrier();
+    // Inclusive scans along the invocations, all 16 digits at once.
+    for (uint step = 1u; step < 128u; step <<= 1u) {
+        uint sums[16];
+        for (uint d = 0u; d < 16u; d++) {
+            sums[d] = table[d * 128u + local];
+            if (local >= step) sums[d] += table[d * 128u + local - step];
+        }
+        barrier();
+        for (uint d = 0u; d < 16u; d++) table[d * 128u + local] = sums[d];
+        barrier();
+    }
+    if (local == 0u) {
+        uint running = 0u;
+        for (uint d = 0u; d < 16u; d++) {
+            digit_start[d] = running;
+            running += table[d * 128u + 127u];
+            digit_target[d] = histogram[d * tiles + tile];
+        }
+    }
+    // Where this invocation's first key of each digit goes in the sorted tile.
+    uint starts[16];
+    for (uint d = 0u; d < 16u; d++) starts[d] = local > 0u ? table[d * 128u + local - 1u] : 0u;
+    barrier();
+    for (uint d = 0u; d < 16u; d++) table[d * 128u + local] = starts[d] + digit_start[d];
+    for (uint j = 0u; j < 16u; j++) {
+        uint e = local * 16u + j;
+        if (e < size) {
+            uint slot = ((own_keys[j] >> p.shift) & 15u) * 128u + local;
+            uint at = table[slot];
+            table[slot] = at + 1u;
+            tile_keys[at] = own_keys[j];
+            tile_values[at] = own_values[j];
+        }
+    }
+    barrier();
+    // Each digit's run to its place, consecutive invocations writing consecutive words.
+    for (uint j = 0u; j < 16u; j++) {
+        uint e = j * 128u + local;
+        if (e < size) {
+            uint key = tile_keys[e];
+            uint d = (key >> p.shift) & 15u;
+            uint at = digit_target[d] + e - digit_start[d];
+            keys_out[at] = key;
+            values_out[at] = tile_values[e];
+        }
+    }
+}

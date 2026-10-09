@@ -1,0 +1,48 @@
+// Gaussian splats, step 2: where each workgroup's visible splats go, by an
+// exclusive scan of splat_project's group counts in one workgroup; and the
+// arguments of what follows: the quad draw (4 vertices, the visible count),
+// the sort's tiles of 2048 keys (x, 1, 1) and the count itself.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 1024) in;
+#include "splat_params.glsl"
+layout(std430, binding = 0) readonly buffer Groups { uint group_counts[]; };
+layout(std430, binding = 1) writeonly buffer Offsets { uint group_offsets[]; };
+layout(std430, binding = 2) buffer Arguments { uint arguments[]; };
+
+shared uint sums[1024];
+
+void main() {
+    uint local = gl_LocalInvocationID.x;
+    uint groups = (p.counts.x + 255u) / 256u;
+    uint per = (groups + 1023u) / 1024u;
+    uint first = min(local * per, groups);
+    uint end = min(first + per, groups);
+    uint own = 0u;
+    for (uint g = first; g < end; g++) own += group_counts[g];
+    sums[local] = own;
+    barrier();
+    for (uint step = 1u; step < 1024u; step <<= 1u) {
+        uint value = sums[local];
+        if (local >= step) value += sums[local - step];
+        barrier();
+        sums[local] = value;
+        barrier();
+    }
+    uint running = sums[local] - own;
+    for (uint g = first; g < end; g++) {
+        group_offsets[g] = running;
+        running += group_counts[g];
+    }
+    if (local == 1023u) {
+        uint total = sums[1023];
+        arguments[0] = 4u;
+        arguments[1] = total;
+        arguments[2] = 0u;
+        arguments[3] = 0u;
+        arguments[4] = (total + 2047u) / 2048u;
+        arguments[5] = 1u;
+        arguments[6] = 1u;
+        arguments[7] = total;
+    }
+}

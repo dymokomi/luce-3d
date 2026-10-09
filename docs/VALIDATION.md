@@ -2,7 +2,7 @@
 
 `luc test` builds and runs the test programs under `tests/`: the direct Base
 fixture (`tests/geometry`) and two Luce consumers (`tests/objects`,
-`tests/custom`), the GPU pixel programs (`tests/pixels`, `tests/mesh_pixels`, `tests/fog_pixels`) and
+`tests/custom`), the GPU pixel programs (`tests/pixels`, `tests/mesh_pixels`, `tests/fog_pixels`, `tests/splat_pixels`) and
 the README check (`tests/readme`).
 
 - Sphere counts, radii, normalized normals, exact seams, UV bounds, outward
@@ -52,3 +52,19 @@ over several draws and a denser look, and a look on the geometry: a heat
 grid emitting orange, left out of the smoke grids, its look's scale outside
 the key. It ends by printing the GPU
 time of a 128³ ball filling 2800×1800 pixels (report only).
+
+`tests/splat_pixels` draws Gaussian splats offscreen into a half-float target
+and compares with the formulas: one Gaussian's falloff along a row against
+3DGS's α = min(0.99, o·exp(-½ d²/(σ² + 0.3))) and its quad bound (about 0.001
+apart); two half-opaque splats composited in both depth orders; a quad in front
+hiding a splat and one behind veiled by it; the middle pixel's color of a
+degree-3 splat with a rest frame against luce-geocore's `display_color` toward
+five eyes (about 0.0005 apart), and Cd at degree 0; dots for a plain cloud and
+Centers mode; one upload per cloud and one sort per view. The GPU radix sort is
+checked against a CPU stable sort on random 32-bit keys, many ties, 24- and
+16-bit keys, a partial tile, one key and none. It ends by printing GPU times per
+step for 1M, 3M and 6M synthetic degree-3 splats in a 2800×1800 view (report
+only; `SPLAT_TIMINGS=0` skips them). On an M4 Max: 3M splats take about 14 ms
+a view (1.2 ms projecting, 0.2 gathering, 1.7 sorting, 10.8 drawing), 6M about
+29 ms; a view at rest is the draw alone (11 and 23 ms). On an RTX A5500 laptop
+GPU (Windows): 10 ms and 21 ms.

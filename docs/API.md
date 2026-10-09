@@ -40,6 +40,7 @@ mesh is not a per-vertex `Geometry`; `MeshGeometry` wraps it for that path).
 | `WireRenderer` | `lines(points,camera,target,color,width=1,bias=0.000001,depth=true)` draws independent world endpoint pairs at constant logical-pixel width; near clipped and depth tested (`depth=false`: over everything). `triangles(points,camera,target,color)` draws depth-tested selection fills. Uses the existing target depth buffer; current GPU API also writes depth. |
 | `WireBatch` | Retained endpoint pairs drawn at constant pixel width (`draw(camera,target,color,width)`); `count()` segments and `bounds()` for framing. |
 | `FogVolume`, `FogLook` | A fog grid of a luce-geocore set, ray-marched on the GPU as smoke (see below): `FogVolume.of(geometry,index,matrix=identity,light=(3,5,2))` the `index`th smoke grid of the set's own volume (its non-empty fog grids but the look's emission field), placed by `matrix`, its self-shadowing swept toward `light`, drawn with the set's look; `FogVolume.count(geometry)` how many there are; `FogVolume.key(geometry,index,matrix,light)` what its texels are made from (grid contents, emission field, placement, light), equal for a changed look; `FogVolume.look_of(geometry)` the set's look. `draw(camera,target,key=(0.85,0.85,0.85),ambient=0.35)` draws it over what the target holds; `set_look(look)` sets `FogLook` (`density` scale, smoke `color`, `shadow` scale, `emission` scale and `emission_color`, `step` in voxels 0.25..8), uploading nothing; `bounds()` (the world box, for framing), `peak()`, `texels(axis)` and `upload_count()` (one, on the first draw) for tests. Base callers: `fog_volume_of(set,index,matrix,light)` makes a heap volume (on a worker; adopt it with `fog_volume_type`), `fog_volume_key`, `fog_look_of`, `fog_grid_count(set)`, and `release_fog_pipelines()` frees the shared shader. |
+| `GaussianSplats`, `SplatLook`, `SplatMode`, `SplatTimes` | A luce-geocore point cloud drawn as Gaussian splats, or as dots when it has no `orient`, `scale` and `opacity` (see below): `GaussianSplats.of(geometry,matrix=identity)` packs the set's cloud placed by `matrix`; `GaussianSplats.count(geometry)` its points (0 without a cloud); `GaussianSplats.key(geometry,matrix)` what it packs from (column ids, color space, placement). `draw(camera,target)` draws it over what the target holds, depth tested; `set_look(look)` sets `SplatLook` (`mode` splats or centers, `sh_degree` 0..3, `alpha_cull`, `scale`, `max_size` in pixels, `dot_size` in points), uploading nothing; `bounds()`, `size()`, `is_splats()`, `sh_items()`, `upload_count()` (one, on the first draw), `sort_count()` (views sorted) and `timings()` (the last sorted view's GPU milliseconds per step) for tests and reports. Base callers: `gaussian_splats_of(set,matrix)` packs a heap one (on a worker; adopt it with `gaussian_splats_type`), `splat_key`, `splat_count`, and `release_splat_pipelines()` frees the shared shader. `RadixSort` and `radix_arguments` are the GPU sort it orders depths with. |
 | `CurveLines` | The curves of a luce-geocore `GeometrySet` as wire batches: `batch(geometry)` draws every evaluated curve (instances placed), `batch(geometry, true)` the control hulls (control polygons of smooth curves, Bezier handle arms, a cross per control point); `count(geometry)` segments. Base code appends the same endpoint pairs with `append_curve_segments(set, matrix, lines, hulls)`, extracted in parallel from the evaluated-curve cache. |
 | `SurfaceHits` | Where a view ray meets the scene: `cast(root,origin,direction)` returns the nearest face of any visible polygon object under `root` (each placed by its parents, hit through its BVH) as a `SurfaceHit` (`found`, world `point`, unit `normal`, `distance`); `plane(origin,direction,point,normal)` meets a construction plane. |
 
@@ -109,3 +110,52 @@ The atlas uploads on the first draw and the CPU copy is freed; later draws
 (camera moves, a new look) upload nothing. The shader and its pipelines are
 shared by every volume. `tests/fog_pixels` checks a fog ball's pixels and
 reports a 128³ ball's GPU time at 2800×1800 (about 5 ms on an M4 Max).
+
+## Gaussian splats
+
+A point cloud with luce-geocore's splat conventions (`orient`, `scale`,
+`opacity`, linear `Cd`, the `sh` array, optional `restorient`; see its
+`splats` module) is drawn as 3D Gaussian Splatting draws it (Kerbl et al.
+2023), with a global depth sort and hardware-blended quads:
+
+- **Pack** (`renderers/splat_data.lucb`), once per cloud on the CPU, in
+  parallel: per splat its placed center (f32, relative to the cloud's placed
+  origin) and opacity, its placed covariance L Σ Lᵀ (f32 × 6), its DC color in
+  the cloud's encoding (`encode(Cd)`, f16), its SH frame
+  `orient · restorient⁻¹` (f16, only with a `restorient`) and its SH items
+  (f16). About 140 bytes per degree-3 splat. Uploaded on the first draw; the
+  CPU copy is freed.
+- **Project** (`shaders/splat_project.comp`), each new view: the EWA 2D
+  covariance (x/z and y/z clamped to 1.3 tan(fov/2), a 0.3 px² low-pass), its
+  eigenvectors, the quad's half axes k·√λ where the Gaussian falls to the alpha
+  cull (k at most 3, the longest capped by `max_size`), frustum and opacity
+  culling, and the color: the SH bands toward the eye, turned into the splat's
+  SH frame, added to the DC color, clamped at 0 and decoded from sRGB, which
+  is luce-geocore's `display_color`. Each visible splat writes a 48-byte quad
+  record (clip center, clip half axes, linear color and opacity) at its index,
+  and a 24-bit depth key (the view depth's float bits, reversed: far first).
+- **Gather** (`splat_offsets.comp`, `splat_compact.comp`): a workgroup's
+  visible count, one scan of those counts, and a stable rank inside each
+  workgroup put the visible keys and indices in splat order, so equal keys
+  never trade places between frames. The same kernel writes the draw's
+  indirect arguments and the sort's workgroup count.
+- **Sort** (`renderers/radix_sort.lucb`, `radix_*.comp`): an LSD radix sort,
+  4 bits a pass (six passes for 24-bit keys), each pass a count per tile of
+  2048 keys, one scan, and a stable scatter that sorts each tile in shared
+  memory first, so every digit's run is written out whole (coalesced writes
+  made the sort 2× faster on an NVIDIA GPU and 6× on a Radeon 890M).
+  Reduce-then-scan needs no forward progress between workgroups, which Metal
+  does not promise.
+- **Draw**: luce-gpu's `shade_quads`, the records through the sorted
+  indices, the count from the GPU. `shaders/splat.frag` gives
+  α = min(0.99, o·exp(-½ k² ρ²)), drops α under the cull, and writes
+  premultiplied color with `Blend.over`, back to front. The pipeline is depth
+  tested without writing depth: meshes in front hide splats, splats veil
+  meshes behind them.
+
+The compute pass runs only when the view or the look changed; at rest a frame
+is the draw alone. Several clouds sort separately (exact unless they
+interleave). Centers mode, and every cloud without the splat attributes,
+draws round opaque dots of the DC color (`Cd` for plain clouds) through the
+same pass. `tests/splat_pixels` checks pixels against these formulas and
+reports times per step (docs/VALIDATION.md).

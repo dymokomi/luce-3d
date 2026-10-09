@@ -1,0 +1,186 @@
+// Gaussian splats, step 1 of a view: project every splat. A visible splat
+// writes its quad record (shade_quads: clip-space center, half axes, linear
+// color and opacity) at its own index and a back-to-front depth key; a culled
+// one writes the key 0xFFFFFFFF. Each workgroup counts its visible splats, so
+// splat_offsets can place them in splat order.
+//
+// The covariance projects by EWA (Zwicker et al. 2002, as 3D Gaussian
+// Splatting does): Σ' = J W Σ Wᵀ Jᵀ with x/z and y/z clamped to 1.3 tan(fov/2)
+// in J, plus a 0.3 px² low-pass. The quad spans k·√λ along the eigenvectors,
+// where the Gaussian falls to the alpha cull (k ≤ 3). The color adds the SH
+// bands toward the view direction (in the splat's SH frame) to the DC color,
+// clamps at 0 and decodes sRGB, as luce-geocore's display_color does.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 256) in;
+#include "splat_params.glsl"
+layout(std430, binding = 0) readonly buffer Centers { vec4 centers[]; };
+layout(std430, binding = 1) readonly buffer Covariances { float covariances[]; };
+layout(std430, binding = 2) readonly buffer Colors { uvec2 colors[]; };
+layout(std430, binding = 3) readonly buffer Frames { uvec2 frames[]; };
+layout(std430, binding = 4) readonly buffer Harmonics { uint harmonics[]; };
+layout(std430, binding = 5) writeonly buffer Records { vec4 records[]; };
+layout(std430, binding = 6) writeonly buffer Keys { uint keys[]; };
+layout(std430, binding = 7) writeonly buffer Groups { uint group_counts[]; };
+
+shared uint visible_count;
+
+// The 3DGS SH constants (bands 1..3).
+const float sh_c1 = 0.4886025119029199;
+const float sh_c2_0 = 1.0925484305920792;
+const float sh_c2_1 = -1.0925484305920792;
+const float sh_c2_2 = 0.31539156525252005;
+const float sh_c2_3 = -1.0925484305920792;
+const float sh_c2_4 = 0.5462742152960396;
+const float sh_c3_0 = -0.5900435899266435;
+const float sh_c3_1 = 2.890611442640554;
+const float sh_c3_2 = -0.4570457994644658;
+const float sh_c3_3 = 0.3731763325901154;
+const float sh_c3_4 = -0.4570457994644658;
+const float sh_c3_5 = 1.445305721320277;
+const float sh_c3_6 = -0.5900435899266435;
+
+// `v` turned by unit quaternion `q`.
+vec3 turn(vec4 q, vec3 v) {
+    vec3 t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
+
+// sRGB's curve, decoding (luce-color's srgb_decode for values >= 0).
+float srgb_decode(float c) {
+    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+}
+
+// Half `index` of splat `splat`'s SH items, `words` words per splat.
+float half_at(uint first, uint index) {
+    vec2 pair = unpackHalf2x16(harmonics[first + (index >> 1u)]);
+    return (index & 1u) == 0u ? pair.x : pair.y;
+}
+
+// Item `item` (an RGB coefficient) of the splat whose items start at `first`.
+vec3 item_at(uint first, uint item) {
+    return vec3(half_at(first, item * 3u), half_at(first, item * 3u + 1u), half_at(first, item * 3u + 2u));
+}
+
+// The SH bands' color toward `d` (unit, in the SH frame), over `used` items.
+vec3 bands(uint first, uint used, vec3 d) {
+    float x = d.x;
+    float y = d.y;
+    float z = d.z;
+    vec3 c = -sh_c1 * y * item_at(first, 0u) + sh_c1 * z * item_at(first, 1u) - sh_c1 * x * item_at(first, 2u);
+    if (used < 8u) return c;
+    float xx = x * x;
+    float yy = y * y;
+    float zz = z * z;
+    c += sh_c2_0 * x * y * item_at(first, 3u) + sh_c2_1 * y * z * item_at(first, 4u) + sh_c2_2 * (2.0 * zz - xx - yy) * item_at(first, 5u)
+       + sh_c2_3 * x * z * item_at(first, 6u) + sh_c2_4 * (xx - yy) * item_at(first, 7u);
+    if (used < 15u) return c;
+    c += sh_c3_0 * y * (3.0 * xx - yy) * item_at(first, 8u) + sh_c3_1 * x * y * z * item_at(first, 9u)
+       + sh_c3_2 * y * (4.0 * zz - xx - yy) * item_at(first, 10u) + sh_c3_3 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * item_at(first, 11u)
+       + sh_c3_4 * x * (4.0 * zz - xx - yy) * item_at(first, 12u) + sh_c3_5 * z * (xx - yy) * item_at(first, 13u)
+       + sh_c3_6 * x * (xx - 3.0 * yy) * item_at(first, 14u);
+    return c;
+}
+
+// Splat `i`'s linear color seen from the eye: the DC color (stored in the
+// cloud's encoding) plus the bands, clamped at 0 and decoded.
+vec3 splat_color(uint i, vec3 center, bool harmonics_on) {
+    uvec2 stored = colors[i];
+    vec3 encoded = vec3(unpackHalf2x16(stored.x), unpackHalf2x16(stored.y).x);
+    uint used = min(p.counts.y, p.counts.z);
+    if (harmonics_on && used >= 3u) {
+        vec3 d = center - p.eye_near.xyz;
+        float len = length(d);
+        if (len > 0.0) {
+            d /= len;
+            // World to the cloud's frame, then to the splat's SH frame.
+            d = turn(vec4(-p.rotation.xyz, p.rotation.w), d);
+            if ((p.counts.w & flag_frames) != 0u) {
+                uvec2 q = frames[i];
+                vec4 frame = vec4(unpackHalf2x16(q.x), unpackHalf2x16(q.y));
+                frame /= max(length(frame), 1e-20);
+                d = turn(vec4(-frame.xyz, frame.w), d);
+            }
+            uint words = (p.counts.y * 3u + 1u) / 2u;
+            encoded += bands(i * words, used, d);
+        }
+    }
+    encoded = max(encoded, vec3(0.0));
+    if ((p.counts.w & flag_srgb) != 0u)
+        return vec3(srgb_decode(encoded.r), srgb_decode(encoded.g), srgb_decode(encoded.b));
+    return encoded;
+}
+
+void main() {
+    uint local = gl_LocalInvocationID.x;
+    if (local == 0u) visible_count = 0u;
+    barrier();
+    uint i = splat_index();
+    uint count = p.counts.x;
+    if (i < count) {
+        uint key = 0xFFFFFFFFu;
+        vec4 c = centers[i];
+        vec3 rel = c.xyz - p.eye_near.xyz;
+        float tz = dot(rel, p.forward_fy.xyz);
+        float near = p.eye_near.w;
+        float far = p.right_far.w;
+        if (tz > near && tz < far) {
+            float tx = dot(rel, p.right_far.xyz);
+            float ty = dot(rel, p.up_fx.xyz);
+            float fx = p.up_fx.w;
+            float fy = p.forward_fy.w;
+            vec2 half_size = 0.5 * p.view.xy;
+            vec2 at = vec2(fx * tx / tz, fy * ty / tz);
+            bool splats = (p.counts.w & flag_splats) != 0u && (p.counts.w & flag_centers) == 0u;
+            float opacity = 1.0;
+            vec2 h1 = vec2(p.look.w, 0.0);
+            vec2 h2 = vec2(0.0, p.look.w);
+            bool shown = true;
+            if (splats) {
+                opacity = c.w;
+                shown = opacity >= p.look.x;
+                if (shown) {
+                    uint base = i * 6u;
+                    float s2 = p.look.y * p.look.y;
+                    mat3 sigma = mat3(covariances[base], covariances[base + 1u], covariances[base + 2u],
+                                      covariances[base + 1u], covariances[base + 3u], covariances[base + 4u],
+                                      covariances[base + 2u], covariances[base + 4u], covariances[base + 5u]) * s2;
+                    float txc = clamp(tx / tz, -p.view.z, p.view.z) * tz;
+                    float tyc = clamp(ty / tz, -p.view.w, p.view.w) * tz;
+                    // T = J W, its rows in world terms.
+                    vec3 t0 = (fx / tz) * p.right_far.xyz - (fx * txc / (tz * tz)) * p.forward_fy.xyz;
+                    vec3 t1 = (fy / tz) * p.up_fx.xyz - (fy * tyc / (tz * tz)) * p.forward_fy.xyz;
+                    vec3 s_t0 = sigma * t0;
+                    vec3 s_t1 = sigma * t1;
+                    float a = dot(t0, s_t0) + 0.3;
+                    float b = dot(t0, s_t1);
+                    float d = dot(t1, s_t1) + 0.3;
+                    float mid = 0.5 * (a + d);
+                    float radius = sqrt(max(0.25 * (a - d) * (a - d) + b * b, 0.0));
+                    float l1 = mid + radius;
+                    float l2 = max(mid - radius, 0.0);
+                    vec2 v1 = abs(b) > 1e-12 * max(a, d) ? normalize(vec2(b, l1 - a)) : (a >= d ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
+                    float k = min(sqrt(2.0 * log(opacity / p.look.x)), 3.0);
+                    h1 = v1 * min(k * sqrt(l1), p.look.z);
+                    h2 = vec2(-v1.y, v1.x) * min(k * sqrt(l2), p.look.z);
+                }
+            }
+            vec2 reach = abs(h1) + abs(h2);
+            shown = shown && abs(at.x) - reach.x < half_size.x && abs(at.y) - reach.y < half_size.y;
+            if (shown) {
+                vec3 color = splat_color(i, c.xyz, splats);
+                vec2 to_clip = tz / half_size;
+                records[i * 3u] = vec4(at * to_clip, far * (tz - near) / (far - near), tz);
+                records[i * 3u + 1u] = vec4(h1 * to_clip, h2 * to_clip);
+                records[i * 3u + 2u] = vec4(color, opacity);
+                // Farther first: the view depth's float bits, high 24 of them, reversed.
+                key = 0xFFFFFFu - (floatBitsToUint(tz) >> 7u);
+                atomicAdd(visible_count, 1u);
+            }
+        }
+        keys[i] = key;
+    }
+    barrier();
+    if (local == 0u && group_index() < (count + 255u) / 256u)
+        group_counts[group_index()] = visible_count;
+}

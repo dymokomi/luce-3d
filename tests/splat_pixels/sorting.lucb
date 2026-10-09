@@ -1,0 +1,68 @@
+## The GPU radix sort against a CPU stable sort: random 32-bit keys, keys
+## with many ties, 24-bit keys, a count that is not a whole number of tiles,
+## one key and none.
+from luce_gpu import gpu
+import memory
+from luce_std import sort
+from luce_3d.graphics import RadixSort, radix_arguments
+import clouds
+
+struct Pair:
+    let key: u32
+    let value: u32
+
+func before(a: Pair, b: Pair) -> bool:
+    return a.key < b.key
+
+func bytes_of(values: const u32[]) -> u8[]:
+    return u8[]((u8*)values.data, values.length * 4)
+
+## Sort `count` keys made by `make` with `bits` bits on the GPU, in a sort of
+## `capacity`, and compare with the CPU's stable sort.
+func check(device: gpu.Device, capacity: usize, count: usize, bits: u32, ties: u32, seed: u64) -> !:
+    var draws = clouds.Draws(state = seed)
+    let keys = try new u32[capacity] --- in memory.heap
+    defer free(keys) in memory.heap
+    let values = try new u32[capacity] --- in memory.heap
+    defer free(values) in memory.heap
+    let pairs = try new Pair[count] --- in memory.heap
+    defer free(pairs) in memory.heap
+    let mask: u64 = 0xFFFFFFFF if bits == 32 else ((1 << (u64)bits) - 1)
+    for at in 0..<capacity:
+        var key = (u32)(draws.next() & mask)
+        if ties > 0: key = key % ties
+        keys[at] = key
+        values[at] = (u32)at
+        if at < count: pairs[at] = Pair(key, (u32)at)
+    sort.stable(pairs, before)
+    var key_buffer = try gpu.Buffer.create(device, bytes_of(keys))
+    defer key_buffer.destroy()
+    var value_buffer = try gpu.Buffer.create(device, bytes_of(values))
+    defer value_buffer.destroy()
+    let words = radix_arguments((u32)count)
+    var arguments = try gpu.Buffer.create(device, bytes_of(words))
+    defer arguments.destroy()
+    var sorter = try RadixSort.create(device, capacity)
+    defer sorter.destroy()
+    var pass = try gpu.Compute.begin(device)
+    defer pass.close()
+    try sorter.record(&pass, key_buffer, value_buffer, arguments, bits)
+    try pass.submit()
+    try pass.wait()
+    try key_buffer.read(0, bytes_of(keys))
+    try value_buffer.read(0, bytes_of(values))
+    for at in 0..<count:
+        assert(keys[at] == pairs[at].key and values[at] == pairs[at].value)
+    # Past the count, nothing moved.
+    for at in count..<capacity:
+        assert(values[at] == (u32)at)
+
+pub func checks(device: gpu.Device) -> !:
+    try check(device, 100000, 100000, 32, 0, 1)
+    try check(device, 100000, 100000, 32, 37, 2)
+    try check(device, 50000, 50000, 24, 0, 3)
+    try check(device, 9000, 4097, 32, 0, 4)
+    try check(device, 16, 1, 32, 0, 5)
+    try check(device, 16, 0, 32, 0, 6)
+    try check(device, 300000, 262144, 16, 1000, 7)
+    print("radix sort: random, tied, 24-bit, partial-tile, one and empty runs match a CPU stable sort")

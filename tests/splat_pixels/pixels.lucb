@@ -1,0 +1,207 @@
+## Pixel checks of GaussianSplats against formulas: one Gaussian's falloff,
+## two splats composited in both depth orders, meshes hiding splats and
+## splats veiling meshes, luce-geocore's display_color matched toward several
+## eyes, dots for plain clouds and Centers mode, and one upload per cloud.
+from luce_gpu import gpu
+import interop
+from luce_std import math
+from luce_3d.graphics import GaussianSplats, SplatLook, SplatMode, Vector3
+from luce_geocore.splats import Quat, display_color, sh_frame, ColorSpace
+import clouds
+from clouds import Splat
+import views
+from views import View, Wall
+
+let width: u32 = 160
+let height: u32 = 120
+## The camera's distance and focal length in pixels (fov 40°, 120 pixels high).
+let distance: f64 = 4.0
+
+func focal_pixels() -> f64:
+    return 1.0 / math.tan(20.0 * math.pi / 180.0) * (f64)height * 0.5
+
+## The opacity 3DGS gives a splat of standard deviation `sigma` and opacity
+## `opacity` at view depth `depth`, centered in the view, at pixel (x, y):
+## α = min(0.99, o·exp(-½ d² / (σ_px² + 0.3))), zero past the quad, where the
+## Gaussian falls to 1/255 (at most 3 σ').
+func expected_alpha(sigma: f64, opacity: f64, depth: f64, x: u32, y: u32) -> f64:
+    let spread = focal_pixels() * sigma / depth
+    let variance = spread * spread + 0.3
+    let dx = (f64)x + 0.5 - (f64)width * 0.5
+    let dy = (f64)y + 0.5 - (f64)height * 0.5
+    let d2 = dx * dx + dy * dy
+    let k = math.min(math.sqrt(2.0 * math.log(opacity * 255.0)), 3.0)
+    if d2 > k * k * variance: return 0.0
+    let alpha = math.min(0.99, opacity * math.exp(-0.5 * d2 / variance))
+    return alpha if alpha >= 1.0 / 255.0 else 0.0
+
+func near(value: f64, wanted: f64, tolerance: f64) -> bool:
+    return math.abs(value - wanted) <= tolerance
+
+func one(set: interop.Reference[GaussianSplats]) -> interop.Reference[GaussianSplats][1]:
+    return [set]
+
+## One Gaussian's red channel along the middle row, over black, against its
+## analytic falloff; nothing past its quad.
+pub func falloff(device: gpu.Device) -> !:
+    var view = try View(device, width, height)
+    defer view.close()
+    let splats: Splat[1] = [Splat(center = Vector3(), scale = Vector3(0.1, 0.1, 0.1), opacity = 0.8, color = Vector3(0.8, 0.4, 0.2))]
+    let set = try clouds.splat_set(splats, 0)
+    defer set.release()
+    let cloud = try GaussianSplats.of(set)
+    defer cloud.release()
+    assert(cloud.value().is_splats() and cloud.value().size() == 1 and cloud.value().upload_count() == 0)
+    var walls: Wall[]
+    _ = try view.draw(one(cloud), walls)
+    var worst = 0.0
+    for x in [(u32)80, 81, 83, 85, 88, 91, 95, 100, 110, 140]:
+        let wanted = expected_alpha(0.1, 0.8, distance, x, 60)
+        let red = view.at(x, 60, 0) / 0.8
+        let green = view.at(x, 60, 1) / 0.4
+        worst = math.max(worst, math.max(math.abs(red - wanted), math.abs(green - wanted)))
+        assert(near(red, wanted, 0.01) and near(green, wanted, 0.01))
+    print(f"falloff: worst alpha error {worst} over the middle row")
+    # The peak (0.8 · 0.98 of red) is at the middle, and blue stays a quarter of red.
+    assert(view.at(79, 59, 0) > 0.6 and near(view.at(80, 60, 2) / view.at(80, 60, 0), 0.25, 0.01))
+
+## Two half-opaque splats on the view axis, red at the origin and blue one
+## unit toward the first eye: the nearer one composites over the farther,
+## seen from either side.
+pub func depth_order(device: gpu.Device) -> !:
+    var view = try View(device, width, height)
+    defer view.close()
+    let splats: Splat[2] = [Splat(center = Vector3(), scale = Vector3(0.3, 0.3, 0.3), opacity = 0.6, color = Vector3(1.0, 0.0, 0.0)),
+                            Splat(center = Vector3(0.0, 0.0, 1.0), scale = Vector3(0.3, 0.3, 0.3), opacity = 0.6, color = Vector3(0.0, 0.0, 1.0))]
+    let set = try clouds.splat_set(splats, 0)
+    defer set.release()
+    let cloud = try GaussianSplats.of(set)
+    defer cloud.release()
+    var walls: Wall[]
+    # Blue (3 units away) in front of red (4).
+    _ = try view.draw(one(cloud), walls)
+    var red = expected_alpha(0.3, 0.6, 4.0, 80, 60)
+    var blue = expected_alpha(0.3, 0.6, 3.0, 80, 60)
+    assert(near(view.at(80, 60, 2), blue, 0.01) and near(view.at(80, 60, 0), red * (1.0 - blue), 0.01))
+    # From behind: red (4) in front of blue (5).
+    try view.look_from(Vector3(0.0, 0.0, -4.0))
+    _ = try view.draw(one(cloud), walls)
+    red = expected_alpha(0.3, 0.6, 4.0, 80, 60)
+    blue = expected_alpha(0.3, 0.6, 5.0, 80, 60)
+    assert(near(view.at(80, 60, 0), red, 0.01) and near(view.at(80, 60, 2), blue * (1.0 - red), 0.01))
+    assert(cloud.value().upload_count() == 1 and cloud.value().sort_count() == 2)
+
+## A wall in front of a splat's left half hides it there; a wall behind its
+## right half shows through it, veiled by its opacity.
+pub func occlusion(device: gpu.Device) -> !:
+    var view = try View(device, width, height)
+    defer view.close()
+    let splats: Splat[1] = [Splat(center = Vector3(), scale = Vector3(0.3, 0.3, 0.3), opacity = 0.9, color = Vector3(1.0, 0.0, 0.0))]
+    let set = try clouds.splat_set(splats, 0)
+    defer set.release()
+    let cloud = try GaussianSplats.of(set)
+    defer cloud.release()
+    let walls: Wall[2] = [Wall(x0 = -3.0, x1 = 0.0, z = 1.5, color = gpu.Color(0.0, 0.0, 1.0)), Wall(x0 = 0.0, x1 = 3.0, z = -1.5, color = gpu.Color(0.0, 1.0, 0.0))]
+    _ = try view.draw(one(cloud), walls)
+    # Left of the middle: the wall in front, untouched.
+    assert(view.at(70, 60, 0) == 0.0 and view.at(70, 60, 1) == 0.0 and view.at(70, 60, 2) == 1.0)
+    # Right of it: red over the green wall behind.
+    let alpha = expected_alpha(0.3, 0.9, distance, 90, 60)
+    assert(alpha > 0.3 and near(view.at(90, 60, 0), alpha, 0.01) and near(view.at(90, 60, 1), 1.0 - alpha, 0.01) and view.at(90, 60, 2) == 0.0)
+    # Past the splat: the green wall.
+    assert(view.at(150, 60, 1) == 1.0 and view.at(150, 60, 0) == 0.0)
+
+## A degree-3 splat with a rest frame, seen from several eyes: the middle
+## pixel's color over its opacity is luce-geocore's display_color toward the
+## eye in the splat's SH frame; capped at degree 0 it is Cd.
+pub func harmonics(device: gpu.Device) -> !:
+    var view = try View(device, width, height)
+    defer view.close()
+    var draws = clouds.Draws(state = 77)
+    let orient = Quat(0.3, -0.5, 0.2, 0.8).normalized()
+    let rest = Quat(-0.4, 0.1, 0.6, 0.5).normalized()
+    var sh: f32[45]
+    for at in 0..<(usize)45: sh[at] = (f32)draws.between(-0.2, 0.2)
+    let color = Vector3(0.3, 0.5, 0.7)
+    let splats: Splat[1] = [Splat(center = Vector3(), orient = orient, scale = Vector3(0.1, 0.1, 0.1), opacity = 1.0, color = color)]
+    let rests: Quat[1] = [rest]
+    let set = try clouds.splat_set(splats, 15, sh, rests)
+    defer set.release()
+    let cloud = try GaussianSplats.of(set)
+    defer cloud.release()
+    assert(cloud.value().sh_items() == 15)
+    var walls: Wall[]
+    let alpha = expected_alpha(0.1, 1.0, distance, 80, 60)
+    let frame = sh_frame(orient, rest).conjugate()
+    var worst = 0.0
+    for eye in [Vector3(0.0, 0.0, 4.0), Vector3(3.0, 1.0, 2.0), Vector3(-2.0, 2.0, -3.0), Vector3(0.5, -3.0, 2.0), Vector3(-3.5, 0.2, 0.4)]:
+        let placed = (try eye.normalized()).multiply_scalar(distance)
+        try view.look_from(placed)
+        _ = try view.draw(one(cloud), walls)
+        let wanted = display_color(color, sh, 15, frame.rotate(placed.multiply_scalar(-1.0)), ColorSpace.srgb)
+        let got = Vector3(view.at(80, 60, 0) / alpha, view.at(80, 60, 1) / alpha, view.at(80, 60, 2) / alpha)
+        worst = math.max(worst, math.max(math.abs(got.x - wanted.x), math.max(math.abs(got.y - wanted.y), math.abs(got.z - wanted.z))))
+        assert(near(got.x, wanted.x, 0.012) and near(got.y, wanted.y, 0.012) and near(got.z, wanted.z, 0.012))
+    print(f"display_color: worst channel error {worst} over five eyes")
+    # Degree 0: the bands are left out, the color is Cd.
+    var look = SplatLook()
+    look.sh_degree = 0
+    try cloud.value().set_look(look)
+    _ = try view.draw(one(cloud), walls)
+    assert(near(view.at(80, 60, 0) / alpha, color.x, 0.006) and near(view.at(80, 60, 1) / alpha, color.y, 0.006) and near(view.at(80, 60, 2) / alpha, color.z, 0.006))
+
+## A plain cloud draws as opaque dots of its Cd; a splat cloud in Centers
+## mode draws dots of its DC color.
+pub func dots(device: gpu.Device) -> !:
+    var view = try View(device, width, height)
+    defer view.close()
+    let points: Vector3[2] = [Vector3(), Vector3(1.0, 0.0, 0.0)]
+    let colors: Vector3[2] = [Vector3(1.0, 0.0, 0.0), Vector3(0.0, 1.0, 0.0)]
+    let plain = try clouds.point_set(points, colors)
+    defer plain.release()
+    let cloud = try GaussianSplats.of(plain)
+    defer cloud.release()
+    assert(not cloud.value().is_splats() and cloud.value().size() == 2)
+    var walls: Wall[]
+    _ = try view.draw(one(cloud), walls)
+    assert(view.at(80, 60, 0) == 1.0 and view.at(80, 60, 1) == 0.0)
+    # (1, 0, 0) lands 41.2 pixels right of the middle.
+    let x = (u32)(80.0 + focal_pixels() / distance)
+    assert(view.at(x, 60, 1) == 1.0 and view.at(x, 60, 0) == 0.0)
+    # Between the dots: nothing.
+    assert(view.at(100, 60, 0) == 0.0 and view.at(100, 60, 1) == 0.0)
+    let splats: Splat[1] = [Splat(center = Vector3(), scale = Vector3(0.3, 0.3, 0.3), opacity = 0.5, color = Vector3(0.2, 0.6, 0.9))]
+    let set = try clouds.splat_set(splats, 0)
+    defer set.release()
+    let shaded = try GaussianSplats.of(set)
+    defer shaded.release()
+    var look = SplatLook()
+    look.mode = SplatMode.centers
+    try shaded.value().set_look(look)
+    _ = try view.draw(one(shaded), walls)
+    assert(near(view.at(80, 60, 0), 0.2, 0.003) and near(view.at(80, 60, 1), 0.6, 0.003) and near(view.at(80, 60, 2), 0.9, 0.003))
+    assert(view.at(84, 60, 0) == 0.0)
+
+## A cloud uploads once and sorts once per view: redrawing an unchanged view
+## sorts nothing, a moved camera sorts again, a new look sorts again.
+pub func uploads(device: gpu.Device) -> !:
+    var view = try View(device, width, height, false)
+    defer view.close()
+    let set = try clouds.random_set(5000, 1.0, 0.01, 0.05, 3, 5)
+    defer set.release()
+    let cloud = try GaussianSplats.of(set)
+    defer cloud.release()
+    var walls: Wall[]
+    for _ in 0..<3: _ = try view.draw(one(cloud), walls)
+    assert(cloud.value().upload_count() == 1 and cloud.value().sort_count() == 1)
+    try view.look_from(Vector3(1.0, 0.5, 4.0))
+    _ = try view.draw(one(cloud), walls)
+    _ = try view.draw(one(cloud), walls)
+    assert(cloud.value().upload_count() == 1 and cloud.value().sort_count() == 2)
+    var look = SplatLook()
+    look.scale = 2.0
+    try cloud.value().set_look(look)
+    _ = try view.draw(one(cloud), walls)
+    assert(cloud.value().upload_count() == 1 and cloud.value().sort_count() == 3)
+    let times = try cloud.value().timings()
+    assert(times.visible > 4000 and times.visible <= 5000)

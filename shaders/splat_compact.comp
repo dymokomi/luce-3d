@@ -1,0 +1,36 @@
+// Gaussian splats, step 3: the visible splats' keys and indices, packed in
+// splat order (a stable rank within each workgroup after its offset), ready
+// for the radix sort. The order is the same every frame, so equal keys never
+// swap between frames.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 256) in;
+#include "splat_params.glsl"
+layout(std430, binding = 0) readonly buffer Depths { uint depth_keys[]; };
+layout(std430, binding = 1) readonly buffer Offsets { uint group_offsets[]; };
+layout(std430, binding = 2) writeonly buffer Keys { uint keys[]; };
+layout(std430, binding = 3) writeonly buffer Values { uint values[]; };
+
+shared uint ranks[256];
+
+void main() {
+    uint local = gl_LocalInvocationID.x;
+    uint i = splat_index();
+    uint key = 0xFFFFFFFFu;
+    if (i < p.counts.x) key = depth_keys[i];
+    bool visible = key != 0xFFFFFFFFu;
+    ranks[local] = visible ? 1u : 0u;
+    barrier();
+    for (uint step = 1u; step < 256u; step <<= 1u) {
+        uint value = ranks[local];
+        if (local >= step) value += ranks[local - step];
+        barrier();
+        ranks[local] = value;
+        barrier();
+    }
+    if (visible) {
+        uint at = group_offsets[group_index()] + ranks[local] - 1u;
+        keys[at] = key;
+        values[at] = i;
+    }
+}

@@ -1,0 +1,80 @@
+## An offscreen view for the checks: a half-float texture (linear values read
+## back exactly enough to compare with formulas), a camera, and opaque quads
+## drawn first as the scene's meshes.
+from luce_gpu import gpu
+import interop
+import memory
+from luce_3d import graphics as three
+from luce_3d.graphics import GaussianSplats, PerspectiveCamera, WireRenderer, Vector3
+
+## An opaque axis-aligned quad facing the camera: x0..x1 by y0..y1 at depth z.
+pub struct Wall:
+    pub var x0: f64
+    pub var x1: f64
+    pub var y0: f64 = -3.0
+    pub var y1: f64 = 3.0
+    pub var z: f64
+    pub var color: gpu.Color
+
+pub struct View:
+    var texture: gpu.Texture
+    pub let camera: interop.Reference[PerspectiveCamera]
+    pub let width: u32
+    pub let height: u32
+    ## The last read: four f64 (linear RGBA) per pixel.
+    var image: f64[]
+    var halves: u8[]
+
+    pub func init(device: gpu.Device, width: u32, height: u32, read: bool = true) -> !:
+        self.texture = try gpu.Texture.create(device, width, height, gpu.Format.rgba16_float)
+        self.camera = try interop.Reference[PerspectiveCamera].adopt(new PerspectiveCamera(40.0, (f64)width / (f64)height, 0.1, 100.0) in memory.heap,
+                                                                     three.perspective_camera_type, memory.heap)
+        self.width = width
+        self.height = height
+        let pixels = (usize)(width * height)
+        var image: f64[]
+        var halves: u8[]
+        if read:
+            image = try new f64[pixels * 4] --- in memory.heap
+            halves = try new u8[pixels * 8] --- in memory.heap
+        self.image = image
+        self.halves = halves
+        try self.camera.value().set_position(Vector3(0.0, 0.0, 4.0))
+        try self.camera.value().look_at(Vector3())
+
+    ## Put the camera at `eye`, looking at the origin.
+    pub func look_from(eye: Vector3) -> !:
+        try self.camera.value().set_position(eye)
+        try self.camera.value().look_at(Vector3())
+
+    ## Draw `walls`, then `splats` in order, over a black clear; read the
+    ## pixels back when the view reads. The frame's submission.
+    pub func draw(splats: const interop.Reference[GaussianSplats][], walls: const Wall[]) -> gpu.Submission!:
+        let recording = try self.texture.frame()
+        defer recording.release()
+        let target = try recording.value().target()
+        defer target.release()
+        for wall in walls:
+            let points: Vector3[6] = [Vector3(wall.x0, wall.y0, wall.z), Vector3(wall.x1, wall.y0, wall.z), Vector3(wall.x1, wall.y1, wall.z),
+                                      Vector3(wall.x0, wall.y0, wall.z), Vector3(wall.x1, wall.y1, wall.z), Vector3(wall.x0, wall.y1, wall.z)]
+            try WireRenderer.triangles(points, self.camera, target, wall.color)
+        for cloud in splats:
+            try cloud.value().draw(self.camera, target)
+        _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0))
+        let submission = recording.value().submission()
+        if self.image.length > 0:
+            try self.texture.read(self.halves)
+            for at in 0..<self.image.length:
+                self.image[at] = (f64)memory.read[f16]((void*)&self.halves[at * 2])
+        return submission
+
+    ## Channel `channel` (0 red .. 3 alpha) of pixel (x, y) of the last read.
+    pub func at(x: u32, y: u32, channel: usize) -> f64:
+        return self.image[(usize)(y * self.width + x) * 4 + channel]
+
+    pub func close():
+        if self.image.length > 0:
+            free(self.image) in memory.heap
+            free(self.halves) in memory.heap
+        self.camera.release()
+        self.texture.destroy()

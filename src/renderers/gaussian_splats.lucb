@@ -1,0 +1,398 @@
+## Gaussian splats in the viewport, and point clouds as dots. A
+## GaussianSplats is packed once per cloud on the CPU (renderers/splat_data:
+## centers, covariances, colors, SH) and uploads on its first draw; later
+## draws (a camera drag) upload nothing. Each new view runs one compute pass
+## before the frame draws:
+## 1. splat_project.comp projects every splat (EWA), culls it, evaluates its
+##    SH toward the eye and writes its quad record and a depth key;
+## 2. splat_offsets.comp and splat_compact.comp gather the visible splats'
+##    keys in splat order, with the count and the draw's arguments;
+## 3. a GPU LSD radix sort (renderers/radix_sort) orders them back to front.
+## The frame then draws one quad per visible splat in that order with
+## luce-gpu's shade_quads, the count read from the GPU: shaders/splat.frag's
+## Gaussian falloff, premultiplied, Blend.over, depth tested without writing
+## depth, so meshes in front hide splats and splats veil meshes behind them.
+## A view that did not change draws without the pass.
+from luce_gpu import gpu
+import interop
+import memory
+from luce_std import math
+import errors
+from luce_geocore.geocore import Vector3, Matrix4, GeometrySet, Bounds
+from cameras.perspective import PerspectiveCamera, Projection
+from renderers.splat_data import SplatData, splat_data, splat_key, cloud_count
+from renderers.radix_sort import RadixSort
+from renderers.splat_shaders import splat_frag_words, splat_frag_msl, splat_frag_fast_math
+from renderers.splat_shaders import splat_project_comp_words, splat_project_comp_msl, splat_project_comp_group, splat_project_comp_bindings, splat_project_comp_fast_math
+from renderers.splat_shaders import splat_offsets_comp_words, splat_offsets_comp_msl, splat_offsets_comp_group, splat_offsets_comp_bindings
+from renderers.splat_shaders import splat_compact_comp_words, splat_compact_comp_msl, splat_compact_comp_group, splat_compact_comp_bindings
+
+## Bits of the depth keys the sort orders: a view depth's float bits but the
+## low 7 (a relative depth step of 2^-16).
+let key_bits: u32 = 24
+## The flags of splat_params.glsl's counts.w.
+let flag_srgb: u32 = 1
+let flag_frames: u32 = 2
+let flag_centers: u32 = 4
+let flag_splats: u32 = 8
+## Workgroups along x of the per-splat kernels' 2D grids.
+let grid_width: usize = 32768
+
+## How a cloud draws.
+pub enum SplatMode as u8:
+    ## Shaded Gaussians, their SH evaluated toward the eye.
+    splats = 0
+    ## A round dot at every center, its DC color (plain point clouds always).
+    centers = 1
+
+## How splats draw; the viewport's display options set it.
+pub struct SplatLook:
+    ## Splats or centers.
+    pub var mode: SplatMode = SplatMode.splats
+    ## The highest SH band evaluated, 0..3: lower is faster.
+    pub var sh_degree: i64 = 3
+    ## Splats less opaque than this are culled, and each one's quad ends
+    ## where its Gaussian falls to it (3DGS's 1/255 by default).
+    pub var alpha_cull: f64 = 0.00392156862745098
+    ## Multiplies every splat's size (its standard deviations).
+    pub var scale: f64 = 1.0
+    ## The longest half axis a splat's quad takes, in pixels (navigation).
+    pub var max_size: f64 = 2048.0
+    ## A center dot's radius, in points.
+    pub var dot_size: f64 = 1.5
+
+## GPU milliseconds of the last sorted view's steps, and its visible count.
+pub struct SplatTimes:
+    ## Projection, culling and SH (splat_project).
+    pub var project: f64
+    ## Gathering the visible splats' keys (splat_offsets, splat_compact).
+    pub var compact: f64
+    ## The radix sort.
+    pub var sort: f64
+    ## Splats drawn.
+    pub var visible: i64
+
+## A cloud's buffers on its device: the packed data, what each view writes,
+## the sort's scratch and the kernels.
+struct SplatBuffers:
+    var device: gpu.Device
+    var centers: gpu.Buffer
+    var covariances: gpu.Buffer
+    var colors: gpu.Buffer
+    var frames: gpu.Buffer
+    var harmonics: gpu.Buffer
+    var records: gpu.Buffer
+    var depth_keys: gpu.Buffer
+    var group_counts: gpu.Buffer
+    var group_offsets: gpu.Buffer
+    var keys: gpu.Buffer
+    var values: gpu.Buffer
+    var arguments: gpu.Buffer
+    var sort: RadixSort
+    var project: gpu.Kernel
+    var offsets: gpu.Kernel
+    var compact: gpu.Kernel
+
+    func destroy():
+        for buffer in [self.centers, self.covariances, self.colors, self.frames, self.harmonics, self.records, self.depth_keys, self.group_counts,
+                       self.group_offsets, self.keys, self.values, self.arguments]:
+            var owned = buffer
+            owned.destroy()
+        self.sort.destroy()
+        self.project.destroy()
+        self.offsets.destroy()
+        self.compact.destroy()
+        self.device.destroy()
+
+## One point cloud ready to draw: its packed data until the first draw
+## uploads it, then its buffers.
+pub struct GaussianSplats:
+    var data: SplatData
+    var settings: SplatLook
+    var buffers: SplatBuffers?
+    var uploads: i64
+    var sorts: i64
+    ## The view (splat_params.glsl's uniforms) the last pass sorted for.
+    var view: f32[32]
+    var sorted: bool
+    ## The last sorting pass, kept for its timings.
+    var pass: gpu.Compute?
+
+    ## `geometry`'s point cloud placed by `matrix`: Gaussian splats when it
+    ## has orient, scale and opacity, dots otherwise.
+    pub static func of(geometry: interop.Reference[GeometrySet], matrix: Matrix4 = Matrix4()) -> interop.Reference[GaussianSplats]!:
+        let made = try gaussian_splats(try geometry.get(), matrix)
+        return try interop.Reference[GaussianSplats].adopt(made, gaussian_splats_type, memory.heap)
+
+    ## How many points `geometry`'s cloud holds (0 without one).
+    pub static func count(geometry: interop.Reference[GeometrySet]) -> i64!:
+        return (i64)cloud_count(try geometry.get())
+
+    ## What `of` would pack from (the cloud's columns, its color space and
+    ## the placement): equal keys pack equal splats, so a held one is reused.
+    pub static func key(geometry: interop.Reference[GeometrySet], matrix: Matrix4 = Matrix4()) -> i64!:
+        return try splat_key(try geometry.get(), matrix)
+
+    ## How it draws.
+    pub func look() -> SplatLook:
+        return self.settings
+
+    ## Draw with `look` from now on: uploads nothing.
+    pub func set_look(look: SplatLook) -> !:
+        if look.sh_degree < 0 or look.sh_degree > 3: error(errors.invalid, "a splat look's SH degree is 0..3")
+        if not (look.alpha_cull >= 0.0001 and look.alpha_cull <= 0.99): error(errors.invalid, "a splat look's alpha cull is in 0.0001..0.99")
+        if not (look.scale > 0.0 and look.scale <= 1000.0): error(errors.invalid, "a splat look's scale is in (0, 1000]")
+        if not (look.max_size >= 1.0 and look.max_size <= 16384.0) or not (look.dot_size >= 0.25 and look.dot_size <= 64.0):
+            error(errors.invalid, "a splat look needs a largest size of 1..16384 pixels and a dot size of 0.25..64 points")
+        self.settings = look
+        self.sorted = false
+
+    ## Points it draws.
+    pub func size() -> i64:
+        return (i64)self.data.count
+
+    ## Whether they are Gaussian splats (orient, scale, opacity), not plain points.
+    pub func is_splats() -> bool:
+        return self.data.splats
+
+    ## SH items per splat (0, 3, 8 or 15).
+    pub func sh_items() -> i64:
+        return (i64)self.data.items
+
+    ## The world box of its centers (for framing).
+    pub func bounds() -> Bounds:
+        return Bounds(self.data.low, self.data.high)
+
+    ## How many times its data went to the GPU (once, on its first draw).
+    pub func upload_count() -> i64:
+        return self.uploads
+
+    ## How many views it sorted: a draw from an unchanged view sorts nothing.
+    pub func sort_count() -> i64:
+        return self.sorts
+
+    ## Draw over what `target` holds, through `camera`. A standalone frame (no
+    ## device) draws nothing.
+    pub func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget]) -> !:
+        let native = try target.get()
+        var device = gpu.device_of(native) catch failure:
+            if failure.code != gpu.unavailable: error(failure.code, failure.message)
+            recover gpu.Device()
+        defer device.destroy()
+        let size = try native.size()
+        if not device.is_open() or size.pixel_width <= 0.0 or size.pixel_height <= 0.0: return
+        try self.upload(device)
+        let buffers = self.buffers else return
+        var drawn = buffers.device
+        if not drawn.same(&device): error(errors.invalid, "splats draw on the device they were first drawn on")
+        let projection = try camera.value().projection(size.width / size.height)
+        var uniforms = self.uniforms(projection, size.pixel_width, size.pixel_height, size.pixel_width / size.width)
+        if not self.sorted or not same_view(&uniforms, &self.view):
+            try self.sort_view(uniforms)
+        let pipeline = try splat_pipeline(device, try native.pixel_format())
+        var fragment: f32[2] = [(f32)self.settings.alpha_cull, 1.0 if self.centers() else 0.0]
+        var quads = gpu.Quads(records = buffers.records, data = 1, order = buffers.values, arguments = buffers.arguments, arguments_offset = 0)
+        try gpu.shade_quads(native, pipeline, &quads, u8[]((u8*)&fragment[0], 8))
+
+    ## The GPU times of the last sorted view's steps (waiting for its pass).
+    pub func timings() -> SplatTimes!:
+        let pass = self.pass else error(errors.invalid, "no view was sorted yet")
+        let buffers = self.buffers else error(errors.invalid, "no view was sorted yet")
+        var waited = pass
+        try waited.wait()
+        var stamps: u64[3]
+        try waited.timestamps(stamps)
+        var device = buffers.device
+        let span = (try device.gpu_time(try waited.submission())) else error(errors.invalid, "the sorting pass's GPU time is gone")
+        var visible: u32[1]
+        var arguments = buffers.arguments
+        try arguments.read(4, u8[]((u8*)&visible[0], 4))
+        return SplatTimes(project = milliseconds(span.start, stamps[0]), compact = milliseconds(stamps[0], stamps[1]),
+                          sort = milliseconds(stamps[1], stamps[2]), visible = (i64)visible[0])
+
+    func centers() -> bool:
+        return self.settings.mode == SplatMode.centers or not self.data.splats
+
+    ## The buffers on `device`: the packed data sent on the first draw (when
+    ## the CPU copy is freed), and room for a view of every splat.
+    func upload(device: gpu.Device) -> !:
+        if self.buffers != none: return
+        let count = self.data.count
+        var made = SplatBuffers(device = try device.share())
+        errdefer made.destroy()
+        made.centers = try gpu.Buffer.create(device, bytes_of_f32(self.data.centers))
+        made.colors = try gpu.Buffer.create(device, bytes_of_f16(self.data.colors))
+        if self.data.covariances.length > 0: made.covariances = try gpu.Buffer.create(device, bytes_of_f32(self.data.covariances))
+        if self.data.frames.length > 0: made.frames = try gpu.Buffer.create(device, bytes_of_f16(self.data.frames))
+        if self.data.harmonics.length > 0: made.harmonics = try gpu.Buffer.create(device, bytes_of_f16(self.data.harmonics))
+        let groups = (count + 255) // 256
+        made.records = try gpu.Buffer.allocate(device, count * 48)
+        made.depth_keys = try gpu.Buffer.allocate(device, count * 4)
+        made.group_counts = try gpu.Buffer.allocate(device, groups * 4)
+        made.group_offsets = try gpu.Buffer.allocate(device, groups * 4)
+        made.keys = try gpu.Buffer.allocate(device, count * 4)
+        made.values = try gpu.Buffer.allocate(device, count * 4)
+        made.arguments = try gpu.Buffer.allocate(device, 32)
+        made.sort = try RadixSort.create(device, count)
+        made.project = try gpu.Kernel.create(device, splat_project_comp_words, splat_project_comp_msl, splat_project_comp_group, splat_project_comp_bindings,
+                                             splat_project_comp_fast_math)
+        made.offsets = try gpu.Kernel.create(device, splat_offsets_comp_words, splat_offsets_comp_msl, splat_offsets_comp_group, splat_offsets_comp_bindings)
+        made.compact = try gpu.Kernel.create(device, splat_compact_comp_words, splat_compact_comp_msl, splat_compact_comp_group, splat_compact_comp_bindings)
+        self.buffers = made
+        self.uploads += 1
+        self.data.close()
+
+    ## splat_params.glsl's uniforms for `projection` into a target of
+    ## `width` by `height` pixels, `scale` pixels a point.
+    func uniforms(projection: Projection, width: f64, height: f64, scale: f64) -> f32[32]:
+        let eye = projection.position.subtract(self.data.origin)
+        let forward = projection.backward.multiply_scalar(-1.0)
+        let fx = projection.focal / projection.aspect * width * 0.5
+        let fy = projection.focal * height * 0.5
+        let look = self.settings
+        var flags: u32 = 0
+        if self.data.srgb: flags = flags | flag_srgb
+        if self.data.frames.length > 0 or self.has_frames(): flags = flags | flag_frames
+        if self.centers(): flags = flags | flag_centers
+        if self.data.splats: flags = flags | flag_splats
+        let used = (look.sh_degree + 1) * (look.sh_degree + 1) - 1
+        let rotation = self.data.rotation
+        return [(f32)eye.x, (f32)eye.y, (f32)eye.z, (f32)projection.near,
+                (f32)projection.right.x, (f32)projection.right.y, (f32)projection.right.z, (f32)projection.far,
+                (f32)projection.up.x, (f32)projection.up.y, (f32)projection.up.z, (f32)fx,
+                (f32)forward.x, (f32)forward.y, (f32)forward.z, (f32)fy,
+                (f32)width, (f32)height, (f32)(1.3 * width * 0.5 / fx), (f32)(1.3 * height * 0.5 / fy),
+                f32.bits((u32)self.data.count), f32.bits((u32)self.data.items), f32.bits((u32)used), f32.bits(flags),
+                (f32)look.alpha_cull, (f32)look.scale, (f32)look.max_size, (f32)(look.dot_size * scale),
+                (f32)rotation.x, (f32)rotation.y, (f32)rotation.z, (f32)rotation.w]
+
+    func has_frames() -> bool:
+        let buffers = self.buffers else return false
+        return buffers.frames.is_open()
+
+    ## Record and submit the pass that projects, gathers and sorts the
+    ## splats for the view `uniforms` describe.
+    func sort_view(uniforms: f32[32]) -> !:
+        var buffers = self.buffers else return
+        if let previous = self.pass:
+            var closing = previous
+            closing.close()
+            self.pass = none
+        var pass = try gpu.Compute.begin(buffers.device)
+        errdefer pass.close()
+        var bytes = uniforms
+        let block = u8[]((u8*)&bytes[0], 128)
+        let groups = (self.data.count + 255) // 256
+        let across = groups if groups < grid_width else grid_width
+        let down = (groups + across - 1) // across
+        # Bindings a cloud lacks take the centers, which the kernel then never reads.
+        let covariances = buffers.covariances if buffers.covariances.is_open() else buffers.centers
+        let frames = buffers.frames if buffers.frames.is_open() else buffers.centers
+        let harmonics = buffers.harmonics if buffers.harmonics.is_open() else buffers.centers
+        let projecting: gpu.Binding[8] = [gpu.Binding(buffer = buffers.centers), gpu.Binding(buffer = covariances), gpu.Binding(buffer = buffers.colors),
+                                          gpu.Binding(buffer = frames), gpu.Binding(buffer = harmonics), gpu.Binding(buffer = buffers.records),
+                                          gpu.Binding(buffer = buffers.depth_keys), gpu.Binding(buffer = buffers.group_counts)]
+        try pass.dispatch(buffers.project, projecting, block, (u32)across, (u32)down)
+        _ = try pass.timestamp()
+        let placing: gpu.Binding[3] = [gpu.Binding(buffer = buffers.group_counts), gpu.Binding(buffer = buffers.group_offsets), gpu.Binding(buffer = buffers.arguments)]
+        try pass.dispatch(buffers.offsets, placing, block, 1)
+        let gathering: gpu.Binding[4] = [gpu.Binding(buffer = buffers.depth_keys), gpu.Binding(buffer = buffers.group_offsets), gpu.Binding(buffer = buffers.keys),
+                                         gpu.Binding(buffer = buffers.values)]
+        try pass.dispatch(buffers.compact, gathering, block, (u32)across, (u32)down)
+        _ = try pass.timestamp()
+        try buffers.sort.record(&pass, buffers.keys, buffers.values, buffers.arguments, key_bits)
+        _ = try pass.timestamp()
+        try pass.submit()
+        self.pass = pass
+        self.view = uniforms
+        self.sorted = true
+        self.sorts += 1
+
+    ## Free the packed data, the buffers and the last pass.
+    pub func close():
+        if let pass = self.pass:
+            var closing = pass
+            closing.close()
+        self.pass = none
+        self.data.close()
+        if let buffers = self.buffers:
+            var owned = buffers
+            owned.destroy()
+        self.buffers = none
+
+## The interop type of a GaussianSplats, for adopting heap ones (Base callers).
+pub let gaussian_splats_type: interop.Type[GaussianSplats] = interop.Type[GaussianSplats]("GaussianSplats", GaussianSplats.close, closeable = true, main_thread = true)
+
+## A heap GaussianSplats of `set`'s point cloud placed by `matrix` (Base
+## callers, such as a worker handing it to the UI thread: adopt it with
+## `gaussian_splats_type` there). Fails when the set has no cloud.
+pub func gaussian_splats(set: const GeometrySet*, matrix: Matrix4) -> GaussianSplats*!:
+    var data = try splat_data(set, matrix)
+    errdefer data.close()
+    return try new GaussianSplats(data = data, settings = SplatLook()) in memory.heap
+
+## How many points `set`'s cloud holds (0 without one), for Base callers.
+pub func splat_count(set: const GeometrySet*) -> i64:
+    return (i64)cloud_count(set)
+
+func same_view(a: const f32[32]*, b: const f32[32]*) -> bool:
+    let left = u32[]((u32*)a, 32)
+    let right = u32[]((u32*)b, 32)
+    for index in 0..<(usize)32:
+        if left[index] != right[index]: return false
+    return true
+
+func milliseconds(from_time: u64, to_time: u64) -> f64:
+    return (f64)(to_time - from_time) / 1.0e6 if to_time > from_time else 0.0
+
+func bytes_of_f32(values: const f32[]) -> u8[]:
+    return u8[]((u8*)values.data, values.length * 4)
+
+## Halves as bytes, padded to whole words by the caller's even counts.
+func bytes_of_f16(values: const f16[]) -> u8[]:
+    return u8[]((u8*)values.data, values.length * 2)
+
+# mark: The shared pipeline
+
+## The splat shader and its pipelines on one device, per target format
+## (slot 0 for presentation surfaces, 1 + the format otherwise): made on
+## first use and kept. Main thread only, as drawing is.
+struct SplatPipelines:
+    var device: gpu.Device
+    var shader: gpu.Shader
+    var pipelines: (gpu.Pipeline?)[9]
+
+var shared_pipelines: SplatPipelines? = none
+
+## The splat pipeline drawing into targets of `pixel_format` on `device`:
+## Blend.over, depth tested without writing depth.
+func splat_pipeline(device: gpu.Device, pixel_format: gpu.Format?) -> gpu.Pipeline!:
+    var wanted = device
+    if let held = shared_pipelines:
+        if not held.device.same(&wanted): release_splat_pipelines()
+    if shared_pipelines == none:
+        var shader = try gpu.Shader.create(device, splat_frag_words, splat_frag_msl, splat_frag_fast_math)
+        errdefer shader.destroy()
+        shared_pipelines = SplatPipelines(device = try device.share(), shader = shader)
+    var held = shared_pipelines else trap("splat pipelines")
+    var slot: usize = 0
+    if let format = pixel_format: slot = (usize)(u8)format + 1
+    if let made = held.pipelines[slot]: return made
+    let made = try gpu.Pipeline.create(device, held.shader, gpu.Blend.over, pixel_format, depth_test = true)
+    held.pipelines[slot] = made
+    shared_pipelines = held
+    return made
+
+## Release the shared splat shader and pipelines (they are made again on the
+## next draw): for a clean shutdown, or before closing the device.
+pub func release_splat_pipelines():
+    let held = shared_pipelines else return
+    shared_pipelines = none
+    for pipeline in held.pipelines:
+        if let made = pipeline:
+            var owned = made
+            owned.destroy()
+    var shader = held.shader
+    shader.destroy()
+    var device = held.device
+    device.destroy()

@@ -1,0 +1,214 @@
+## A point cloud's static GPU data for GaussianSplats, packed on the CPU once
+## per cook result (on a worker, off the UI thread) and uploaded on the first
+## draw. A splat cloud (luce-geocore's conventions: orient, scale, opacity,
+## linear Cd, the `sh` array, optional restorient) packs per splat:
+## - its center, placed, relative to the pack origin (f32 × 3), and its opacity;
+## - its placed covariance L Σ Lᵀ (f32 × 6: xx, xy, xz, yy, yz, zz);
+## - its DC color in the cloud's encoding, encode(Cd) (f16 × 4), to which the
+##   shader adds the SH bands before decoding, as display_color does;
+## - its SH frame orient · restorient⁻¹ (f16 × 4), when it has a restorient;
+## - its SH items (f16, RGB per item, padded to whole u32 words).
+## A plain cloud packs centers and Cd only, drawn as dots.
+from luce_std import math, parallel
+import memory
+import errors
+from luce_geocore.geocore import Vector3, Matrix4, GeometrySet
+from luce_geocore.kernel import AttributeStore, Attribute, Domain, set_cloud, cloud_store, cloud_positions, cloud_origin, cloud_positions_id, set_detail
+from luce_geocore.splats import Quat, Mat3, Floats, point_floats, is_splat_store, sh_attribute, sh_items, detail_color_space, ColorSpace, from_linear
+from luce_geocore.splats import compose_covariance, rotation_part, sh_frame, restorient_name, orient_name, scale_name, opacity_name, color_name
+
+## The most points one cloud draws: 2^26.
+pub let splat_limit: usize = 67108864
+## A plain cloud's color without Cd: light gray.
+let plain_gray: f64 = 0.8
+
+## The packed arrays (heap, owned) and what the shader needs to read them.
+pub struct SplatData:
+    ## Per point: x, y, z from `origin`, and the opacity (1 for plain points).
+    pub var centers: f32[]
+    ## Per splat: the covariance's xx, xy, xz, yy, yz, zz (empty for plain points).
+    pub var covariances: f32[]
+    ## Per point: the DC color (encode(Cd) for splats, linear Cd for points) and 0.
+    pub var colors: f16[]
+    ## Per splat: its SH frame quaternion x, y, z, w (empty without restorient).
+    pub var frames: f16[]
+    ## Per splat: `stride` halves, its SH items (RGB each) then zeros.
+    pub var harmonics: f16[]
+    ## Points packed.
+    pub let count: usize
+    ## SH items per splat (0, 3, 8 or 15).
+    pub let items: usize
+    ## Halves stored per splat in `harmonics` (items × 3, rounded up to even).
+    pub let stride: usize
+    ## The world point the centers are relative to.
+    pub let origin: Vector3
+    ## The placement's rotation, turning SH-frame (and cloud) directions to world ones.
+    pub let rotation: Quat
+    ## Colors and SH are sRGB-encoded (decoded after the bands are added).
+    pub let srgb: bool
+    ## Gaussian splats (orient, scale, opacity) rather than plain points.
+    pub let splats: bool
+    ## The placed centers' box: its low corner.
+    pub var low: Vector3
+    ## Its high corner.
+    pub var high: Vector3
+
+    ## Free the arrays (after the upload, or unused).
+    pub func close():
+        if self.centers.length > 0: free(self.centers) in memory.heap
+        if self.covariances.length > 0: free(self.covariances) in memory.heap
+        if self.colors.length > 0: free(self.colors) in memory.heap
+        if self.frames.length > 0: free(self.frames) in memory.heap
+        if self.harmonics.length > 0: free(self.harmonics) in memory.heap
+        var floats: f32[]
+        var halves: f16[]
+        self.centers = floats
+        self.covariances = floats
+        self.colors = halves
+        self.frames = halves
+        self.harmonics = halves
+
+## The points `set`'s cloud holds (0 without one).
+pub func cloud_count(set: const GeometrySet*) -> usize:
+    let cloud = set_cloud(set) else return 0
+    return cloud.count()
+
+## What `splat_data` packs from (the cloud's columns, color space and
+## `matrix`) as a key: equal keys pack equal data.
+pub func splat_key(set: const GeometrySet*, matrix: Matrix4) -> i64!:
+    let cloud = set_cloud(set) else error(errors.invalid, "the geometry has no point cloud")
+    let store = cloud_store(cloud)
+    var key = mix_id(0xCBF29CE484222325, cloud_positions_id(cloud))
+    for name in [orient_name, scale_name, opacity_name, color_name, "sh", restorient_name]:
+        let index = store.find(name, Domain.point)
+        if index < 0:
+            key = mix_id(key, 0)
+            continue
+        let entry = store.entry((usize)index)
+        key = mix_id(mix_id(mix_id(key, entry.data.id()), entry.offsets.id()), (u64)(entry.kind) + (u64)entry.width * 16)
+    key = mix_id(key, (u64)(u8)detail_color_space(set_detail(set)))
+    let origin = cloud_origin(cloud)
+    for value in [matrix.x, matrix.y, matrix.z, matrix.translation, origin]:
+        key = mix_value(mix_value(mix_value(key, value.x), value.y), value.z)
+    return (i64)(key >> 1)
+
+func mix_id(key: u64, id: u64) -> u64:
+    return (key ^ id) *% 0x100000001B3
+
+func mix_value(key: u64, value: f64) -> u64:
+    var bits = value
+    return mix_id(key, memory.read[u64]((void*)&bits))
+
+## The inputs and outputs of one packing, shared by its workers.
+struct Packing:
+    let positions: const f32[]
+    let linear: Mat3
+    let identity: bool
+    let orient: Floats
+    let scale: Floats
+    let opacity: Floats
+    let color: Floats
+    let restorient: Floats
+    let harmonics_source: const Attribute*?
+    let items: usize
+    let stride: usize
+    let space: ColorSpace
+    let splats: bool
+    var data: SplatData*
+
+## Pack `set`'s point cloud placed by `matrix` (see the module comment).
+pub func splat_data(set: const GeometrySet*, matrix: Matrix4) -> SplatData!:
+    let cloud = set_cloud(set) else error(errors.invalid, "the geometry has no point cloud")
+    let count = cloud.count()
+    if count == 0: error(errors.invalid, "the point cloud is empty")
+    if count > splat_limit: error(errors.invalid, "a point cloud draws at most 2^26 points")
+    if not matrix.is_finite(): error(errors.invalid, "a splat placement must be finite")
+    let store = cloud_store(cloud)
+    let splats = is_splat_store(store)
+    let space = detail_color_space(set_detail(set))
+    let linear = Mat3.of_matrix4(matrix)
+    var rotation = Quat.identity()
+    if linear.determinant() > 0.0: rotation = Quat.of_matrix(rotation_part(linear))
+    let origin = matrix.transform_point(cloud_origin(cloud))
+    let positions = cloud_positions(cloud)
+    let items = sh_items(store) if splats else 0
+    let stride = (items * 3 + 1) // 2 * 2
+    var restorient = Floats()
+    if splats:
+        if let found = point_floats(store, restorient_name, 4): restorient = found
+    var harmonics_source: const Attribute*? = none
+    let sh_index = sh_attribute(store)
+    if splats and sh_index >= 0: harmonics_source = store.entry((usize)sh_index)
+    var data = SplatData(count = count, items = items, stride = stride, origin = origin, rotation = rotation, srgb = splats and space == ColorSpace.srgb,
+                         splats = splats, low = Vector3(), high = Vector3())
+    errdefer data.close()
+    data.centers = try new f32[count * 4] --- in memory.heap
+    data.colors = try new f16[count * 4] --- in memory.heap
+    if splats:
+        data.covariances = try new f32[count * 6] --- in memory.heap
+        if restorient.present(): data.frames = try new f16[count * 4] --- in memory.heap
+        if stride > 0: data.harmonics = try new f16[count * stride] --- in memory.heap
+    var work = Packing(positions = f32[]((f32*)positions.data, count * 3), linear = linear, identity = matrix.is_identity(),
+                       orient = floats_of(store, orient_name, 4), scale = floats_of(store, scale_name, 3), opacity = floats_of(store, opacity_name, 1),
+                       color = floats_of(store, color_name, 3), restorient = restorient, harmonics_source = harmonics_source, items = items, stride = stride,
+                       space = space, splats = splats, data = &data)
+    try parallel.for_each_range(count, 16384, (void*)&work, pack_range)
+    # The box of the placed centers.
+    var low = Vector3(1.0e300, 1.0e300, 1.0e300)
+    var high = Vector3(-1.0e300, -1.0e300, -1.0e300)
+    for index in 0..<count:
+        let x = (f64)data.centers[index * 4]
+        let y = (f64)data.centers[index * 4 + 1]
+        let z = (f64)data.centers[index * 4 + 2]
+        low = Vector3(math.min(low.x, x), math.min(low.y, y), math.min(low.z, z))
+        high = Vector3(math.max(high.x, x), math.max(high.y, y), math.max(high.z, z))
+    data.low = origin.add(low)
+    data.high = origin.add(high)
+    return data
+
+func floats_of(store: const AttributeStore*, name: str, width: usize) -> Floats:
+    return point_floats(store, name, width) else Floats()
+
+## Pack points first..<end.
+func pack_range(context: void*, first: usize, end: usize, worker: usize) -> !:
+    _ = worker
+    let work = (Packing*)context
+    let data = work.data
+    for index in first..<end:
+        let local = Vector3((f64)work.positions[index * 3], (f64)work.positions[index * 3 + 1], (f64)work.positions[index * 3 + 2])
+        let placed = local if work.identity else work.linear.transform(local)
+        data.centers[index * 4] = (f32)placed.x
+        data.centers[index * 4 + 1] = (f32)placed.y
+        data.centers[index * 4 + 2] = (f32)placed.z
+        data.centers[index * 4 + 3] = (f32)math.clamp(work.opacity.at(index, 0), 0.0, 1.0) if work.splats else 1.0
+        # The DC color in the cloud's encoding (plain clouds: linear Cd).
+        for channel in 0..<(usize)3:
+            var value = plain_gray if not work.splats else 0.5
+            if work.color.present(): value = work.color.at(index, channel)
+            if work.splats: value = from_linear(value, work.space)
+            data.colors[index * 4 + channel] = (f16)math.clamp(value, -60000.0, 60000.0)
+        data.colors[index * 4 + 3] = (f16)0.0
+        if not work.splats: continue
+        let orient = Quat(work.orient.at(index, 0), work.orient.at(index, 1), work.orient.at(index, 2), work.orient.at(index, 3))
+        let turn = orient.normalized() if orient.x * orient.x + orient.y * orient.y + orient.z * orient.z + orient.w * orient.w > 1.0e-30 else Quat.identity()
+        let scale = Vector3(math.abs(work.scale.at(index, 0)), math.abs(work.scale.at(index, 1)), math.abs(work.scale.at(index, 2)))
+        var sigma = compose_covariance(turn, scale)
+        if not work.identity: sigma = work.linear.multiply(sigma).multiply(work.linear.transposed())
+        let m = sigma.m
+        let packed: f64[6] = [m[0], m[1], m[2], m[4], m[5], m[8]]
+        for at in 0..<(usize)6: data.covariances[index * 6 + at] = (f32)packed[at]
+        if data.frames.length > 0:
+            let rest = Quat(work.restorient.at(index, 0), work.restorient.at(index, 1), work.restorient.at(index, 2), work.restorient.at(index, 3))
+            let rest_unit = rest.normalized() if rest.x * rest.x + rest.y * rest.y + rest.z * rest.z + rest.w * rest.w > 1.0e-30 else Quat.identity()
+            let frame = sh_frame(turn, rest_unit)
+            let values: f64[4] = [frame.x, frame.y, frame.z, frame.w]
+            for at in 0..<(usize)4: data.frames[index * 4 + at] = (f16)values[at]
+        if work.stride > 0:
+            let out = data.harmonics[index * work.stride..<(index + 1) * work.stride]
+            for at in 0..<out.length: out[at] = (f16)0.0
+            let source = work.harmonics_source else continue
+            var have = source.item_count(index)
+            if have > work.items: have = work.items
+            let values = f32[]((f32*)source.data.view().data, source.data.view().length // 4)
+            let start = source.first_item(index) * 3
+            for at in 0..<have * 3: out[at] = (f16)math.clamp((f64)values[start + at], -60000.0, 60000.0)

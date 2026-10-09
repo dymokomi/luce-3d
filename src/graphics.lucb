@@ -45,6 +45,26 @@ pub let fog_volume_key = fog_volume.fog_volume_key
 pub let fog_look_of = fog_volume.fog_look_of
 ## Release the shared fog shader and pipelines.
 pub let release_fog_pipelines = fog_volume.release_fog_pipelines
+import renderers.gaussian_splats
+## A point cloud drawn as Gaussian splats (or dots), how it looks, and the
+## GPU times of its last sorted view.
+pub type GaussianSplats = gaussian_splats.GaussianSplats
+pub type SplatLook = gaussian_splats.SplatLook
+pub type SplatMode = gaussian_splats.SplatMode
+pub type SplatTimes = gaussian_splats.SplatTimes
+pub let gaussian_splats_type = gaussian_splats.gaussian_splats_type
+## A heap GaussianSplats of a set's point cloud, for Base callers (a worker).
+pub let gaussian_splats_of = gaussian_splats.gaussian_splats
+## The points of a set's cloud, and its content key, for Base callers.
+pub let splat_count = gaussian_splats.splat_count
+import renderers.splat_data
+pub let splat_key = splat_data.splat_key
+## Release the shared splat shader and pipelines.
+pub let release_splat_pipelines = gaussian_splats.release_splat_pipelines
+import renderers.radix_sort
+## The GPU radix sort Gaussian splats order their depths with.
+pub type RadixSort = radix_sort.RadixSort
+pub let radix_arguments = radix_sort.radix_arguments
 
 pub type Material = material.Material
 pub type Color = material.Color
