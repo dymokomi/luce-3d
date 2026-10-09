@@ -1,0 +1,129 @@
+## Blue noise for the fog march's per-pixel start offsets (shaders/fog.frag):
+## a 64×64 tile of ranks laid out by void and cluster (Ulichney 1993), so
+## neighboring pixels start their steps far apart and what is left of the step
+## pattern is fine grain with no low frequencies, not bands. Made once, the
+## first time a fog scene fills its table.
+import memory
+from luce_std import math
+
+## Texels across the tile, each way.
+pub let noise_side: usize = 64
+let cells: usize = 4096
+## The energy filter's width, in texels (Ulichney's 1.5 suits 64×64 too).
+let spread: f64 = 1.5
+## Of the tile, the share the initial binary pattern sets.
+let seeded: usize = 410
+
+## The tile's values in 0..1, row by row: `noise_side`² floats, each rank
+## (k + 0.5) / 4096 once.
+pub func blue_noise(out: f32[]) -> !:
+    var work = try NoiseWork.make()
+    defer work.close()
+    work.seed()
+    work.settle()
+    # Phase 1: rank the initial points by taking the tightest cluster each time.
+    let initial = try new bool[cells] --- in memory.heap
+    defer free(initial) in memory.heap
+    memory.copy(initial, work.set, cells)
+    let start = try new f64[cells] --- in memory.heap
+    defer free(start) in memory.heap
+    memory.copy(start, work.energy, cells)
+    var rank = seeded
+    while rank > 0:
+        rank -= 1
+        let at = work.tightest()
+        work.toggle(at)
+        work.rank[at] = rank
+    # Phases 2 and 3: from the initial points, fill the largest void each time.
+    memory.copy(work.set, initial, cells)
+    memory.copy(work.energy, start, cells)
+    rank = seeded
+    while rank < cells:
+        let at = work.loosest()
+        work.toggle(at)
+        work.rank[at] = rank
+        rank += 1
+    for at in 0..<cells: out[at] = (f32)(((f64)work.rank[at] + 0.5) / (f64)cells)
+
+struct NoiseWork:
+    ## Which texels hold a point, the Gaussian energy of the points at each
+    ## texel, the filter by wrapped offset, and each texel's rank.
+    var set: bool[]
+    var energy: f64[]
+    var filter: f64[]
+    var rank: usize[]
+
+    static func make() -> NoiseWork!:
+        var work = NoiseWork()
+        errdefer work.close()
+        work.set = try new bool[cells] in memory.heap
+        work.energy = try new f64[cells] in memory.heap
+        work.filter = try new f64[cells] --- in memory.heap
+        work.rank = try new usize[cells] in memory.heap
+        for y in 0..<noise_side:
+            for x in 0..<noise_side:
+                let dx = (f64)(x if x <= noise_side // 2 else noise_side - x)
+                let dy = (f64)(y if y <= noise_side // 2 else noise_side - y)
+                work.filter[y * noise_side + x] = math.exp(-(dx * dx + dy * dy) / (2.0 * spread * spread))
+        return work
+
+    ## The initial points: `seeded` texels picked by a fixed generator.
+    func seed():
+        var state: u64 = 0x9E3779B97F4A7C15
+        var placed: usize = 0
+        while placed < seeded:
+            state = state *% 6364136223846793005 +% 1442695040888963407
+            let at = (usize)(state >> 33) % cells
+            if self.set[at]: continue
+            self.toggle(at)
+            placed += 1
+
+    ## Move points from their tightest cluster to the largest void until the
+    ## move would put a point back where it came from.
+    func settle():
+        var moves: usize = 0
+        while moves < cells * 4:
+            let cluster = self.tightest()
+            self.toggle(cluster)
+            let hole = self.loosest()
+            self.toggle(hole)
+            if hole == cluster: return
+            moves += 1
+
+    ## Set or clear the point at `at`, updating every texel's energy.
+    func toggle(at: usize):
+        self.set[at] = not self.set[at]
+        let sign = 1.0 if self.set[at] else -1.0
+        let ax = at % noise_side
+        let ay = at // noise_side
+        for y in 0..<noise_side:
+            let row = ((y + noise_side - ay) % noise_side) * noise_side
+            for x in 0..<noise_side:
+                self.energy[y * noise_side + x] += sign * self.filter[row + (x + noise_side - ax) % noise_side]
+
+    ## The point with the most energy: the middle of the tightest cluster.
+    func tightest() -> usize:
+        var best: usize = 0
+        var most = -1.0e300
+        for at in 0..<cells:
+            if self.set[at] and self.energy[at] > most:
+                most = self.energy[at]
+                best = at
+        return best
+
+    ## The empty texel with the least energy: the middle of the largest void.
+    func loosest() -> usize:
+        var best: usize = 0
+        var least = 1.0e300
+        for at in 0..<cells:
+            if not self.set[at] and self.energy[at] < least:
+                least = self.energy[at]
+                best = at
+        return best
+
+    func close():
+        if self.set.length > 0: free(self.set) in memory.heap
+        if self.energy.length > 0: free(self.energy) in memory.heap
+        if self.filter.length > 0: free(self.filter) in memory.heap
+        if self.rank.length > 0: free(self.rank) in memory.heap
+        self = NoiseWork()

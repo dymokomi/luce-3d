@@ -3,11 +3,15 @@
 ## background on every side, becomes texels whose z slices lie side by side in
 ## one rgba16_float atlas: red the density, green the optical depth toward the
 ## key light, blue toward the sky (+Y), alpha the emission field (a second
-## grid of the set, sampled at each texel's center; zero without one). The optical depths (density integrated
+## grid of the set, sampled at each texel's center; zero without one, and
+## never below zero: light is not negative). With an emission color field,
+## a second block of tiles below the first holds its values in red, as they
+## are (negative ones too: the ramp's range places them). The optical depths (density integrated
 ## along world length) are swept plane by plane on the CPU when the volume is
 ## made, so the shader's lighting is two texture reads, and a changed density
 ## scale needs no new sweep (the shader scales them). A box larger than
-## `most_texels` is averaged down by a whole factor until it fits.
+## `most_texels` (both blocks counted) is averaged down by a whole factor
+## until it fits.
 import memory
 from luce_std import math, parallel
 import errors
@@ -31,6 +35,9 @@ pub struct FogTexels:
     pub var height: usize
     ## Box coordinates (0..1 across the box) to world.
     pub var box: Matrix4
+    ## How far below the first block of tiles a second one starts (its rows
+    ## of texels), holding the emission color field in red; 0 without one.
+    pub var block: usize
     ## The world length of a texel's shortest edge.
     pub var voxel: f64
     ## The highest density.
@@ -47,7 +54,7 @@ pub struct FogTexels:
 ## The texels of fog `grid` placed by `matrix`, its optical depths swept toward
 ## `light` (a world direction toward the key light) and toward +Y, and the
 ## values of `emission` (a grid of the same set) in alpha.
-pub func fog_texels(grid: const SparseGrid*, emission: const SparseGrid*?, matrix: Matrix4, light: Vector3) -> FogTexels!:
+pub func fog_texels(grid: const SparseGrid*, emission: const SparseGrid*?, color: const SparseGrid*?, matrix: Matrix4, light: Vector3) -> FogTexels!:
     let keys = grid.keys.view()
     if keys.length == 0: error(errors.invalid, "an empty fog grid has nothing to draw")
     let (fx, fy, fz) = key_leaf(keys[0])
@@ -64,11 +71,13 @@ pub func fog_texels(grid: const SparseGrid*, emission: const SparseGrid*?, matri
     for axis in 0..<(usize)3: extent[axis] = (high[axis] - low[axis] + 1) * 8
     var factor: i64 = 1
     var counts: usize[3] = [0, 0, 0]
+    # A second block of tiles for the emission color field, below the first.
+    let blocks: usize = 2 if color != none and emission != none else 1
     var columns: usize = 0
     while true:
         for axis in 0..<(usize)3: counts[axis] = (usize)((extent[axis] + factor - 1) // factor + 2)
-        columns = atlas_columns(counts)
-        if columns > 0 and counts[0] * counts[1] * counts[2] <= most_texels: break
+        columns = atlas_columns(counts, blocks)
+        if columns > 0 and counts[0] * counts[1] * counts[2] * blocks <= most_texels: break
         factor += 1
     let rows = (counts[2] + columns - 1) // columns
     # Texel t covers voxels origin + t * factor ..< origin + (t + 1) * factor: one
@@ -88,8 +97,9 @@ pub func fog_texels(grid: const SparseGrid*, emission: const SparseGrid*?, matri
     let density = try densities(grid, origin, factor, counts)
     defer free(density) in memory.heap
     let width = columns * counts[0]
-    let height = rows * counts[1]
-    var result = FogTexels(counts = counts, columns = columns, width = width, height = height, box = box, voxel = voxel, peak = 0.0)
+    let height = rows * counts[1] * blocks
+    var result = FogTexels(counts = counts, columns = columns, width = width, height = height, box = box, voxel = voxel, peak = 0.0,
+                           block = rows * counts[1] if blocks == 2 else 0)
     result.texels = try new f16[width * height * 4] --- in memory.heap
     errdefer result.close()
     memory.set(u8[]((u8*)result.texels.data, result.texels.length * 2), 0)
@@ -105,23 +115,27 @@ pub func fog_texels(grid: const SparseGrid*, emission: const SparseGrid*?, matri
     try sweep(density, &layout, box, try light.normalized(), result.texels, 1)
     try sweep(density, &layout, box, Vector3(0.0, 1.0, 0.0), result.texels, 2)
     if let field = emission:
-        var work = EmissionWork(grid, field, origin, factor, &layout, result.texels)
+        var work = EmissionWork(grid, field, origin, factor, &layout, result.texels, 0, 3, true)
         try parallel.for_each_range(counts[2], 1, (void*)&work, sample_emission)
+        if let hue = color:
+            var colors = EmissionWork(grid, hue, origin, factor, &layout, result.texels, result.block * width * 4, 0, false)
+            try parallel.for_each_range(counts[2], 1, (void*)&colors, sample_emission)
     return result
 
-## Slices per atlas row so that the atlas is about square and at most
-## `atlas_side` texels each way; 0 when no layout fits.
-func atlas_columns(counts: usize[3]) -> usize:
+## Slices per atlas row so that the atlas (`blocks` blocks of tiles, one
+## below the other) is about square and at most `atlas_side` texels each way;
+## 0 when no layout fits.
+func atlas_columns(counts: usize[3], blocks: usize) -> usize:
     if counts[0] > atlas_side or counts[1] > atlas_side: return 0
     let widest = atlas_side // counts[0]
-    var columns = (usize)math.ceil(math.sqrt((f64)counts[2] * (f64)counts[1] / (f64)counts[0]))
+    var columns = (usize)math.ceil(math.sqrt((f64)counts[2] * (f64)counts[1] * (f64)blocks / (f64)counts[0]))
     if columns > widest: columns = widest
     if columns > counts[2]: columns = counts[2]
     if columns == 0: columns = 1
     let rows = (counts[2] + columns - 1) // columns
-    if rows * counts[1] > atlas_side:
+    if rows * counts[1] * blocks > atlas_side:
         columns = widest
-        if (counts[2] + columns - 1) // columns * counts[1] > atlas_side: return 0
+        if (counts[2] + columns - 1) // columns * counts[1] * blocks > atlas_side: return 0
     return columns
 
 ## Column `axis` (0 x, 1 y, 2 z) of `box`'s linear part.
@@ -194,9 +208,14 @@ struct EmissionWork:
     let factor: i64
     let layout: const Layout*
     let texels: f16[]
+    ## Where the block written starts in the texels (halves), the channel
+    ## written, and whether values below zero are cut to zero.
+    let base: usize
+    let channel: usize
+    let positive: bool
 
-## The emission field at each texel's center (in the density grid's index
-## space, then the set's world, where both grids lie), slices `first..<end`.
+## A field at each texel's center (in the density grid's index space, then
+## the set's world, where both grids lie), slices `first..<end`.
 func sample_emission(context: void*, first: usize, end: usize, worker: usize):
     _ = worker
     let work = (EmissionWork*)context
@@ -209,7 +228,8 @@ func sample_emission(context: void*, first: usize, end: usize, worker: usize):
                 let index = Vector3((f64)work.origin[0] - 0.5 + ((f64)x + 0.5) * span, (f64)work.origin[1] - 0.5 + ((f64)y + 0.5) * span,
                                     (f64)work.origin[2] - 0.5 + ((f64)z + 0.5) * span)
                 let value = sampler.sample(work.grid.transform.transform_point(index))
-                work.texels[work.layout.at(x, y, z) * 4 + 3] = (f16)math.clamp(value, 0.0, deepest)
+                let low = 0.0 if work.positive else -deepest
+                work.texels[work.base + work.layout.at(x, y, z) * 4 + work.channel] = (f16)math.clamp(value, low, deepest)
 
 # mark: Optical depths
 

@@ -34,6 +34,7 @@ import renderers.knife
 pub type Knife = knife.Knife
 pub type KnifePlane = knife.KnifePlane
 import renderers.fog_volume
+import renderers.fog_scene
 ## A fog drawing ray-marched on the GPU, and its look's numbers.
 pub type FogVolume = fog_volume.FogVolume
 pub type FogLook = fog_volume.FogLook
@@ -48,8 +49,11 @@ pub let fog_volume_key = fog_volume.fog_volume_key
 pub let fog_look = fog_volume.fog_look
 pub let fog_look_of = fog_volume.fog_look_of
 pub let restyle_fog = fog_volume.restyle_fog
+## The fog drawings of a view, ray-marched together.
+pub type FogScene = fog_scene.FogScene
+pub let fog_scene_type = fog_scene.fog_scene_type
 ## Release the shared fog shader and pipelines.
-pub let release_fog_pipelines = fog_volume.release_fog_pipelines
+pub let release_fog_pipelines = fog_scene.release_fog_pipelines
 import renderers.gaussian_splats
 ## A point cloud drawn as Gaussian splats (or dots), how it looks, and the
 ## GPU times of its last sorted view.

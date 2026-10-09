@@ -1,9 +1,10 @@
-## A fog volume's emission colors as a strip of 256 texels, the second image
-## shaders/fog.frag samples: texel i is the color its look emits at the emission
-## field value i/255 of the way along the look's emission range (luce-geocore's
-## VolumeLook.emission_color_at: the emission color ramp there, or the emission
-## color throughout). The shader finds a value's texel with `emission_fit`, so
-## the strip is all a ramp costs the GPU: 2 KiB, sent again only when it changes.
+## A fog drawing's emission colors as a strip of 256 texels, a row of the fog
+## scene's table (renderers/fog_scene.lucb): texel i is the color its look
+## emits at the emission color field's value i/255 of the way along the look's
+## emission range (luce-geocore's VolumeLook.emission_color_at: the emission
+## color ramp there, or the emission color throughout). The shader finds a
+## value's place with `emission_fit`, so a ramp costs the GPU one table row,
+## sent again only when the table changes.
 from luce_std import math
 from luce_geocore.kernel import VolumeLook
 
@@ -12,17 +13,17 @@ pub let strip_texels: usize = 256
 ## How far past 1 an emitted color may go (an HDR ramp's brightest point).
 let brightest: f64 = 100.0
 
-## Fill `out` (strip_texels × 4 half floats, rgba) with `look`'s emission
-## colors along its emission range.
-pub func emission_strip(look: const VolumeLook*, out: f16[]):
+## Fill `out` (strip_texels × 4 floats, rgba) with `look`'s emission colors
+## along its emission range.
+pub func emission_strip(look: const VolumeLook*, out: f32[]):
     let span = look.emission_high - look.emission_low
     for at in 0..<strip_texels:
         let value = look.emission_low + span * (f64)at / (f64)(strip_texels - 1)
         let color = look.emission_color_at(value)
-        out[at * 4] = (f16)math.clamp(color.x, 0.0, brightest)
-        out[at * 4 + 1] = (f16)math.clamp(color.y, 0.0, brightest)
-        out[at * 4 + 2] = (f16)math.clamp(color.z, 0.0, brightest)
-        out[at * 4 + 3] = (f16)1.0
+        out[at * 4] = (f32)math.clamp(color.x, 0.0, brightest)
+        out[at * 4 + 1] = (f32)math.clamp(color.y, 0.0, brightest)
+        out[at * 4 + 2] = (f32)math.clamp(color.z, 0.0, brightest)
+        out[at * 4 + 3] = 1.0
 
 ## Where the shader finds an emission field value `e` on the strip: at
 ## clamp((e - low) * scale, 0, 1) of its length. A range of no length steps
