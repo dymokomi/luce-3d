@@ -28,6 +28,7 @@ let flag_centers: u32 = 4
 let flag_splats: u32 = 8
 let flag_marks: u32 = 16
 let flag_lod: u32 = 32
+let flag_antialiased: u32 = 64
 
 ## How a cloud draws.
 pub enum SplatMode as u8:
@@ -233,6 +234,7 @@ pub struct GaussianSplats:
         if self.data.splats: flags = flags | flag_splats
         if buffers.marks.is_open(): flags = flags | flag_marks
         if self.has_lod(): flags = flags | flag_lod
+        if self.data.antialiased: flags = flags | flag_antialiased
         let used = (look.sh_degree + 1) * (look.sh_degree + 1) - 1
         let rotation = self.data.rotation
         let uniforms: f32[32] = [(f32)eye.x, (f32)eye.y, (f32)eye.z, (f32)projection.near,

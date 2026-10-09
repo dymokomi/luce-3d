@@ -65,7 +65,9 @@ interleaved in depth through a `SplatScene` compositing back to front across
 clouds (where drawing them one after the other lays the second over the
 first), from both sides; selection marks tinting the marked splat only; and a
 2^20-splat ball seen from 15 units drawing under a tenth of its splats with
-level of detail, its summed color within 6% of the full draw's (about 4%). The GPU radix sort is
+level of detail, its summed color within 6% of the full draw's (about 4%);
+and a sub-pixel splat of an antialiased capture drawn at its compensated
+opacity, σ²/(σ² + 0.3) of the plain one's. The GPU radix sort is
 checked against a CPU stable sort on random 32-bit keys, many ties, 24- and
 16-bit keys, a partial tile, one key and none. It ends by printing GPU times per
 step for 1M, 3M and 6M synthetic degree-3 splats in a 2800×1800 view (report

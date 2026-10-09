@@ -12,7 +12,10 @@
 // in J, plus a 0.3 px² low-pass. The quad spans k·√λ along the eigenvectors,
 // where the Gaussian falls to the alpha cull (k ≤ 3). The color adds the SH
 // bands toward the view direction (in the splat's SH frame) to the DC color,
-// clamps at 0 and decodes sRGB, as luce-geocore's display_color does.
+// clamps at 0 and decodes sRGB, as luce-geocore's display_color does. A
+// capture trained antialiased (Mip-Splatting's 2D filter; SPZ's flag, the
+// detail `gsplat_antialiased`) scales the opacity by √(det Σ' / det(Σ' + 0.3))
+// so the low-pass does not fatten small splats.
 //
 // Level of detail: a cloud packed with merged levels (one merged splat per run
 // of 4, 16, 64 and 256 consecutive splats of its Morton order, splat_lod)
@@ -224,12 +227,19 @@ void main() {
                     float a = dot(t0, s_t0) + 0.3;
                     float b = dot(t0, s_t1);
                     float d = dot(t1, s_t1) + 0.3;
+                    // An antialiased capture (Mip-Splatting) keeps its splat's
+                    // integral through the low-pass: opacity · √(det Σ' / det(Σ' + 0.3 I)).
+                    if ((p.counts.w & flag_antialiased) != 0u && !merged) {
+                        float before = max((a - 0.3) * (d - 0.3) - b * b, 0.0);
+                        opacity *= sqrt(before / max(a * d - b * b, 1e-30));
+                        shown = opacity >= p.look.x;
+                    }
                     float mid = 0.5 * (a + d);
                     float radius = sqrt(max(0.25 * (a - d) * (a - d) + b * b, 0.0));
                     float l1 = mid + radius;
                     float l2 = max(mid - radius, 0.0);
                     vec2 v1 = abs(b) > 1e-12 * max(a, d) ? normalize(vec2(b, l1 - a)) : (a >= d ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
-                    float k = min(sqrt(2.0 * log(opacity / p.look.x)), 3.0);
+                    float k = min(sqrt(2.0 * log(max(opacity / p.look.x, 1.0))), 3.0);
                     h1 = v1 * min(k * sqrt(l1), p.look.z);
                     h2 = vec2(-v1.y, v1.x) * min(k * sqrt(l2), p.look.z);
                 }

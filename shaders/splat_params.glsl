@@ -19,6 +19,7 @@ const uint flag_frames = 2u;   // per-splat SH frames (restorient) are stored
 const uint flag_centers = 4u;  // draw dots at the centers
 const uint flag_splats = 8u;   // the cloud has orient, scale and opacity
 const uint flag_marks = 16u;   // selection marks are stored: marked splats are tinted
+const uint flag_antialiased = 64u; // trained with Mip-Splatting's 2D filter: compensate opacity for the low-pass
 const uint flag_lod = 32u;     // merged levels (runs of 4, 16, 64, 256 splats) follow the splats
 
 // Workgroups of 256 splats in a 2D grid: the splat this invocation handles.

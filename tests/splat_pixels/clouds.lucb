@@ -5,7 +5,7 @@ import interop
 import memory
 from luce_std import math
 from luce_geocore.geocore import Vector3, GeometrySet
-from luce_geocore.kernel import Attribute, AttributeStore, Domain, DataType, Float3, empty_set, adopt_set, dispose_set, points_component, cloud_assembled
+from luce_geocore.kernel import Attribute, AttributeStore, Domain, DataType, Float3, empty_set, adopt_set, dispose_set, points_component, cloud_assembled, set_put_detail
 from luce_geocore.core.shared import Column
 from luce_geocore.splats import Quat
 
@@ -39,7 +39,7 @@ pub struct Draws:
 
 ## A set holding `splats`, with `items` SH items each from `sh` (items × 3 per
 ## splat, or none: zeros), and `restorient` per splat when given.
-pub func splat_set(splats: const Splat[], items: usize, sh: const f32[]? = none, restorient: const Quat[]? = none) -> interop.Reference[GeometrySet]!:
+pub func splat_set(splats: const Splat[], items: usize, sh: const f32[]? = none, restorient: const Quat[]? = none, antialiased: bool = false) -> interop.Reference[GeometrySet]!:
     let count = splats.length
     var store = AttributeStore()
     let orient = try Attribute.create("orient", Domain.point, DataType.float32, 4, count)
@@ -86,7 +86,7 @@ pub func splat_set(splats: const Splat[], items: usize, sh: const f32[]? = none,
             r[at * 4 + 2] = (f32)rest[at].z
             r[at * 4 + 3] = (f32)rest[at].w
         try store.put(made)
-    return try finish(positions, store)
+    return try finish(positions, store, antialiased)
 
 ## A plain cloud: `points` colored `colors` (linear), no splat attributes.
 pub func point_set(points: const Vector3[], colors: const Vector3[]) -> interop.Reference[GeometrySet]!:
@@ -126,8 +126,10 @@ pub func random_set(count: usize, radius: f64, smallest: f64, largest: f64, item
     for at in 0..<sh.length: sh[at] = (f32)draws.between(-0.15, 0.15)
     return try splat_set(splats, items, sh)
 
-## The set holding a cloud of `positions` and `store` (both taken).
-func finish(positions: Column[Float3], store: AttributeStore) -> interop.Reference[GeometrySet]!:
+## The set holding a cloud of `positions` and `store` (both taken), marked
+## as an antialiased capture (detail `gsplat_antialiased` 1, as luce-spz
+## reads an SPZ's flag) when asked.
+func finish(positions: Column[Float3], store: AttributeStore, antialiased: bool = false) -> interop.Reference[GeometrySet]!:
     let cloud = try cloud_assembled(positions, Vector3(), store)
     let storage = empty_set() catch failure:
         let close = points_component().close
@@ -136,6 +138,14 @@ func finish(positions: Column[Float3], store: AttributeStore) -> interop.Referen
     storage.put(points_component(), (void*)cloud) catch failure:
         dispose_set(storage)
         error(failure.code, failure.message)
+    if antialiased:
+        var flag = Attribute.create("gsplat_antialiased", Domain.detail, DataType.int32, 1, 1) catch failure:
+            dispose_set(storage)
+            error(failure.code, failure.message)
+        i32[]((i32*)flag.data.span().data, 1)[0] = 1
+        set_put_detail(storage, flag) catch failure:
+            dispose_set(storage)
+            error(failure.code, failure.message)
     return try adopt_set(storage)
 
 ## `count` flat random splats over a disc of `radius` on the ground (y within

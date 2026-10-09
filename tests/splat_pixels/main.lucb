@@ -2,7 +2,7 @@
 ## formulas they come from, depth order and occlusion both ways, SH colors
 ## against luce-geocore's display_color, dots, one upload per cloud, the GPU
 ## radix sort against a CPU sort, interleaved clouds sorted together
-## (SplatScene), selection tints and level of detail. The run ends with GPU times per step at
+## (SplatScene), selection tints, level of detail and antialiased captures. The run ends with GPU times per step at
 ## 1M, 3M and 6M synthetic splats in a 2800×1800 view (report only; set
 ## SPLAT_TIMINGS=0 to skip them), and with SPLAT_LARGE=<count> near and far
 ## frame times of that many splats with level of detail off and on.
@@ -38,7 +38,8 @@ pub func main(arguments: str[]) -> i32!:
     try scenes.interleaved(device)
     try scenes.marks(device)
     try scenes.level_of_detail(device)
-    print("PASS gaussian splats: analytic falloff, depth order both ways, occlusion both ways, grid lines under splats, display_color, dots, one upload, GPU sort, interleaved clouds, selection tint, level of detail")
+    try scenes.antialiased(device)
+    print("PASS gaussian splats: analytic falloff, depth order both ways, occlusion both ways, grid lines under splats, display_color, dots, one upload, GPU sort, interleaved clouds, selection tint, level of detail, antialiased captures")
     let wanted = process.variable("SPLAT_TIMINGS") else "1"
     if wanted != "0":
         for count in [(usize)1000000, 3000000, 6000000]:

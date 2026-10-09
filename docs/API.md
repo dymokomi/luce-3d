@@ -145,7 +145,10 @@ A point cloud with luce-geocore's splat conventions (`orient`, `scale`,
   the color: the SH bands toward the eye, turned into the splat's SH frame,
   added to the DC color, clamped at 0 and decoded from sRGB, which is
   luce-geocore's `display_color`; a marked (selected) splat is tinted toward
-  the highlight. Each visible splat writes a 48-byte quad record (clip center,
+  the highlight. A capture trained antialiased (Mip-Splatting's 2D filter;
+  detail `gsplat_antialiased`, which luce-spz reads from an SPZ) has its
+  opacity scaled by √(det Σ′ / det(Σ′ + 0.3 I)), so the low-pass keeps a
+  small splat's integral instead of fattening it. Each visible splat writes a 48-byte quad record (clip center,
   clip half axes, linear color and opacity; an opacity of 2 marks a dot) at its
   slot, and a 24-bit depth key (the view depth's float bits, reversed: far
   first). Every cloud of a view takes a run of slots in one combined index

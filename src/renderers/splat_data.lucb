@@ -16,7 +16,7 @@ from luce_std import math, parallel
 import memory
 import errors
 from luce_geocore.geocore import Vector3, Matrix4, GeometrySet
-from luce_geocore.kernel import AttributeStore, Attribute, Domain, set_cloud, cloud_store, cloud_positions, cloud_origin, cloud_positions_id, set_detail
+from luce_geocore.kernel import AttributeStore, Attribute, Domain, DataType, set_cloud, cloud_store, cloud_positions, cloud_origin, cloud_positions_id, set_detail
 from luce_geocore.splats import Quat, Mat3, Floats, point_floats, is_splat_store, sh_attribute, sh_items, detail_color_space, ColorSpace, from_linear
 from luce_geocore.splats import compose_covariance, rotation_part, sh_frame, restorient_name, orient_name, scale_name, opacity_name, color_name
 from renderers.splat_lod import LodArrays, build_lod, lod_minimum
@@ -56,6 +56,9 @@ pub struct SplatData:
     pub let srgb: bool
     ## Gaussian splats (orient, scale, opacity) rather than plain points.
     pub let splats: bool
+    ## Trained with Mip-Splatting's 2D filter (detail `gsplat_antialiased`):
+    ## the projection compensates the low-pass's opacity.
+    pub let antialiased: bool
     ## The placed centers' box: its low corner.
     pub var low: Vector3
     ## Its high corner.
@@ -103,10 +106,23 @@ pub func splat_key(set: const GeometrySet*, matrix: Matrix4) -> i64!:
         let entry = store.entry((usize)index)
         key = mix_id(mix_id(mix_id(key, entry.data.id()), entry.offsets.id()), (u64)(entry.kind) + (u64)entry.width * 16)
     key = mix_id(key, (u64)(u8)detail_color_space(set_detail(set)))
+    key = mix_id(key, 1 if is_antialiased(set) else 0)
     let origin = cloud_origin(cloud)
     for value in [matrix.x, matrix.y, matrix.z, matrix.translation, origin]:
         key = mix_value(mix_value(mix_value(key, value.x), value.y), value.z)
     return (i64)(key >> 1)
+
+## Whether `set` records an antialiased capture: detail `gsplat_antialiased`
+## nonzero (luce-spz reads it from an SPZ's flags).
+pub func is_antialiased(set: const GeometrySet*) -> bool:
+    let detail = set_detail(set)
+    let index = detail.find(antialiased_name, Domain.detail)
+    if index < 0: return false
+    let entry = detail.entry((usize)index)
+    return entry.kind != DataType.text and entry.number(0, 0) != 0.0
+
+## The detail luce-spz records an SPZ's antialiased flag in.
+pub let antialiased_name: str = "gsplat_antialiased"
 
 func mix_id(key: u64, id: u64) -> u64:
     return (key ^ id) *% 0x100000001B3
@@ -156,7 +172,7 @@ pub func splat_data(set: const GeometrySet*, matrix: Matrix4) -> SplatData!:
     let sh_index = sh_attribute(store)
     if splats and sh_index >= 0: harmonics_source = store.entry((usize)sh_index)
     var data = SplatData(count = count, items = items, stride = stride, origin = origin, rotation = rotation, srgb = splats and space == ColorSpace.srgb,
-                         splats = splats, low = Vector3(), high = Vector3())
+                         splats = splats, antialiased = splats and is_antialiased(set), low = Vector3(), high = Vector3())
     errdefer data.close()
     data.centers = try new f32[count * 4] --- in memory.heap
     data.colors = try new f16[count * 4] --- in memory.heap

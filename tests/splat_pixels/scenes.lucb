@@ -149,6 +149,30 @@ pub func level_of_detail(device: gpu.Device) -> !:
     for channel in 0..<(usize)3:
         assert(math.abs(merged[channel] - full[channel]) <= 0.06 * full[channel])
 
+## An antialiased capture (Mip-Splatting's 2D filter): a splat far under a
+## pixel keeps its integral through the 0.3 px² low-pass, its opacity scaled
+## by √(det Σ / det(Σ + 0.3)) = σ² / (σ² + 0.3) for a round one; the same
+## splat without the flag is drawn at its full opacity.
+pub func antialiased(device: gpu.Device) -> !:
+    var view = try View(device, width, height)
+    defer view.close()
+    let splats: Splat[1] = [Splat(center = Vector3(), scale = Vector3(0.01, 0.01, 0.01), opacity = 0.8, color = Vector3(1.0, 0.0, 0.0))]
+    var walls: Wall[]
+    let focal = 1.0 / math.tan(20.0 * math.pi / 180.0) * (f64)height * 0.5
+    let spread = focal * 0.01 / 4.0
+    let variance = spread * spread + 0.3
+    let falloff = math.exp(-0.5 * 0.5 / variance)
+    for flagged in [false, true]:
+        let set = try clouds.splat_set(splats, 0, none, none, flagged)
+        defer set.release()
+        let cloud = try GaussianSplats.of(set)
+        defer cloud.release()
+        let one: interop.Reference[GaussianSplats][1] = [cloud]
+        _ = try view.draw(one, walls)
+        let opacity = 0.8 * spread * spread / variance if flagged else 0.8
+        assert(near(view.at(80, 60, 0), opacity * falloff, 0.005))
+        print(f"antialiased {flagged}: middle red {view.at(80, 60, 0):.4f}, expected {opacity * falloff:.4f}")
+
 ## The sums of the color channels over the last read.
 func sums(view: View*) -> f64[3]!:
     var total: f64[3] = [0.0, 0.0, 0.0]
