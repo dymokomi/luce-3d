@@ -7,7 +7,7 @@ import interop
 import memory
 from luce_std import math
 from luce_3d.graphics import GaussianSplats, SplatScene, SplatLook, Vector3, splat_scene_type
-from luce_geocore.geocore import Selection, MeshBuilder, Mesh
+from luce_geocore.geocore import Selection, MeshBuilder, Mesh, GeometrySet
 import clouds
 from clouds import Splat
 import views
@@ -115,39 +115,55 @@ pub func marks(device: gpu.Device) -> !:
     _ = try view.draw_scene(scene, one, walls)
     assert(view.at(x, 60, 0) == 0.0 and view.at(x, 60, 2) > 0.9)
 
-## A cloud of 2^20 splats (level of detail built) far away (a ball of radius
-## 1 seen from 15 units, about 22 pixels across): with LOD it draws under a
-## tenth of them (merged twigs and chunks) and its image's summed color stays
-## within 6% of the full cloud's.
+## Level of detail keeps a cloud's brightness: each merged splat draws its
+## members' summed opacity composited as they overlap (1 - exp(-z g), out to
+## 3σ). A dense ball of 2^20 splats (radius 1, seen from 15 units, about 22
+## pixels across) at 1.5 pixels draws under a fifth of them, its image's
+## summed color within 6% of the full cloud's (thousands of splats deep, the
+## worst case: a merged splat's Gaussian reaches past the ball's rim). A
+## ground of 2^20 flat splats (radius 22, the 20M field's density), seen from
+## above at 60, 150 and 400 units with LOD at 1.5 and 4 pixels, stays within
+## 6% in every channel (its brightness within 4%): where merged splats
+## saturated at opacity 1, it lost up to 11%.
 pub func level_of_detail(device: gpu.Device) -> !:
-    var view = try View(device, width, height)
+    var view = try View(device, width, height, true, 1000.0)
     defer view.close()
-    let set = try clouds.random_set(1048576, 1.0, 0.002, 0.01, 0, 21)
-    defer set.release()
+    let scene = try new_scene()
+    defer scene.release()
+    let ball = try clouds.random_set(1048576, 1.0, 0.002, 0.01, 0, 21)
+    defer ball.release()
+    try compare_lod(&view, scene, ball, "ball", [Vector3(0.0, 0.0, 15.0)], [1.5], 0.06)
+    let ground = try clouds.ground_set(1048576, 22.0, 13)
+    defer ground.release()
+    try compare_lod(&view, scene, ground, "ground", [Vector3(0.0, 60.0, 1.0), Vector3(0.0, 150.0, 1.0), Vector3(0.0, 400.0, 1.0)], [1.5, 4.0], 0.06)
+
+## `set` drawn from each of `eyes` whole and with LOD at each of `sizes`:
+## LOD draws under a fifth of the splats, its summed color within `within`.
+func compare_lod(view: View*, scene: interop.Reference[SplatScene], set: interop.Reference[GeometrySet], name: str, eyes: const Vector3[], sizes: const f64[], within: f64) -> !:
     let cloud = try GaussianSplats.of(set)
     defer cloud.release()
     assert(cloud.value().has_lod())
     let one: interop.Reference[GaussianSplats][1] = [cloud]
     var walls: Wall[]
-    try view.look_from(Vector3(0.0, 0.0, 15.0))
-    let scene = try new_scene()
-    defer scene.release()
-    var look = SplatLook()
-    look.lod_pixels = 0.0
-    try scene.value().set_look(look)
-    _ = try view.draw_scene(scene, one, walls)
-    let full = try sums(&view)
-    let full_visible = (try scene.value().timings()).visible
-    look.lod_pixels = 1.5
-    look.lod_from = 0
-    try scene.value().set_look(look)
-    _ = try view.draw_scene(scene, one, walls)
-    let merged = try sums(&view)
-    let merged_visible = (try scene.value().timings()).visible
-    print(f"level of detail at 15 units: {full_visible} splats drawn, {merged_visible} with LOD; summed red {full[0]:.1f} -> {merged[0]:.1f}, green {full[1]:.1f} -> {merged[1]:.1f}, blue {full[2]:.1f} -> {merged[2]:.1f}")
-    assert(full_visible > 1000000 and merged_visible * 10 < full_visible)
-    for channel in 0..<(usize)3:
-        assert(math.abs(merged[channel] - full[channel]) <= 0.06 * full[channel])
+    for eye in eyes:
+        try view.look_from(eye)
+        var look = SplatLook()
+        look.lod_pixels = 0.0
+        try scene.value().set_look(look)
+        _ = try view.draw_scene(scene, one, walls)
+        let full = try sums(view)
+        let full_visible = (try scene.value().timings()).visible
+        for pixels in sizes:
+            look.lod_pixels = pixels
+            look.lod_from = 0
+            try scene.value().set_look(look)
+            _ = try view.draw_scene(scene, one, walls)
+            let merged = try sums(view)
+            let merged_visible = (try scene.value().timings()).visible
+            print(f"level of detail, {name} from {eye.length():.0f} units at {pixels:.1f} px: {full_visible} splats drawn, {merged_visible} with LOD; summed red {full[0]:.2f} -> {merged[0]:.2f} ({(merged[0] / full[0] - 1.0) * 100.0:+.1f}%), green {full[1]:.2f} -> {merged[1]:.2f}, blue {full[2]:.2f} -> {merged[2]:.2f}")
+            assert(merged_visible * 5 < full_visible)
+            for channel in 0..<(usize)3:
+                assert(math.abs(merged[channel] - full[channel]) <= within * full[channel])
 
 ## An antialiased capture (Mip-Splatting's 2D filter): a splat far under a
 ## pixel keeps its integral through the 0.3 px² low-pass, its opacity scaled

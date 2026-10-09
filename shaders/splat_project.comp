@@ -141,8 +141,9 @@ bool below_lod(uint s) {
     return 3.0 * p.look.y * sqrt(max(widest, 0.0)) * p.forward_fy.w < p.view.w * tz;
 }
 
-// A merged splat's opacity at `s` pixels per unit: its members' coverage
-// widened by the 0.3 px² low-pass, as each member would draw (splat_lod).
+// A merged splat's summed member opacity at its center at `s` pixels per
+// unit: its members' coverage widened by the 0.3 px² low-pass, as each member
+// would draw (splat_lod); over 1 where they overlap.
 float merged_opacity(uint source, float coverage, float s) {
     uint base = source * 6u;
     float xx = covariances[base], xy = covariances[base + 1u], xz = covariances[base + 2u];
@@ -151,7 +152,7 @@ float merged_opacity(uint source, float coverage, float s) {
     float extent = max(pow(max(det, 0.0), 1.0 / 3.0), 0.1 * (xx + yy + zz) / 3.0) * p.look.y * p.look.y;
     float members = unpackHalf2x16(colors[source].y).y;
     float area = extent * s * s;
-    return min((coverage * area + 0.3 * members) / (area + 0.3), 1.0);
+    return (coverage * area + 0.3 * members) / (area + 0.3);
 }
 
 void main() {
@@ -209,6 +210,9 @@ void main() {
             bool shown = true;
             if (splats) {
                 opacity = c.w;
+                // A merged splat carries its members' summed opacity at its
+                // center, over 1 where they overlap; splat.frag composites
+                // them as 1 - exp(-z g).
                 if (merged) opacity = merged_opacity(source, c.w, fy / tz);
                 shown = opacity >= p.look.x;
                 if (shown) {
@@ -239,7 +243,8 @@ void main() {
                     float l1 = mid + radius;
                     float l2 = max(mid - radius, 0.0);
                     vec2 v1 = abs(b) > 1e-12 * max(a, d) ? normalize(vec2(b, l1 - a)) : (a >= d ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
-                    float k = min(sqrt(2.0 * log(max(opacity / p.look.x, 1.0))), 3.0);
+                    // Members reach 3σ at most, and so does their merged splat.
+                    float k = merged ? 3.0 : min(sqrt(2.0 * log(max(opacity / p.look.x, 1.0))), 3.0);
                     h1 = v1 * min(k * sqrt(l1), p.look.z);
                     h2 = vec2(-v1.y, v1.x) * min(k * sqrt(l2), p.look.z);
                 }
@@ -256,7 +261,8 @@ void main() {
                 records[slot * 3u] = vec4(at * to_clip, far * (tz - near) / (far - near), tz);
                 records[slot * 3u + 1u] = vec4(h1 * to_clip, h2 * to_clip);
                 // A dot says so with an opacity of 2 (splat.frag draws it opaque and round).
-                records[slot * 3u + 2u] = vec4(color, splats ? opacity : 2.0);
+                // A merged splat's record says so with its opacity negated.
+                records[slot * 3u + 2u] = vec4(color, splats ? (merged ? -opacity : opacity) : 2.0);
                 // Farther first: the view depth's float bits, high 24 of them, reversed.
                 key = 0xFFFFFFu - (floatBitsToUint(tz) >> 7u);
                 atomicAdd(visible_count, 1u);

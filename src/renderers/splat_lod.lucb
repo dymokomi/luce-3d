@@ -9,13 +9,16 @@
 ## splat's mean squared extent (det Σᵢ)^⅓, its center the weighted mean μ,
 ## its covariance Σ wᵢ(Σᵢ + (μᵢ - μ)(μᵢ - μ)ᵀ) / Σ wᵢ, its color the
 ## weighted mean of the DC colors (in linear light: an sRGB cloud's are
-## decoded, averaged and encoded again), and its opacity the members' coverage
-## Σ wᵢ over its own extent a (at most 1). On screen every splat is widened
-## by the EWA low-pass (0.3 px²), which grows tiny members far more than
-## their merged splat; so the merged splat also keeps the members' summed
-## opacity Σ αᵢ (its color's fourth half), and the shader sets its opacity to
-## the members' widened coverage, (Σ wᵢ·s² + 0.3·Σ αᵢ) / (a·s² + 0.3) for s
-## pixels per unit at its depth. Merged splats carry no SH. Per view
+## decoded, averaged and encoded again), and its opacity the members' summed
+## opacity at its center, Σ wᵢ over its own extent a, over 1 where they
+## overlap. On screen every splat is widened by the EWA low-pass (0.3 px²),
+## which grows tiny members far more than their merged splat; so the merged
+## splat also keeps the members' summed opacity Σ αᵢ (its color's fourth
+## half), and the shader takes z = (Σ wᵢ·s² + 0.3·Σ αᵢ) / (a·s² + 0.3) for s
+## pixels per unit at its depth. splat.frag then draws the members' composite,
+## 1 - exp(-z g) out to 3σ, not a Gaussian clamped at opacity 1: clamping lost
+## up to 11% of a dense cloud's brightness far away (now within about 3% on
+## the 20M field and the bonsai capture). Merged splats carry no SH. Per view
 ## splat_project.comp draws the coarsest merged splat whose footprint is
 ## under a few pixels in place of its members (SplatLook.lod_pixels); a cloud
 ## far away then costs down to a 256th of its splats to sort and draw.
@@ -276,7 +279,8 @@ func merge_group(work: Merging*, start: usize, stop: usize, at: usize):
         for k in 0..<(usize)6: sigma[k] += w * ((f64)work.covariances[i * 6 + k] + spread[k])
     for k in 0..<(usize)6: sigma[k] = sigma[k] / weight
     let extent = mean_extent(sigma)
-    let opacity = math.min(weight / extent, 1.0) if extent > 0.0 else 1.0
+    # Unclamped: past 1 the members overlap (splat_project.comp, splat.frag).
+    let opacity = weight / extent if extent > 0.0 else 1.0
     work.centers[at * 4] = (f32)mean.x
     work.centers[at * 4 + 1] = (f32)mean.y
     work.centers[at * 4 + 2] = (f32)mean.z
