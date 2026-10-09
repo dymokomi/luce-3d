@@ -120,6 +120,9 @@ pub func main(arguments: str[]) -> i32!:
     # The leaves' 64 voxels plus a texel of padding each side.
     assert(volume.value().texels(0) == 66 and volume.value().texels(2) == 66)
     assert(volume.value().peak() > 0.95 and volume.value().peak() <= 1.0)
+    # The texel box, a texel (1/32) of padding past the leaves' -1..1.
+    let box = volume.value().bounds()
+    assert(math.abs(box.minimum.x + 1.046875) < 1.0e-9 and math.abs(box.maximum.y - 1.015625) < 1.0e-9)
     var look = FogLook()
     look.density = 4.0
     try volume.value().set_look(look)

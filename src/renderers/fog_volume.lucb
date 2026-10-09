@@ -13,7 +13,7 @@ import interop
 import memory
 from luce_std import math
 import errors
-from luce_geocore.geocore import Vector3, Matrix4, GeometrySet
+from luce_geocore.geocore import Vector3, Matrix4, GeometrySet, Bounds
 from luce_geocore.kernel import SparseGrid, GridClass, set_volume
 from cameras.perspective import PerspectiveCamera, Projection
 from core.material import Color, check_color
@@ -74,6 +74,16 @@ pub struct FogVolume:
     ## The highest density.
     pub func peak() -> f64:
         return self.data.peak
+
+    ## The world box around its texel box (for framing).
+    pub func bounds() -> Bounds:
+        var low = self.data.box.transform_point(corner_of(0))
+        var high = low
+        for corner in 1..<(usize)8:
+            let p = self.data.box.transform_point(corner_of(corner))
+            low = Vector3(math.min(low.x, p.x), math.min(low.y, p.y), math.min(low.z, p.z))
+            high = Vector3(math.max(high.x, p.x), math.max(high.y, p.y), math.max(high.z, p.z))
+        return Bounds(low, high)
 
     ## Texels across the box along `axis` (0 x, 1 y, 2 z).
     pub func texels(axis: i64) -> i64:
