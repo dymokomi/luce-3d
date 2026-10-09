@@ -1,6 +1,7 @@
-// Gaussian splats, step 3: the visible splats' keys and indices, packed in
-// splat order (a stable rank within each workgroup after its offset), ready
-// for the radix sort. The order is the same every frame, so equal keys never
+// Gaussian splats, step 3: the visible slots' keys and indices (over the
+// view's whole index space, every cloud's slots), packed in slot order (a
+// stable rank within each workgroup after its offset), ready for the radix
+// sort. The order is the same every frame, so equal keys never
 // swap between frames.
 #version 450
 #extension GL_GOOGLE_include_directive : require

@@ -8,7 +8,10 @@
 ##   shader adds the SH bands before decoding, as display_color does;
 ## - its SH frame orient · restorient⁻¹ (f16 × 4), when it has a restorient;
 ## - its SH items (f16, RGB per item, padded to whole u32 words).
-## A plain cloud packs centers and Cd only, drawn as dots.
+## A plain cloud packs centers and Cd only, drawn as dots. A splat cloud of
+## at least `lod_minimum` splats is then put in Morton order with merged
+## twigs and chunks after it (renderers/splat_lod), its `order` mapping
+## packed positions back to points.
 from luce_std import math, parallel
 import memory
 import errors
@@ -16,6 +19,7 @@ from luce_geocore.geocore import Vector3, Matrix4, GeometrySet
 from luce_geocore.kernel import AttributeStore, Attribute, Domain, set_cloud, cloud_store, cloud_positions, cloud_origin, cloud_positions_id, set_detail
 from luce_geocore.splats import Quat, Mat3, Floats, point_floats, is_splat_store, sh_attribute, sh_items, detail_color_space, ColorSpace, from_linear
 from luce_geocore.splats import compose_covariance, rotation_part, sh_frame, restorient_name, orient_name, scale_name, opacity_name, color_name
+from renderers.splat_lod import LodArrays, build_lod, lod_minimum
 
 ## The most points one cloud draws: 2^26.
 pub let splat_limit: usize = 67108864
@@ -34,6 +38,10 @@ pub struct SplatData:
     pub var frames: f16[]
     ## Per splat: `stride` halves, its SH items (RGB each) then zeros.
     pub var harmonics: f16[]
+    ## With level of detail: the point at each packed position (empty: the
+    ## points' own order). Centers, covariances and colors then also hold the
+    ## merged twigs and chunks after the `count` splats.
+    pub var order: u32[]
     ## Points packed.
     pub let count: usize
     ## SH items per splat (0, 3, 8 or 15).
@@ -53,8 +61,16 @@ pub struct SplatData:
     ## Its high corner.
     pub var high: Vector3
 
-    ## Free the arrays (after the upload, or unused).
+    ## Free everything.
     pub func close():
+        self.release_arrays()
+        if self.order.length > 0: free(self.order) in memory.heap
+        var indices: u32[]
+        self.order = indices
+
+    ## Free the packed arrays once uploaded (the order stays: selections map
+    ## through it).
+    pub func release_arrays():
         if self.centers.length > 0: free(self.centers) in memory.heap
         if self.covariances.length > 0: free(self.covariances) in memory.heap
         if self.colors.length > 0: free(self.colors) in memory.heap
@@ -164,6 +180,16 @@ pub func splat_data(set: const GeometrySet*, matrix: Matrix4) -> SplatData!:
         high = Vector3(math.max(high.x, x), math.max(high.y, y), math.max(high.z, z))
     data.low = origin.add(low)
     data.high = origin.add(high)
+    if splats and count >= lod_minimum:
+        var arrays = LodArrays(centers = data.centers, covariances = data.covariances, colors = data.colors, frames = data.frames,
+                               harmonics = data.harmonics, stride = stride, space = space)
+        let order = try build_lod(&arrays, count, low, high)
+        data.centers = arrays.centers
+        data.covariances = arrays.covariances
+        data.colors = arrays.colors
+        data.frames = arrays.frames
+        data.harmonics = arrays.harmonics
+        data.order = order
     return data
 
 func floats_of(store: const AttributeStore*, name: str, width: usize) -> Floats:

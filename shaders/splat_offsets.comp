@@ -1,5 +1,6 @@
 // Gaussian splats, step 2: where each workgroup's visible splats go, by an
-// exclusive scan of splat_project's group counts in one workgroup; and the
+// exclusive scan of splat_project's group counts (over the view's whole index
+// space, every cloud's slots; counts.x is its size) in one workgroup; and the
 // arguments of what follows: the quad draw (4 vertices, the visible count),
 // the sort's tiles of 2048 keys (x, 1, 1) and the count itself.
 #version 450

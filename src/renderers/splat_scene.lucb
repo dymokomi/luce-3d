@@ -1,0 +1,70 @@
+## Several point clouds drawn as one: a SplatScene sorts every cloud it is
+## given (a viewport's splat clouds and their instances) in one combined
+## index space each view (renderers/splat_view), so splats of clouds that
+## interleave in depth (overlapping captures, instanced copies) composite back
+## to front across clouds, where drawing the clouds one after another would
+## lay each cloud whole over the ones drawn before it. One look applies to all
+## of them; level of detail engages when they number at least its `lod_from`.
+from luce_gpu import gpu
+import interop
+import errors
+from cameras.perspective import PerspectiveCamera
+from renderers.gaussian_splats import GaussianSplats, SplatLook, draw_clouds, check_look
+from renderers.splat_view import SplatView, SplatTimes, open_view, close_view
+import memory
+
+pub struct SplatScene:
+    var view: SplatView*?
+    var settings: SplatLook
+
+    pub func init():
+        self.view = none
+        self.settings = SplatLook()
+
+    ## How its clouds draw.
+    pub func look() -> SplatLook:
+        return self.settings
+
+    pub func set_look(look: SplatLook) -> !:
+        try check_look(look)
+        self.settings = look
+
+    ## Draw `clouds` over what `target` holds, through `camera`, sorted
+    ## together. An unchanged view with the same clouds sorts nothing. A
+    ## standalone frame (no device) draws nothing.
+    pub func draw(clouds: const interop.Reference[GaussianSplats][], camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget]) -> !:
+        if clouds.length == 0: return
+        let native = try target.get()
+        var device = gpu.device_of(native) catch failure:
+            if failure.code != gpu.unavailable: error(failure.code, failure.message)
+            recover gpu.Device()
+        defer device.destroy()
+        let size = try native.size()
+        if not device.is_open() or size.pixel_width <= 0.0 or size.pixel_height <= 0.0: return
+        # A view on another device (a new window's) starts over.
+        if let held = self.view:
+            if not held.on(device):
+                close_view(held)
+                self.view = none
+        if self.view == none: self.view = try open_view(device)
+        let view = self.view else trap("splat view")
+        let pointers = try new GaussianSplats*[clouds.length] --- in memory.heap
+        defer free(pointers) in memory.heap
+        for index in 0..<clouds.length: pointers[index] = try clouds[index].get()
+        try draw_clouds(view, pointers, self.settings, camera, native, device, size.pixel_width, size.pixel_height, size.pixel_width / size.width)
+
+    ## How many views it sorted.
+    pub func sort_count() -> i64:
+        let view = self.view else return 0
+        return view.sort_count()
+
+    ## The GPU times of the last sorted view's steps (waiting for its pass).
+    pub func timings() -> SplatTimes!:
+        let view = self.view else error(errors.invalid, "no view was sorted yet")
+        return try view.timings()
+
+    pub func close():
+        if let view = self.view: close_view(view)
+        self.view = none
+
+pub let splat_scene_type: interop.Type[SplatScene] = interop.Type[SplatScene]("SplatScene", SplatScene.close, closeable = true, main_thread = true)

@@ -1,0 +1,313 @@
+## Level of detail for large splat clouds, built once when a cloud is packed
+## (renderers/splat_data). The packed splats are put in Morton order of their
+## centers, so runs of consecutive splats are spatially compact, and four
+## levels of merged splats are appended after them, one merged splat per run
+## of 4, 16, 64 and 256 consecutive splats: level l's merged splat for splat
+## i is at `level_start(count, l)` + i / 4^(l+1). They add a third to the
+## centers, covariances and colors (not the SH).
+## Each merged splat matches its members' moments: weights wᵢ = αᵢ·aᵢ, aᵢ the
+## splat's mean squared extent (det Σᵢ)^⅓, its center the weighted mean μ,
+## its covariance Σ wᵢ(Σᵢ + (μᵢ - μ)(μᵢ - μ)ᵀ) / Σ wᵢ, its color the
+## weighted mean of the DC colors (in linear light: an sRGB cloud's are
+## decoded, averaged and encoded again), and its opacity the members' coverage
+## Σ wᵢ over its own extent a (at most 1). On screen every splat is widened
+## by the EWA low-pass (0.3 px²), which grows tiny members far more than
+## their merged splat; so the merged splat also keeps the members' summed
+## opacity Σ αᵢ (its color's fourth half), and the shader sets its opacity to
+## the members' widened coverage, (Σ wᵢ·s² + 0.3·Σ αᵢ) / (a·s² + 0.3) for s
+## pixels per unit at its depth. Merged splats carry no SH. Per view
+## splat_project.comp draws the coarsest merged splat whose footprint is
+## under a few pixels in place of its members (SplatLook.lod_pixels); a cloud
+## far away then costs down to a 256th of its splats to sort and draw.
+from luce_std import math, parallel
+import memory
+import errors
+from luce_geocore.geocore import Vector3
+from luce_geocore.splats import ColorSpace, to_linear, from_linear
+
+## Merged levels, and splats a level-0 run holds (each level 4 times more).
+pub let lod_levels: usize = 4
+let first_run: usize = 4
+
+## Splats one merged splat of level `level` stands for: 4, 16, 64, 256.
+pub func run_size(level: usize) -> usize:
+    var size = first_run
+    for _ in 0..<level: size *= 4
+    return size
+
+## Clouds this large or larger get the merged levels (a smaller cloud is
+## cheap to draw whole).
+pub let lod_minimum: usize = 1048576
+
+## Merged splats of level `level` for `count` splats.
+pub func level_count(count: usize, level: usize) -> usize:
+    return (count + run_size(level) - 1) // run_size(level)
+
+## The packed index of level `level`'s first merged splat (lod_levels: the
+## end of them all).
+pub func level_start(count: usize, level: usize) -> usize:
+    var start = count
+    for below in 0..<level: start += level_count(count, below)
+    return start
+
+## The packed arrays one level build reorders and extends, borrowed from
+## SplatData: per splat 4 center floats, 6 covariance floats, 4 color halves,
+## `frame_halves` (0 or 4) frame halves and `stride` SH halves.
+pub struct LodArrays:
+    pub var centers: f32[]
+    pub var covariances: f32[]
+    pub var colors: f16[]
+    pub var frames: f16[]
+    pub var harmonics: f16[]
+    pub var stride: usize
+    ## How the colors are encoded.
+    pub var space: ColorSpace
+
+## The Morton order of the `count` packed splats (centers relative to the
+## pack origin, in `low`..`high`): `order[p]` is the splat now at position p.
+## Every array is permuted into it, and centers, covariances and colors grow
+## by the merged levels, which are filled. Replaces the arrays (the old
+## ones freed); returns `order` (heap, the caller's).
+pub func build_lod(arrays: LodArrays*, count: usize, low: Vector3, high: Vector3) -> u32[]!:
+    let order = try morton_order(arrays.centers, count, low, high)
+    errdefer free(order) in memory.heap
+    let total = level_start(count, lod_levels)
+    var centers = try new f32[total * 4] --- in memory.heap
+    errdefer free(centers) in memory.heap
+    var covariances = try new f32[total * 6] --- in memory.heap
+    errdefer free(covariances) in memory.heap
+    var colors = try new f16[total * 4] --- in memory.heap
+    errdefer free(colors) in memory.heap
+    # Frames and SH are only reordered (merged splats have none); a cloud
+    # without them gets one-element arrays, freed below.
+    var frames = try new f16[count * 4 if arrays.frames.length > 0 else 1] --- in memory.heap
+    errdefer free(frames) in memory.heap
+    var harmonics = try new f16[count * arrays.stride if arrays.harmonics.length > 0 else 1] --- in memory.heap
+    errdefer free(harmonics) in memory.heap
+    var work = Permuting(order = order, from_arrays = *arrays, to_centers = centers, to_covariances = covariances, to_colors = colors,
+                         to_frames = frames if arrays.frames.length > 0 else no_halves(), to_harmonics = harmonics if arrays.harmonics.length > 0 else no_halves(),
+                         count = count)
+    try parallel_ranges(count, 16384, (void*)&work, permute_range)
+    # Each level from the reordered splats, finest first.
+    for level in 0..<lod_levels:
+        var merging = Merging(centers = centers, covariances = covariances, colors = colors, first = 0, size = run_size(level), count = count,
+                              into = level_start(count, level), space = arrays.space)
+        try parallel_ranges(level_count(count, level), 256, (void*)&merging, merge_range)
+    free(arrays.centers) in memory.heap
+    free(arrays.covariances) in memory.heap
+    free(arrays.colors) in memory.heap
+    arrays.centers = centers
+    arrays.covariances = covariances
+    arrays.colors = colors
+    if arrays.frames.length > 0:
+        free(arrays.frames) in memory.heap
+        arrays.frames = frames
+    else: free(frames) in memory.heap
+    if arrays.harmonics.length > 0:
+        free(arrays.harmonics) in memory.heap
+        arrays.harmonics = harmonics
+    else: free(harmonics) in memory.heap
+    return order
+
+func no_halves() -> f16[]:
+    var nothing: f16[]
+    return nothing
+
+func parallel_ranges(count: usize, grain: usize, context: void*, body: func(void*, usize, usize, usize) -> unit!) -> !:
+    if count == 0: return
+    try parallel.for_each_range(count, grain, context, body)
+
+# mark: Morton order
+
+## Splat indices sorted by the Morton code of their centers quantized to 16
+## bits over the box's longest side: an LSD radix sort of 48-bit codes, 8 bits a
+## pass, stable, so equal codes keep their order.
+func morton_order(centers: const f32[], count: usize, low: Vector3, high: Vector3) -> u32[]!:
+    if count > 4294967295: error(errors.invalid, "a level-of-detail cloud holds under 2^32 splats")
+    let codes = try new u64[count] --- in memory.heap
+    defer free(codes) in memory.heap
+    let spare_codes = try new u64[count] --- in memory.heap
+    defer free(spare_codes) in memory.heap
+    let order = try new u32[count] --- in memory.heap
+    errdefer free(order) in memory.heap
+    let spare = try new u32[count] --- in memory.heap
+    defer free(spare) in memory.heap
+    # One step on every axis (the box's longest side over 2^16), so a flat
+    # cloud's thin axis takes few bits rather than splitting runs at random.
+    let side = math.max(high.x - low.x, math.max(high.y - low.y, high.z - low.z))
+    let step = 65535.0 / side if side > 0.0 else 0.0
+    var coding = Coding(centers = centers, codes = codes, order = order, low = low, scale = Vector3(step, step, step))
+    try parallel_ranges(count, 16384, (void*)&coding, code_range)
+    var keys_from = codes
+    var keys_to = spare_codes
+    var from_order = order
+    var to_order = spare
+    var counts: usize[256]
+    var shift: u64 = 0
+    while shift < 48:
+        for digit in 0..<(usize)256: counts[digit] = 0
+        for at in 0..<count: counts[(usize)((keys_from[at] >> shift) & 255)] += 1
+        var running: usize = 0
+        for digit in 0..<(usize)256:
+            let here = counts[digit]
+            counts[digit] = running
+            running += here
+        for at in 0..<count:
+            let digit = (usize)((keys_from[at] >> shift) & 255)
+            keys_to[counts[digit]] = keys_from[at]
+            to_order[counts[digit]] = from_order[at]
+            counts[digit] += 1
+        let keys_now = keys_from
+        keys_from = keys_to
+        keys_to = keys_now
+        let order_now = from_order
+        from_order = to_order
+        to_order = order_now
+        shift += 8
+    # Six passes end where they began: `order` holds the result.
+    return order
+
+struct Coding:
+    let centers: const f32[]
+    var codes: u64[]
+    var order: u32[]
+    let low: Vector3
+    let scale: Vector3
+
+func code_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (Coding*)context
+    for at in first..<end:
+        let x = quantized(((f64)work.centers[at * 4] - work.low.x) * work.scale.x)
+        let y = quantized(((f64)work.centers[at * 4 + 1] - work.low.y) * work.scale.y)
+        let z = quantized(((f64)work.centers[at * 4 + 2] - work.low.z) * work.scale.z)
+        work.codes[at] = spread_bits(x) | (spread_bits(y) << 1) | (spread_bits(z) << 2)
+        work.order[at] = (u32)at
+
+func quantized(value: f64) -> u64:
+    if not (value > 0.0): return 0
+    if value >= 65535.0: return 65535
+    return (u64)value
+
+## The 16 bits of `value` spread three apart (bit b to bit 3b).
+func spread_bits(value: u64) -> u64:
+    var x = value & 0xFFFF
+    x = (x | (x << 16)) & 0x0000FF0000FF
+    x = (x | (x << 8)) & 0x00F00F00F00F
+    x = (x | (x << 4)) & 0x0C30C30C30C3
+    x = (x | (x << 2)) & 0x249249249249
+    return x
+
+# mark: Reordering and merging
+
+struct Permuting:
+    let order: const u32[]
+    let from_arrays: LodArrays
+    var to_centers: f32[]
+    var to_covariances: f32[]
+    var to_colors: f16[]
+    var to_frames: f16[]
+    var to_harmonics: f16[]
+    let count: usize
+
+func permute_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (Permuting*)context
+    let source = work.from_arrays
+    let stride = source.stride
+    for at in first..<end:
+        let source_at = (usize)work.order[at]
+        for k in 0..<(usize)4: work.to_centers[at * 4 + k] = source.centers[source_at * 4 + k]
+        for k in 0..<(usize)6: work.to_covariances[at * 6 + k] = source.covariances[source_at * 6 + k]
+        for k in 0..<(usize)4: work.to_colors[at * 4 + k] = source.colors[source_at * 4 + k]
+        if work.to_frames.length > 0:
+            for k in 0..<(usize)4: work.to_frames[at * 4 + k] = source.frames[source_at * 4 + k]
+        if work.to_harmonics.length > 0:
+            for k in 0..<stride: work.to_harmonics[at * stride + k] = source.harmonics[source_at * stride + k]
+
+## One level's merge: group g of `size` splats from `first` + g·size (the
+## last group may be short) into packed index `into` + g.
+struct Merging:
+    var centers: f32[]
+    var covariances: f32[]
+    var colors: f16[]
+    let first: usize
+    let size: usize
+    let count: usize
+    let into: usize
+    let space: ColorSpace
+
+func merge_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (Merging*)context
+    for group in first..<end:
+        let start = work.first + group * work.size
+        var stop = start + work.size
+        if stop > work.count: stop = work.count
+        merge_group(work, start, stop, work.into + group)
+
+## The moment-matched splat of packed splats start..<stop, written at `at`.
+func merge_group(work: Merging*, start: usize, stop: usize, at: usize):
+    var weight = 0.0
+    var opacities = 0.0
+    var mean = Vector3()
+    var color = Vector3()
+    for i in start..<stop:
+        let w = splat_weight(work, i)
+        weight += w
+        if w > 0.0: opacities += (f64)work.centers[i * 4 + 3]
+        mean = mean.add(center_of(work, i).multiply_scalar(w))
+        color = color.add(linear_color(work, i).multiply_scalar(w))
+    if not (weight > 0.0):
+        # Nothing visible: an empty splat at the first member.
+        for k in 0..<(usize)4: work.centers[at * 4 + k] = work.centers[start * 4 + k]
+        work.centers[at * 4 + 3] = 0.0
+        for k in 0..<(usize)6: work.covariances[at * 6 + k] = work.covariances[start * 6 + k]
+        for k in 0..<(usize)4: work.colors[at * 4 + k] = work.colors[start * 4 + k]
+        return
+    mean = mean.multiply_scalar(1.0 / weight)
+    color = color.multiply_scalar(1.0 / weight)
+    var sigma: f64[6] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    for i in start..<stop:
+        let w = splat_weight(work, i)
+        if w <= 0.0: continue
+        let d = center_of(work, i).subtract(mean)
+        let spread: f64[6] = [d.x * d.x, d.x * d.y, d.x * d.z, d.y * d.y, d.y * d.z, d.z * d.z]
+        for k in 0..<(usize)6: sigma[k] += w * ((f64)work.covariances[i * 6 + k] + spread[k])
+    for k in 0..<(usize)6: sigma[k] = sigma[k] / weight
+    let extent = mean_extent(sigma)
+    let opacity = math.min(weight / extent, 1.0) if extent > 0.0 else 1.0
+    work.centers[at * 4] = (f32)mean.x
+    work.centers[at * 4 + 1] = (f32)mean.y
+    work.centers[at * 4 + 2] = (f32)mean.z
+    work.centers[at * 4 + 3] = (f32)opacity
+    for k in 0..<(usize)6: work.covariances[at * 6 + k] = (f32)sigma[k]
+    work.colors[at * 4] = (f16)from_linear(color.x, work.space)
+    work.colors[at * 4 + 1] = (f16)from_linear(color.y, work.space)
+    work.colors[at * 4 + 2] = (f16)from_linear(color.z, work.space)
+    work.colors[at * 4 + 3] = (f16)opacities
+
+## Packed splat i's DC color decoded to linear light.
+func linear_color(work: const Merging*, i: usize) -> Vector3:
+    return Vector3(to_linear((f64)work.colors[i * 4], work.space), to_linear((f64)work.colors[i * 4 + 1], work.space), to_linear((f64)work.colors[i * 4 + 2], work.space))
+
+func center_of(work: const Merging*, i: usize) -> Vector3:
+    return Vector3((f64)work.centers[i * 4], (f64)work.centers[i * 4 + 1], (f64)work.centers[i * 4 + 2])
+
+## A splat's weight: its opacity times its mean squared extent.
+func splat_weight(work: const Merging*, i: usize) -> f64:
+    let opacity = (f64)work.centers[i * 4 + 3]
+    if not (opacity > 0.0): return 0.0
+    var sigma: f64[6]
+    for k in 0..<(usize)6: sigma[k] = (f64)work.covariances[i * 6 + k]
+    return opacity * mean_extent(sigma)
+
+## (det Σ)^⅓ of a packed covariance (xx, xy, xz, yy, yz, zz): its mean
+## squared standard deviation; a flat or degenerate one falls back to a
+## tenth of its trace over 3, so discs (trained splats often are) still weigh.
+func mean_extent(s: const f64[6]) -> f64:
+    let det = s[0] * (s[3] * s[5] - s[4] * s[4]) - s[1] * (s[1] * s[5] - s[4] * s[2]) + s[2] * (s[1] * s[4] - s[3] * s[2])
+    let trace = (s[0] + s[3] + s[5]) / 3.0
+    let floor = 0.1 * trace
+    if not (det > 0.0): return math.max(floor, 0.0)
+    return math.max(math.cbrt(det), floor)

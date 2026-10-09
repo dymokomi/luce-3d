@@ -137,3 +137,26 @@ func finish(positions: Column[Float3], store: AttributeStore) -> interop.Referen
         dispose_set(storage)
         error(failure.code, failure.message)
     return try adopt_set(storage)
+
+## `count` flat random splats over a disc of `radius` on the ground (y within
+## ±0.02): a field to look across, near splats large on screen and far ones
+## tiny. Standard deviations log-uniform in 0.01..0.05 across, a fifth of
+## that up; colors at random, no SH.
+pub func ground_set(count: usize, radius: f64, seed: u64) -> interop.Reference[GeometrySet]!:
+    var draws = Draws(state = seed)
+    let splats = try new Splat[count] --- in memory.heap
+    defer free(splats) in memory.heap
+    let low = math.log(0.01)
+    let high = math.log(0.05)
+    for at in 0..<count:
+        var x = draws.between(-1.0, 1.0)
+        var z = draws.between(-1.0, 1.0)
+        while x * x + z * z > 1.0:
+            x = draws.between(-1.0, 1.0)
+            z = draws.between(-1.0, 1.0)
+        let across = math.exp(draws.between(low, high))
+        let angle = draws.between(0.0, math.pi)
+        splats[at] = Splat(center = Vector3(x * radius, draws.between(-0.02, 0.02), z * radius), orient = Quat(0.0, math.sin(angle), 0.0, math.cos(angle)),
+                           scale = Vector3(across, across * 0.2, math.exp(draws.between(low, high))), opacity = draws.between(0.3, 1.0),
+                           color = Vector3(draws.unit(), draws.unit(), draws.unit()))
+    return try splat_set(splats, 0)

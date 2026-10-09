@@ -60,11 +60,21 @@ apart); two half-opaque splats composited in both depth orders; a quad in front
 hiding a splat and one behind veiled by it; the middle pixel's color of a
 degree-3 splat with a rest frame against luce-geocore's `display_color` toward
 five eyes (about 0.0005 apart), and Cd at degree 0; dots for a plain cloud and
-Centers mode; one upload per cloud and one sort per view. The GPU radix sort is
+Centers mode; one upload per cloud and one sort per view; two clouds
+interleaved in depth through a `SplatScene` compositing back to front across
+clouds (where drawing them one after the other lays the second over the
+first), from both sides; selection marks tinting the marked splat only; and a
+2^20-splat ball seen from 15 units drawing under a tenth of its splats with
+level of detail, its summed color within 6% of the full draw's (about 4%). The GPU radix sort is
 checked against a CPU stable sort on random 32-bit keys, many ties, 24- and
 16-bit keys, a partial tile, one key and none. It ends by printing GPU times per
 step for 1M, 3M and 6M synthetic degree-3 splats in a 2800×1800 view (report
 only; `SPLAT_TIMINGS=0` skips them). On an M4 Max: 3M splats take about 14 ms
 a view (1.2 ms projecting, 0.2 gathering, 1.7 sorting, 10.8 drawing), 6M about
 29 ms; a view at rest is the draw alone (11 and 23 ms). On an RTX A5500 laptop
-GPU (Windows): 10 ms and 21 ms.
+GPU (Windows): 10 ms and 21 ms. `SPLAT_LARGE=20000000` also reports level of
+detail on a 20M-splat field 200 units across (no SH), seen from 2 units up
+and from 150 units overhead. On an M4 Max: packing 1.2 s; at eye level 37 ms
+a view without it (11.5M splats drawn), 33 ms at 2 pixels (9.7M), 17 ms at 4
+pixels (4.6M); overhead 29 ms without (11.9M), 22.5 ms at 2 pixels (8.8M),
+7 ms at 4 pixels (2.3M).

@@ -53,7 +53,8 @@ import renderers.gaussian_splats
 pub type GaussianSplats = gaussian_splats.GaussianSplats
 pub type SplatLook = gaussian_splats.SplatLook
 pub type SplatMode = gaussian_splats.SplatMode
-pub type SplatTimes = gaussian_splats.SplatTimes
+import renderers.splat_view
+pub type SplatTimes = splat_view.SplatTimes
 pub let gaussian_splats_type = gaussian_splats.gaussian_splats_type
 ## A heap GaussianSplats of a set's point cloud, for Base callers (a worker).
 pub let gaussian_splats_of = gaussian_splats.gaussian_splats
@@ -61,6 +62,10 @@ pub let gaussian_splats_of = gaussian_splats.gaussian_splats
 pub let splat_count = gaussian_splats.splat_count
 import renderers.splat_data
 pub let splat_key = splat_data.splat_key
+import renderers.splat_scene
+## Several clouds drawn as one, sorted together each view.
+pub type SplatScene = splat_scene.SplatScene
+pub let splat_scene_type = splat_scene.splat_scene_type
 ## Release the shared splat shader and pipelines.
 pub let release_splat_pipelines = gaussian_splats.release_splat_pipelines
 import renderers.radix_sort

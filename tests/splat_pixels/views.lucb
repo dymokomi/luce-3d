@@ -5,7 +5,7 @@ from luce_gpu import gpu
 import interop
 import memory
 from luce_3d import graphics as three
-from luce_3d.graphics import GaussianSplats, PerspectiveCamera, WireRenderer, Vector3
+from luce_3d.graphics import GaussianSplats, SplatScene, PerspectiveCamera, WireRenderer, Vector3
 
 ## An opaque axis-aligned quad facing the camera: x0..x1 by y0..y1 at depth z.
 pub struct Wall:
@@ -25,9 +25,9 @@ pub struct View:
     var image: f64[]
     var halves: u8[]
 
-    pub func init(device: gpu.Device, width: u32, height: u32, read: bool = true) -> !:
+    pub func init(device: gpu.Device, width: u32, height: u32, read: bool = true, far: f64 = 100.0) -> !:
         self.texture = try gpu.Texture.create(device, width, height, gpu.Format.rgba16_float)
-        self.camera = try interop.Reference[PerspectiveCamera].adopt(new PerspectiveCamera(40.0, (f64)width / (f64)height, 0.1, 100.0) in memory.heap,
+        self.camera = try interop.Reference[PerspectiveCamera].adopt(new PerspectiveCamera(40.0, (f64)width / (f64)height, 0.1, far) in memory.heap,
                                                                      three.perspective_camera_type, memory.heap)
         self.width = width
         self.height = height
@@ -54,6 +54,13 @@ pub struct View:
         return try self.draw_lines(splats, walls, no_lines())
 
     pub func draw_lines(splats: const interop.Reference[GaussianSplats][], walls: const Wall[], lines: const Vector3[]) -> gpu.Submission!:
+        return try self.draw_frame(splats, walls, lines, none)
+
+    ## Draw `walls`, then `splats` sorted together by `scene`.
+    pub func draw_scene(scene: interop.Reference[SplatScene], splats: const interop.Reference[GaussianSplats][], walls: const Wall[]) -> gpu.Submission!:
+        return try self.draw_frame(splats, walls, no_lines(), scene)
+
+    func draw_frame(splats: const interop.Reference[GaussianSplats][], walls: const Wall[], lines: const Vector3[], scene: interop.Reference[SplatScene]?) -> gpu.Submission!:
         let recording = try self.texture.frame()
         defer recording.release()
         let target = try recording.value().target()
@@ -63,8 +70,11 @@ pub struct View:
                                       Vector3(wall.x0, wall.y0, wall.z), Vector3(wall.x1, wall.y1, wall.z), Vector3(wall.x0, wall.y1, wall.z)]
             try WireRenderer.triangles(points, self.camera, target, wall.color)
         if lines.length > 0: try WireRenderer.lines(lines, self.camera, target, gpu.Color(1.0, 1.0, 1.0), 3.0, writes_depth = false)
-        for cloud in splats:
-            try cloud.value().draw(self.camera, target)
+        if let together = scene:
+            try together.value().draw(splats, self.camera, target)
+        else:
+            for cloud in splats:
+                try cloud.value().draw(self.camera, target)
         _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0))
         let submission = recording.value().submission()
         if self.image.length > 0:

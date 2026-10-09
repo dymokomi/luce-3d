@@ -1,13 +1,14 @@
 // The per-view uniforms the splat kernels share (128 bytes of push constants):
 // the camera in the cloud's pack frame (positions relative to its origin), the
-// target's size and focal lengths in pixels, the cloud's layout and the look.
+// target's size and focal lengths in pixels, where the cloud's splats sit in
+// the view's combined index space, its layout and the look.
 layout(push_constant) uniform Params {
     vec4 eye_near;     // eye x, y, z; near plane distance
     vec4 right_far;    // camera right; far plane distance
     vec4 up_fx;        // camera up; focal length in pixels along x
     vec4 forward_fy;   // view direction; focal length in pixels along y
-    vec4 view;         // target width and height in pixels; EWA clamps of x/z and y/z
-    uvec4 counts;      // splats; SH items stored per splat; SH items evaluated; flags
+    vec4 view;         // target width and height in pixels; first index (bits); LOD footprint in pixels (0: off)
+    uvec4 counts;      // splats (the gather kernels: the whole index space); SH items stored per splat; SH items evaluated; flags
     vec4 look;         // alpha cull; splat scale; largest quad half axis in pixels; dot radius in pixels
     vec4 rotation;     // the placement's rotation (x, y, z, w), turning SH-frame directions to world
 } p;
@@ -17,6 +18,8 @@ const uint flag_srgb = 1u;     // colors and SH are sRGB-encoded: decode after a
 const uint flag_frames = 2u;   // per-splat SH frames (restorient) are stored
 const uint flag_centers = 4u;  // draw dots at the centers
 const uint flag_splats = 8u;   // the cloud has orient, scale and opacity
+const uint flag_marks = 16u;   // selection marks are stored: marked splats are tinted
+const uint flag_lod = 32u;     // merged levels (runs of 4, 16, 64, 256 splats) follow the splats
 
 // Workgroups of 256 splats in a 2D grid: the splat this invocation handles.
 uint splat_index() {

@@ -1,16 +1,20 @@
 ## Offscreen checks of Gaussian splats (GaussianSplats): pixels against the
 ## formulas they come from, depth order and occlusion both ways, SH colors
-## against luce-geocore's display_color, dots, one upload per cloud, and the
-## GPU radix sort against a CPU sort. The run ends with GPU times per step at
+## against luce-geocore's display_color, dots, one upload per cloud, the GPU
+## radix sort against a CPU sort, interleaved clouds sorted together
+## (SplatScene), selection tints and level of detail. The run ends with GPU times per step at
 ## 1M, 3M and 6M synthetic splats in a 2800×1800 view (report only; set
-## SPLAT_TIMINGS=0 to skip them).
+## SPLAT_TIMINGS=0 to skip them), and with SPLAT_LARGE=<count> near and far
+## frame times of that many splats with level of detail off and on.
 from luce_gpu import gpu
 import os
+import strings
 from luce_std import process
 from luce_3d.graphics import release_splat_pipelines, release_line_pipelines
 import pixels
 import sorting
 import timings
+import scenes
 
 pub func main(arguments: str[]) -> i32!:
     _ = arguments
@@ -31,9 +35,15 @@ pub func main(arguments: str[]) -> i32!:
     try pixels.harmonics(device)
     try pixels.dots(device)
     try pixels.uploads(device)
-    print("PASS gaussian splats: analytic falloff, depth order both ways, occlusion both ways, grid lines under splats, display_color, dots, one upload, GPU sort")
+    try scenes.interleaved(device)
+    try scenes.marks(device)
+    try scenes.level_of_detail(device)
+    print("PASS gaussian splats: analytic falloff, depth order both ways, occlusion both ways, grid lines under splats, display_color, dots, one upload, GPU sort, interleaved clouds, selection tint, level of detail")
     let wanted = process.variable("SPLAT_TIMINGS") else "1"
     if wanted != "0":
         for count in [(usize)1000000, 3000000, 6000000]:
             try timings.report(device, count)
+    if let large = process.variable("SPLAT_LARGE"):
+        let count = strings.parse_u64(large) else error(gpu.invalid_geometry, "SPLAT_LARGE is a splat count")
+        try timings.report_lod(device, (usize)count)
     return 0

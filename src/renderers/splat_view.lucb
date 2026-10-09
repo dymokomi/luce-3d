@@ -1,0 +1,246 @@
+## The per-view work that draws Gaussian splats, for one cloud or many at
+## once. Every cloud's splats take a run of slots in one combined index space
+## (each run padded to whole workgroups of 256), so a view is one compute pass:
+## 1. splat_project.comp, once per cloud, projects its splats (EWA), culls
+##    them, picks merged splats far away (level of detail), evaluates SH and
+##    writes quad records and depth keys at the cloud's slots;
+## 2. splat_offsets.comp and splat_compact.comp gather every visible slot's
+##    key in slot order, with the count and the draw's arguments;
+## 3. one GPU LSD radix sort (renderers/radix_sort) orders them all back to
+##    front.
+## The frame then draws one quad per visible slot in that order with
+## luce-gpu's shade_quads. Since all clouds sort together, splats of
+## interleaved clouds (overlapping captures, instances) blend in depth order.
+## A view whose clouds, placements and camera did not change draws without
+## the pass.
+from luce_gpu import gpu
+import memory
+import errors
+from renderers.radix_sort import RadixSort
+from renderers.splat_shaders import splat_project_comp_words, splat_project_comp_msl, splat_project_comp_group, splat_project_comp_bindings, splat_project_comp_fast_math
+from renderers.splat_shaders import splat_offsets_comp_words, splat_offsets_comp_msl, splat_offsets_comp_group, splat_offsets_comp_bindings
+from renderers.splat_shaders import splat_compact_comp_words, splat_compact_comp_msl, splat_compact_comp_group, splat_compact_comp_bindings
+
+## Bits of the depth keys the sort orders: a view depth's float bits but the
+## low 7 (a relative depth step of 2^-16).
+let key_bits: u32 = 24
+## Workgroups along x of the per-splat kernels' 2D grids.
+let grid_width: usize = 32768
+## Words of one cloud's entry in a view's signature: its serial (2) and its
+## uniforms (32).
+pub let signature_words: usize = 34
+
+## What one cloud gives a view: its static buffers (absent ones are bound to
+## its centers, which the kernel then never reads), its splat count and the
+## uniforms of its projection.
+pub struct CloudInput:
+    pub var centers: gpu.Buffer
+    pub var covariances: gpu.Buffer
+    pub var colors: gpu.Buffer
+    pub var frames: gpu.Buffer
+    pub var harmonics: gpu.Buffer
+    pub var marks: gpu.Buffer
+    pub var count: usize
+    pub var uniforms: f32[32]
+
+## GPU milliseconds of the last sorted view's steps, and its visible count.
+pub struct SplatTimes:
+    ## Projection, culling and SH (splat_project).
+    pub var project: f64
+    ## Gathering the visible splats' keys (splat_offsets, splat_compact).
+    pub var compact: f64
+    ## The radix sort.
+    pub var sort: f64
+    ## Splats drawn.
+    pub var visible: i64
+
+## Slots `count` splats take: whole workgroups.
+pub func padded(count: usize) -> usize:
+    return (count + 255) // 256 * 256
+
+pub struct SplatView:
+    var device: gpu.Device
+    ## Slots the buffers hold.
+    var capacity: usize
+    var records: gpu.Buffer
+    var depth_keys: gpu.Buffer
+    var group_counts: gpu.Buffer
+    var group_offsets: gpu.Buffer
+    var keys: gpu.Buffer
+    var values: gpu.Buffer
+    var arguments: gpu.Buffer
+    var sort: RadixSort?
+    var project: gpu.Kernel
+    var offsets: gpu.Kernel
+    var compact: gpu.Kernel
+    ## The last pass (kept for its timings), and what it sorted: per cloud
+    ## its serial and uniforms (heap; `signed` words used).
+    var pass: gpu.Compute?
+    var signature: u32[]
+    var signed: usize
+    var sorts: i64
+
+    ## A view on `device`: its kernels; buffers come with the first sort.
+    pub static func open(device: gpu.Device) -> SplatView!:
+        var made = SplatView(device = try device.share(), capacity = 0, signed = 0, sorts = 0)
+        errdefer made.destroy()
+        made.project = try gpu.Kernel.create(device, splat_project_comp_words, splat_project_comp_msl, splat_project_comp_group, splat_project_comp_bindings,
+                                             splat_project_comp_fast_math)
+        made.offsets = try gpu.Kernel.create(device, splat_offsets_comp_words, splat_offsets_comp_msl, splat_offsets_comp_group, splat_offsets_comp_bindings)
+        made.compact = try gpu.Kernel.create(device, splat_compact_comp_words, splat_compact_comp_msl, splat_compact_comp_group, splat_compact_comp_bindings)
+        return made
+
+    ## Whether this view lives on `device`.
+    pub func on(device: gpu.Device) -> bool:
+        var own = self.device
+        var other = device
+        return own.same(&other)
+
+    ## How many views it sorted.
+    pub func sort_count() -> i64:
+        return self.sorts
+
+    ## Whether `signature` (signature_words per cloud) is what the last pass sorted.
+    pub func sorted_for(signature: const u32[]) -> bool:
+        if self.pass == none or signature.length != self.signed: return false
+        for index in 0..<signature.length:
+            if signature[index] != self.signature[index]: return false
+        return true
+
+    ## Record and submit the pass that projects, gathers and sorts `clouds`
+    ## together; `signature` says what it sorted.
+    pub func sort_clouds(clouds: const CloudInput[], signature: const u32[]) -> !:
+        var slots: usize = 0
+        for cloud in clouds: slots += padded(cloud.count)
+        try self.reserve(slots)
+        try self.remember(signature)
+        if let previous = self.pass:
+            var closing = previous
+            closing.close()
+            self.pass = none
+        var pass = try gpu.Compute.begin(self.device)
+        errdefer pass.close()
+        var first: usize = 0
+        for cloud in clouds:
+            if cloud.count == 0: continue
+            var bytes = cloud.uniforms
+            # The cloud's first slot (splat_params.glsl's view.z).
+            bytes[18] = f32.bits((u32)first)
+            let groups = padded(cloud.count) // 256
+            let across = groups if groups < grid_width else grid_width
+            let down = (groups + across - 1) // across
+            let projecting: gpu.Binding[9] = [gpu.Binding(buffer = cloud.centers), gpu.Binding(buffer = cloud.covariances), gpu.Binding(buffer = cloud.colors),
+                                              gpu.Binding(buffer = cloud.frames), gpu.Binding(buffer = cloud.harmonics), gpu.Binding(buffer = self.records),
+                                              gpu.Binding(buffer = self.depth_keys), gpu.Binding(buffer = self.group_counts), gpu.Binding(buffer = cloud.marks)]
+            try pass.dispatch(self.project, projecting, u8[]((u8*)&bytes[0], 128), (u32)across, (u32)down)
+            first += padded(cloud.count)
+        _ = try pass.timestamp()
+        # The gather kernels see the whole index space as one cloud.
+        var whole: f32[32]
+        for index in 0..<(usize)32: whole[index] = 0.0
+        whole[20] = f32.bits((u32)slots)
+        let block = u8[]((u8*)&whole[0], 128)
+        let groups = slots // 256
+        let across = groups if groups < grid_width else grid_width
+        let down = (groups + across - 1) // across
+        let placing: gpu.Binding[3] = [gpu.Binding(buffer = self.group_counts), gpu.Binding(buffer = self.group_offsets), gpu.Binding(buffer = self.arguments)]
+        try pass.dispatch(self.offsets, placing, block, 1)
+        let gathering: gpu.Binding[4] = [gpu.Binding(buffer = self.depth_keys), gpu.Binding(buffer = self.group_offsets), gpu.Binding(buffer = self.keys),
+                                         gpu.Binding(buffer = self.values)]
+        try pass.dispatch(self.compact, gathering, block, (u32)across, (u32)down)
+        _ = try pass.timestamp()
+        var sort = self.sort else trap("splat sort")
+        try sort.record(&pass, self.keys, self.values, self.arguments, key_bits)
+        _ = try pass.timestamp()
+        try pass.submit()
+        self.pass = pass
+        self.sorts += 1
+
+    ## Draw the last sorted view into `target` with `pipeline`; `cull` is the
+    ## alpha cull.
+    pub func draw(target: const gpu.RenderTarget*, pipeline: gpu.Pipeline, cull: f64) -> !:
+        if self.pass == none: return
+        var fragment: f32[1] = [(f32)cull]
+        var quads = gpu.Quads(records = self.records, data = 1, order = self.values, arguments = self.arguments, arguments_offset = 0)
+        try gpu.shade_quads(target, pipeline, &quads, u8[]((u8*)&fragment[0], 4))
+
+    ## The GPU times of the last sorted view's steps (waiting for its pass).
+    pub func timings() -> SplatTimes!:
+        let pass = self.pass else error(errors.invalid, "no view was sorted yet")
+        var waited = pass
+        try waited.wait()
+        var stamps: u64[3]
+        try waited.timestamps(stamps)
+        let span = (try self.device.gpu_time(try waited.submission())) else error(errors.invalid, "the sorting pass's GPU time is gone")
+        var visible: u32[1]
+        try self.arguments.read(4, u8[]((u8*)&visible[0], 4))
+        return SplatTimes(project = milliseconds(span.start, stamps[0]), compact = milliseconds(stamps[0], stamps[1]),
+                          sort = milliseconds(stamps[1], stamps[2]), visible = (i64)visible[0])
+
+    ## Buffers for at least `slots` slots (a quarter more when they grow, so
+    ## a scene growing a little at a time reallocates seldom).
+    func reserve(slots: usize) -> !:
+        if slots <= self.capacity and self.sort != none: return
+        var wanted = slots + slots // 4
+        if wanted < 256: wanted = 256
+        wanted = padded(wanted)
+        self.release_buffers()
+        let groups = wanted // 256
+        self.records = try gpu.Buffer.allocate(self.device, wanted * 48)
+        self.depth_keys = try gpu.Buffer.allocate(self.device, wanted * 4)
+        self.group_counts = try gpu.Buffer.allocate(self.device, groups * 4)
+        self.group_offsets = try gpu.Buffer.allocate(self.device, groups * 4)
+        self.keys = try gpu.Buffer.allocate(self.device, wanted * 4)
+        self.values = try gpu.Buffer.allocate(self.device, wanted * 4)
+        self.arguments = try gpu.Buffer.allocate(self.device, 32)
+        self.sort = try RadixSort.create(self.device, wanted)
+        self.capacity = wanted
+
+    func remember(signature: const u32[]) -> !:
+        if self.signature.length < signature.length:
+            if self.signature.length > 0: free(self.signature) in memory.heap
+            var nothing: u32[]
+            self.signature = nothing
+            self.signature = try new u32[signature.length] --- in memory.heap
+        for index in 0..<signature.length: self.signature[index] = signature[index]
+        self.signed = signature.length
+
+    func release_buffers():
+        if let pass = self.pass:
+            var closing = pass
+            closing.close()
+            self.pass = none
+        if let sort = self.sort:
+            var owned = sort
+            owned.destroy()
+            self.sort = none
+        for buffer in [self.records, self.depth_keys, self.group_counts, self.group_offsets, self.keys, self.values, self.arguments]:
+            var owned = buffer
+            owned.destroy()
+        self.capacity = 0
+
+    ## Free the buffers, kernels and the last pass.
+    pub func destroy():
+        self.release_buffers()
+        if self.signature.length > 0: free(self.signature) in memory.heap
+        var nothing: u32[]
+        self.signature = nothing
+        self.project.destroy()
+        self.offsets.destroy()
+        self.compact.destroy()
+        self.device.destroy()
+
+## A heap view on `device` (close_view frees it).
+pub func open_view(device: gpu.Device) -> SplatView*!:
+    var made = try SplatView.open(device)
+    errdefer made.destroy()
+    let storage = try new SplatView[1] --- in memory.heap
+    storage[0] = made
+    return storage.data
+
+pub func close_view(view: SplatView*):
+    view.destroy()
+    free(SplatView[](view, 1)) in memory.heap
+
+func milliseconds(from_time: u64, to_time: u64) -> f64:
+    return (f64)(to_time - from_time) / 1.0e6 if to_time > from_time else 0.0

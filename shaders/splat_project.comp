@@ -1,8 +1,11 @@
-// Gaussian splats, step 1 of a view: project every splat. A visible splat
-// writes its quad record (shade_quads: clip-space center, half axes, linear
-// color and opacity) at its own index and a back-to-front depth key; a culled
-// one writes the key 0xFFFFFFFF. Each workgroup counts its visible splats, so
-// splat_offsets can place them in splat order.
+// Gaussian splats, step 1 of a view: project every splat of one cloud. A
+// visible splat writes its quad record (shade_quads: clip-space center, half
+// axes, linear color and opacity) and a back-to-front depth key at its slot in
+// the view's combined index space (the cloud's first index plus its own); a
+// culled one writes the key 0xFFFFFFFF, and so do the slots that pad the cloud
+// to whole workgroups. Each workgroup counts its visible splats, so
+// splat_offsets can place every cloud's splats in one order and one sort
+// orders all clouds together.
 //
 // The covariance projects by EWA (Zwicker et al. 2002, as 3D Gaussian
 // Splatting does): Σ' = J W Σ Wᵀ Jᵀ with x/z and y/z clamped to 1.3 tan(fov/2)
@@ -10,6 +13,13 @@
 // where the Gaussian falls to the alpha cull (k ≤ 3). The color adds the SH
 // bands toward the view direction (in the splat's SH frame) to the DC color,
 // clamps at 0 and decodes sRGB, as luce-geocore's display_color does.
+//
+// Level of detail: a cloud packed with merged levels (one merged splat per run
+// of 4, 16, 64 and 256 consecutive splats of its Morton order, splat_lod)
+// draws, for each splat, the coarsest merged splat of its runs whose
+// footprint is under the LOD size in pixels; the merged splat takes the
+// run's first slot and the others' slots stay empty. Marked (selected)
+// splats are tinted toward the highlight.
 #version 450
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 256) in;
@@ -22,6 +32,7 @@ layout(std430, binding = 4) readonly buffer Harmonics { uint harmonics[]; };
 layout(std430, binding = 5) writeonly buffer Records { vec4 records[]; };
 layout(std430, binding = 6) writeonly buffer Keys { uint keys[]; };
 layout(std430, binding = 7) writeonly buffer Groups { uint group_counts[]; };
+layout(std430, binding = 8) readonly buffer Marks { uint marks[]; };
 
 shared uint visible_count;
 
@@ -39,6 +50,10 @@ const float sh_c3_3 = 0.3731763325901154;
 const float sh_c3_4 = -0.4570457994644658;
 const float sh_c3_5 = 1.445305721320277;
 const float sh_c3_6 = -0.5900435899266435;
+
+// The highlight marked splats are tinted toward (linear), and how far.
+const vec3 highlight = vec3(1.0, 0.25, 0.02);
+const float highlight_mix = 0.6;
 
 // `v` turned by unit quaternion `q`.
 vec3 turn(vec4 q, vec3 v) {
@@ -111,25 +126,78 @@ vec3 splat_color(uint i, vec3 center, bool harmonics_on) {
     return encoded;
 }
 
+// Whether packed splat `s` (a run's merged one) reaches less than
+// the LOD size on screen: three standard deviations of its widest axis at its
+// center's depth; one at or behind the near plane never is.
+bool below_lod(uint s) {
+    vec4 c = centers[s];
+    float tz = dot(c.xyz - p.eye_near.xyz, p.forward_fy.xyz);
+    if (tz <= p.eye_near.w) return false;
+    uint base = s * 6u;
+    float widest = max(covariances[base], max(covariances[base + 3u], covariances[base + 5u]));
+    return 3.0 * p.look.y * sqrt(max(widest, 0.0)) * p.forward_fy.w < p.view.w * tz;
+}
+
+// A merged splat's opacity at `s` pixels per unit: its members' coverage
+// widened by the 0.3 px² low-pass, as each member would draw (splat_lod).
+float merged_opacity(uint source, float coverage, float s) {
+    uint base = source * 6u;
+    float xx = covariances[base], xy = covariances[base + 1u], xz = covariances[base + 2u];
+    float yy = covariances[base + 3u], yz = covariances[base + 4u], zz = covariances[base + 5u];
+    float det = xx * (yy * zz - yz * yz) - xy * (xy * zz - yz * xz) + xz * (xy * yz - yy * xz);
+    float extent = max(pow(max(det, 0.0), 1.0 / 3.0), 0.1 * (xx + yy + zz) / 3.0) * p.look.y * p.look.y;
+    float members = unpackHalf2x16(colors[source].y).y;
+    float area = extent * s * s;
+    return min((coverage * area + 0.3 * members) / (area + 0.3), 1.0);
+}
+
 void main() {
     uint local = gl_LocalInvocationID.x;
     if (local == 0u) visible_count = 0u;
     barrier();
     uint i = splat_index();
     uint count = p.counts.x;
+    uint first = floatBitsToUint(p.view.z);
+    uint groups = (count + 255u) / 256u;
     if (i < count) {
         uint key = 0xFFFFFFFFu;
-        vec4 c = centers[i];
+        // The splat this slot draws: its own, a merged run's, or none.
+        uint source = i;
+        bool merged = false;
+        bool empty = false;
+        if ((p.counts.w & flag_lod) != 0u && p.view.w > 0.0) {
+            // Level l's merged splats start after the splats and the finer levels.
+            uint starts[4];
+            uint start = count;
+            for (uint l = 0u; l < 4u; l++) {
+                starts[l] = start;
+                uint run = 4u << (2u * l);
+                start += (count + run - 1u) / run;
+            }
+            for (int l = 3; l >= 0; l--) {
+                uint shift = 2u * uint(l) + 2u;
+                uint candidate = starts[l] + (i >> shift);
+                if (below_lod(candidate)) {
+                    source = candidate;
+                    merged = true;
+                    empty = (i & ((1u << shift) - 1u)) != 0u;
+                    break;
+                }
+            }
+        }
+        vec4 c = centers[source];
         vec3 rel = c.xyz - p.eye_near.xyz;
         float tz = dot(rel, p.forward_fy.xyz);
         float near = p.eye_near.w;
         float far = p.right_far.w;
-        if (tz > near && tz < far) {
+        if (!empty && tz > near && tz < far) {
             float tx = dot(rel, p.right_far.xyz);
             float ty = dot(rel, p.up_fx.xyz);
             float fx = p.up_fx.w;
             float fy = p.forward_fy.w;
             vec2 half_size = 0.5 * p.view.xy;
+            // EWA's clamps of x/z and y/z: 1.3 tan(fov/2).
+            vec2 limit = 1.3 * half_size / vec2(fx, fy);
             vec2 at = vec2(fx * tx / tz, fy * ty / tz);
             bool splats = (p.counts.w & flag_splats) != 0u && (p.counts.w & flag_centers) == 0u;
             float opacity = 1.0;
@@ -138,15 +206,16 @@ void main() {
             bool shown = true;
             if (splats) {
                 opacity = c.w;
+                if (merged) opacity = merged_opacity(source, c.w, fy / tz);
                 shown = opacity >= p.look.x;
                 if (shown) {
-                    uint base = i * 6u;
+                    uint base = source * 6u;
                     float s2 = p.look.y * p.look.y;
                     mat3 sigma = mat3(covariances[base], covariances[base + 1u], covariances[base + 2u],
                                       covariances[base + 1u], covariances[base + 3u], covariances[base + 4u],
                                       covariances[base + 2u], covariances[base + 4u], covariances[base + 5u]) * s2;
-                    float txc = clamp(tx / tz, -p.view.z, p.view.z) * tz;
-                    float tyc = clamp(ty / tz, -p.view.w, p.view.w) * tz;
+                    float txc = clamp(tx / tz, -limit.x, limit.x) * tz;
+                    float tyc = clamp(ty / tz, -limit.y, limit.y) * tz;
                     // T = J W, its rows in world terms.
                     vec3 t0 = (fx / tz) * p.right_far.xyz - (fx * txc / (tz * tz)) * p.forward_fy.xyz;
                     vec3 t1 = (fy / tz) * p.up_fx.xyz - (fy * tyc / (tz * tz)) * p.forward_fy.xyz;
@@ -168,19 +237,26 @@ void main() {
             vec2 reach = abs(h1) + abs(h2);
             shown = shown && abs(at.x) - reach.x < half_size.x && abs(at.y) - reach.y < half_size.y;
             if (shown) {
-                vec3 color = splat_color(i, c.xyz, splats);
+                // Merged splats carry no SH (their members' bands would not average).
+                vec3 color = splat_color(source, c.xyz, splats && !merged);
+                if ((p.counts.w & flag_marks) != 0u && !merged && ((marks[source >> 5u] >> (source & 31u)) & 1u) != 0u)
+                    color = mix(color, highlight, highlight_mix);
                 vec2 to_clip = tz / half_size;
-                records[i * 3u] = vec4(at * to_clip, far * (tz - near) / (far - near), tz);
-                records[i * 3u + 1u] = vec4(h1 * to_clip, h2 * to_clip);
-                records[i * 3u + 2u] = vec4(color, opacity);
+                uint slot = first + i;
+                records[slot * 3u] = vec4(at * to_clip, far * (tz - near) / (far - near), tz);
+                records[slot * 3u + 1u] = vec4(h1 * to_clip, h2 * to_clip);
+                // A dot says so with an opacity of 2 (splat.frag draws it opaque and round).
+                records[slot * 3u + 2u] = vec4(color, splats ? opacity : 2.0);
                 // Farther first: the view depth's float bits, high 24 of them, reversed.
                 key = 0xFFFFFFu - (floatBitsToUint(tz) >> 7u);
                 atomicAdd(visible_count, 1u);
             }
         }
-        keys[i] = key;
+        keys[first + i] = key;
+    } else if (i < groups * 256u) {
+        keys[first + i] = 0xFFFFFFFFu;
     }
     barrier();
-    if (local == 0u && group_index() < (count + 255u) / 256u)
-        group_counts[group_index()] = visible_count;
+    if (local == 0u && group_index() < groups)
+        group_counts[first / 256u + group_index()] = visible_count;
 }
