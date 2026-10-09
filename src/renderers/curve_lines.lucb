@@ -4,10 +4,9 @@
 ## segments are world-space endpoint pairs, as WireBatch draws them, extracted
 ## in parallel from luce-geocore's evaluated-curve cache.
 import interop
-from luce_std import math
+from luce_std import math, parallel
 import memory
 import errors
-from luce_geocore.core import parallel as geocore_parallel
 from luce_geocore.geocore import Vector3, Matrix4, GeometrySet
 from luce_geocore.kernel import Curves, CurveType, Float3, set_curves, evaluated_offsets, evaluated_positions, instances_component, Instances, curves_origin, curve_float3_span
 from luce_geocore.core.growing import Growing
@@ -49,7 +48,7 @@ func append_lines(curves: const Curves*, matrix: Matrix4, out: Growing[Vector3]*
     firsts[count] = total
     try out.reserve(total)
     var work = LineWork(curves, matrix, offsets, points, firsts, out.items)
-    geocore_parallel.parallel_for(count, 64, fill_lines, (void*)&work)
+    try parallel.for_each_range(count, 64, (void*)&work, fill_lines)
     out.count = total
 
 struct LineWork:
@@ -60,8 +59,8 @@ struct LineWork:
     let firsts: const usize[]
     let out: Vector3[]
 
-func fill_lines(context: void*?, first: usize, end: usize):
-    let work = (LineWork*)(context else return)
+func fill_lines(context: void*, first: usize, end: usize, worker: usize):
+    let work = (LineWork*)context
     for curve in first..<end:
         let low = (usize)work.offsets[curve]
         let size = (usize)work.offsets[curve + 1] - low

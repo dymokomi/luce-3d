@@ -6,7 +6,7 @@ import time
 import interop
 from luce_gpu import gpu
 from luce_3d import graphics as three
-from luce_geocore.core import parallel as geocore_parallel
+from luce_std import parallel
 from luce_geocore.geocore import Vector3, Mesh, mesh_type, detached_mesh
 from luce_3d.graphics import EditOverlay
 from fixtures import Counter, GridArrays, make_mesh, chosen_faces, face_points, since, report, report_bytes, side
@@ -19,7 +19,7 @@ pub func main(arguments: str[]) -> i32!:
     var grid = try GridArrays()
     defer grid.close()
     # Start the pool first: its starting threads free blocks in the current heap.
-    geocore_parallel.warm()
+    parallel.warm()
     let previous = memory.heap
     var counter = Counter(previous)
     memory.heap = &counter

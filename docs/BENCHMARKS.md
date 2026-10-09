@@ -99,7 +99,7 @@ Differences below about 10 % are noise.
   - The worker no longer extracts wire endpoints for meshes.
 - **Step 3** (structure-of-arrays `Mesh`, lazy caches, the geometry pool): f32
   positions over an f64 origin, i32 topology, and parallel construction on one
-  persistent pool (`geocore_parallel`, which luce-cad now shares).
+  persistent pool (then geocore's; now luce-std's process-wide `parallel` pool).
   - Construct 354 → 43 ms (37 ms unloaded) and the core 160 → 45.5 MB: edges,
     incidence and the connectivity hash are lazy caches shared by a topology.
   - BVH after a Move 652 ms (rebuild) → 9.2 ms (refit); the build is parallel
