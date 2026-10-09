@@ -3,7 +3,9 @@
 // The volume is a dense box of texels, its z slices tiled side by side in one
 // rgba16_float atlas (image 1): r the density, g the optical depth toward the key
 // light, b the optical depth toward the sky (+Y), both integrated through the
-// densities on the CPU when the volume was made, a the emission field. The box is
+// densities on the CPU when the volume was made, a the emission field. Image 2 is a
+// strip of 256 texels: the emitted color along the look's emission range (an
+// emission color ramp, or one color). The box is
 // drawn as view-aligned slabs, back to front; each fragment of a slab marches its
 // stretch of the eye ray, from the slab's plane to the next one's, front to back,
 // and emits that stretch's color and coverage premultiplied, so the slabs composite
@@ -22,11 +24,12 @@ layout(push_constant) uniform Params {
     vec4 scale;     // world length of the box's x, y and z; w the density scale
     vec4 key;       // the key light's color times intensity; w the ambient (sky) intensity
     vec4 smoke;     // the smoke's scattering color; w the shadow scale
-    vec4 glow;      // the emission color times the emission scale; w unused
+    vec4 glow;      // x the emission scale; the strip's texel for emission e is at clamp((e - y) * z, 0, 1); w unused
     vec4 atlas;     // texels across the box: x, y, z; w atlas columns
     vec4 size;      // the atlas's width and height in texels; zw unused
 } params;
 layout(set = 0, binding = 1) uniform sampler2D volume;
+layout(set = 0, binding = 2) uniform sampler2D strip;
 
 const float pi = 3.14159265358979;
 
@@ -45,6 +48,17 @@ vec4 texels(vec3 q) {
     vec4 a = textureLod(volume, (tile0 + xy) / params.size.xy, 0.0);
     vec4 b = textureLod(volume, (tile1 + xy) / params.size.xy, 0.0);
     return mix(a, b, z - z0);
+}
+
+// The light emitted per world unit at emission field value `e`: the emission scale
+// times the value, in the strip's color for it (texel centers 0.5/256 .. 255.5/256).
+vec3 emission(float e) {
+    if (e <= 0.0 || params.glow.x <= 0.0) {
+        return vec3(0.0);
+    }
+    float t = clamp((e - params.glow.y) * params.glow.z, 0.0, 1.0);
+    vec3 color = textureLod(strip, vec2((t * 255.0 + 0.5) / 256.0, 0.5), 0.0).rgb;
+    return color * (params.glow.x * e);
 }
 
 // Interleaved gradient noise (Jimenez 2014): a per-pixel offset in 0..1 that
@@ -79,7 +93,7 @@ void main() {
         }
         vec4 s = texels(q);
         float sigma = s.r * density_scale;
-        vec3 emitted = params.glow.rgb * max(s.a, 0.0);
+        vec3 emitted = emission(s.a);
         if (sigma <= 0.0 && emitted == vec3(0.0)) {
             continue;
         }

@@ -6,20 +6,24 @@
 ## front, and shades them in one draw with shaders/fog.frag: each fragment
 ## marches its stretch of the eye ray, jittered per pixel, with Beer–Lambert
 ## absorption, single scattering of the key light and the sky, and emission
-## from a second grid (FogLook; Volume Visualization sets it on the geometry). The slabs are
-## depth tested without writing depth, so meshes in front hide the fog and fog
-## in front veils meshes behind it, to within one slab (four steps).
+## from a second grid colored through a strip of 256 texels (renderers/
+## fog_ramp.lucb). Each drawing takes its grid's own look (luce-geocore's
+## VolumeLook, which Volume Visualization sets per grid); which grids draw, and
+## from which values, is luce-geocore's fog_show. The slabs are depth tested
+## without writing depth, so meshes in front hide the fog and fog in front
+## veils meshes behind it, to within one slab (four steps).
 from luce_gpu import gpu
 import interop
 import memory
 from luce_std import math
 import errors
 from luce_geocore.geocore import Vector3, Matrix4, GeometrySet, Bounds
-from luce_geocore.kernel import SparseGrid, GridClass, set_volume, volume_look
+from luce_geocore.kernel import SparseGrid, VolumeLook, FogShow, set_volume, fog_show, fog_show_count
 from cameras.perspective import PerspectiveCamera, Projection
 from core.material import Color, check_color
 from renderers.fog_texels import FogTexels, fog_texels
 from renderers.fog_shaders import fog_frag_words, fog_frag_msl, fog_frag_fast_math
+from renderers.fog_ramp import strip_texels, emission_strip, emission_fit
 
 ## Ray-marching steps in one slab: how finely meshes inside the fog cut it.
 let slab_steps: f64 = 4.0
@@ -28,7 +32,8 @@ let most_slabs: usize = 1024
 ## The key light's direction luced-3d's viewport uses, toward the light.
 let default_light: Vector3 = Vector3(3.0, 5.0, 2.0)
 
-## How a fog volume looks; a node (Volume Visualization) or the view sets it.
+## How a fog volume looks, its numbers: what `look` reads and `set_look`
+## overrides (the emission ramp and fields stay the grid's).
 pub struct FogLook:
     ## Extinction per world unit at density 1: multiplies every density.
     pub var density: f64 = 1.0
@@ -36,49 +41,69 @@ pub struct FogLook:
     pub var color: Color = Color(1.0, 1.0, 1.0)
     ## Multiplies the optical depth toward the key light: 0 unshadowed.
     pub var shadow: f64 = 1.0
-    ## Light emitted per world unit at emission field value 1, and its color.
+    ## Light emitted per world unit at emission field value 1, and its color
+    ## where no emission ramp colors it.
     pub var emission: f64 = 0.0
     pub var emission_color: Color = Color(1.0, 1.0, 1.0)
     ## The ray-marching step, in voxels (0.25..8).
     pub var step: f64 = 1.0
 
-## One fog grid ready to draw: its texels until the first draw uploads
-## them, then its atlas texture.
+## One fog drawing ready to draw: its texels until the first draw uploads
+## them, then its atlas texture; and its emission strip, sent again when its
+## look changes it.
 pub struct FogVolume:
     var data: FogTexels
-    var settings: FogLook
+    var styled: VolumeLook
     var texture: gpu.Texture?
+    var strip: gpu.Texture?
+    var strip_stale: bool
     var uploads: i64
+    var strip_uploads: i64
 
-    ## The fog grid `index` (among the smoke grids of `geometry`'s own
-    ## volume, see `count`), placed by `matrix`, lit from `light` (a world
-    ## direction toward the key light), drawn with the set's look.
+    ## Fog drawing `index` of `geometry`'s own volume (see `count`), placed by
+    ## `matrix`, lit from `light` (a world direction toward the key light),
+    ## drawn with its grid's look.
     pub static func of(geometry: interop.Reference[GeometrySet], index: i64, matrix: Matrix4 = Matrix4(), light: Vector3 = default_light) -> interop.Reference[FogVolume]!:
         let made = try fog_volume(try geometry.get(), index, matrix, light)
         return try interop.Reference[FogVolume].adopt(made, fog_volume_type, memory.heap)
 
-    ## How many smoke grids `geometry`'s own volume holds: its non-empty fog
-    ## grids but the look's emission field (level sets keep their surface
-    ## preview; instances are counted by their own sets).
+    ## How many fog drawings `geometry`'s own volume makes: its fog grids with
+    ## voxels but those lending their values to another's (emission and
+    ## density fields; luce-geocore's fog_show). Level sets keep their surface
+    ## preview; instances are counted by their own sets.
     pub static func count(geometry: interop.Reference[GeometrySet]) -> i64!:
         return (i64)fog_grid_count(try geometry.get())
 
-    ## What `of` would make its texels from (the grids' contents, their
-    ## emission field's, the placement and the light): equal keys make equal
-    ## volumes, so a held volume is reused. A changed look keeps the key.
+    ## What `of` would make drawing `index`'s texels from (its density grid's
+    ## contents, its emission field's, the placement and the light): equal
+    ## keys make equal volumes, so a held volume is reused. A changed look
+    ## keeps the key unless it names other fields.
     pub static func key(geometry: interop.Reference[GeometrySet], index: i64, matrix: Matrix4 = Matrix4(), light: Vector3 = default_light) -> i64!:
         return try fog_volume_key(try geometry.get(), index, matrix, light)
 
-    ## `geometry`'s look (Volume Visualization's volvis_* details), the
-    ## defaults where it sets none.
-    pub static func look_of(geometry: interop.Reference[GeometrySet]) -> FogLook!:
-        return fog_look_of(try geometry.get())
+    ## The numbers of drawing `index`'s look (its grid's, the defaults where
+    ## Volume Visualization set none).
+    pub static func look_of(geometry: interop.Reference[GeometrySet], index: i64) -> FogLook!:
+        let look = fog_look(try geometry.get(), index) else error(errors.invalid, "the geometry has no such fog drawing")
+        return numbers_of(&look)
 
-    ## The look it draws with.
+    ## Draw with drawing `index` of `geometry`'s look from now on (a new look
+    ## of the same grids): the atlas stays; the emission strip is sent again
+    ## if it changed.
+    pub func restyle(geometry: interop.Reference[GeometrySet], index: i64) -> !:
+        let look = fog_look(try geometry.get(), index) else error(errors.invalid, "the geometry has no such fog drawing")
+        restyle_fog(&self, &look)
+
+    ## The numbers of the look it draws with.
     pub func look() -> FogLook:
-        return self.settings
+        return numbers_of(&self.styled)
 
-    ## Draw with `look` from now on: uploads nothing.
+    ## Whether an emission color ramp colors its emission.
+    pub func ramped() -> bool:
+        return self.styled.emission_ramp().length > 0
+
+    ## Draw with `look`'s numbers from now on (its emission ramp and fields
+    ## stay): the atlas stays.
     pub func set_look(look: FogLook) -> !:
         try check_color(look.color)
         try check_color(look.emission_color)
@@ -86,7 +111,14 @@ pub struct FogVolume:
             error(errors.invalid, "a fog look needs a density scale in 0..1e6 and a step of 0.25..8 voxels")
         if not (look.shadow >= 0.0 and look.shadow <= 100.0) or not (look.emission >= 0.0 and look.emission <= 1.0e6):
             error(errors.invalid, "a fog look needs a shadow scale in 0..100 and an emission scale in 0..1e6")
-        self.settings = look
+        var styled = self.styled
+        styled.density = look.density
+        styled.smoke = Vector3(look.color.red, look.color.green, look.color.blue)
+        styled.shadow = look.shadow
+        styled.emission = look.emission
+        styled.emission_color = Vector3(look.emission_color.red, look.emission_color.green, look.emission_color.blue)
+        styled.step = look.step
+        restyle_fog(&self, &styled)
 
     ## The highest density.
     pub func peak() -> f64:
@@ -110,6 +142,11 @@ pub struct FogVolume:
     pub func upload_count() -> i64:
         return self.uploads
 
+    ## How many times its emission strip went to the GPU (on its first draw,
+    ## and after each look that changed it).
+    pub func strip_upload_count() -> i64:
+        return self.strip_uploads
+
     ## Draw over what `target` holds, through `camera`: the key light colored
     ## `key` (intensity folded in) and a sky light of `ambient`. A standalone
     ## frame (no device) draws nothing.
@@ -124,6 +161,7 @@ pub struct FogVolume:
         let size = try native.size()
         if not device.is_open() or size.width <= 0.0 or size.height <= 0.0: return
         let texture = try self.upload(device)
+        let strip = try self.upload_strip(device)
         let projection = try camera.value().projection(size.width / size.height)
         let plan = self.plan(projection) else return
         let vertices = try self.slabs(projection, plan)
@@ -131,7 +169,7 @@ pub struct FogVolume:
         if vertices.length == 0: return
         let pipeline = try fog_pipeline(device, try native.pixel_format())
         var uniforms = self.uniforms(projection, plan, key, ambient)
-        try gpu.shade_triangles(native, pipeline, vertices, u8[]((u8*)&uniforms[0], 128), [texture], gpu.Filter.linear)
+        try gpu.shade_triangles(native, pipeline, vertices, u8[]((u8*)&uniforms[0], 128), [texture, strip], gpu.Filter.linear)
 
     ## The atlas on the GPU: sent on the first draw, when the CPU copy is
     ## freed. Volumes draw on the device they were first drawn on.
@@ -145,6 +183,21 @@ pub struct FogVolume:
         self.data.close()
         return texture
 
+    ## The emission strip on the GPU, made on the first draw and filled again
+    ## when the look changed it.
+    func upload_strip(device: gpu.Device) -> gpu.Texture!:
+        if let strip = self.strip:
+            if not self.strip_stale: return strip
+        if self.strip == none:
+            self.strip = try gpu.Texture.create(device, (u32)strip_texels, 1, gpu.Format.rgba16_float)
+        let strip = self.strip else trap("fog strip")
+        var texels: f16[1024]
+        emission_strip(&self.styled, texels)
+        try strip.upload(u8[]((u8*)&texels[0], 2048))
+        self.strip_stale = false
+        self.strip_uploads += 1
+        return strip
+
     ## Where the slabs lie along the view axis through `projection`: from the
     ## box's near side (or the near plane) to its far side, `slab_steps` steps
     ## apart, or farther apart when that would take more than `most_slabs`.
@@ -157,7 +210,7 @@ pub struct FogVolume:
             let depth = self.data.box.transform_point(corner_of(corner)).subtract(projection.position).dot(forward)
             nearest = math.min(nearest, depth)
             farthest = math.max(farthest, depth)
-        var thickness = slab_steps * self.settings.step * self.data.voxel
+        var thickness = slab_steps * self.styled.step * self.data.voxel
         let start = math.max(nearest + thickness * 0.001, projection.near * 1.001)
         let finish = math.min(farthest, projection.far * 0.999)
         if finish <= start: return none
@@ -187,87 +240,109 @@ pub struct FogVolume:
         let inverse = box.inverse() catch failure: trap(failure.message)
         let eye = inverse.transform_point(projection.position)
         let forward = projection.backward.multiply_scalar(-1.0)
-        let look = self.settings
+        let look = &self.styled
         let counts = self.data.counts
-        let glow = look.emission
+        let (low, scale) = emission_fit(look)
         return [(f32)eye.x, (f32)eye.y, (f32)eye.z, (f32)plan.thickness,
                 (f32)box.x.dot(forward), (f32)box.y.dot(forward), (f32)box.z.dot(forward), (f32)slab_steps,
                 (f32)box.x.length(), (f32)box.y.length(), (f32)box.z.length(), (f32)look.density,
                 (f32)key.red, (f32)key.green, (f32)key.blue, (f32)ambient,
-                (f32)look.color.red, (f32)look.color.green, (f32)look.color.blue, (f32)look.shadow,
-                (f32)(look.emission_color.red * glow), (f32)(look.emission_color.green * glow), (f32)(look.emission_color.blue * glow), 0.0,
+                (f32)look.smoke.x, (f32)look.smoke.y, (f32)look.smoke.z, (f32)look.shadow,
+                (f32)look.emission, (f32)low, (f32)scale, 0.0,
                 (f32)counts[0], (f32)counts[1], (f32)counts[2], (f32)self.data.columns,
                 (f32)self.data.width, (f32)self.data.height, 0.0, 0.0]
 
-    ## Free the texels and the texture.
+    ## Free the texels and the textures.
     pub func close():
         self.data.close()
         if let texture = self.texture:
             var owned = texture
             owned.destroy()
         self.texture = none
+        if let strip = self.strip:
+            var owned = strip
+            owned.destroy()
+        self.strip = none
 
 pub let fog_volume_type: interop.Type[FogVolume] = interop.Type[FogVolume]("FogVolume", FogVolume.close, closeable = true, main_thread = true)
 
-## A heap FogVolume of smoke grid `index` of `set`'s own volume, drawn with
-## the set's look (Base callers, such as a worker handing it to the UI
+## A heap FogVolume of fog drawing `index` of `set`'s own volume, drawn with
+## its grid's look (Base callers, such as a worker handing it to the UI
 ## thread: adopt it with `fog_volume_type` there). Fails when there is no
-## such grid.
+## such drawing.
 pub func fog_volume(set: const GeometrySet*, index: i64, matrix: Matrix4, light: Vector3) -> FogVolume*!:
-    let grid = smoke_grid(set, index) else error(errors.invalid, "the geometry has no such fog grid")
+    let show = shown(set, index) else error(errors.invalid, "the geometry has no such fog drawing")
     let direction = try light.normalized()
-    var data = try fog_texels(grid, emission_grid(set), matrix, direction)
+    var data = try fog_texels(show.density, show.emission, matrix, direction)
     errdefer data.close()
-    return try new FogVolume(data = data, settings = fog_look_of(set), texture = none, uploads = 0) in memory.heap
+    return try new FogVolume(data = data, styled = clamped(&show.styled.look), texture = none, strip = none, strip_stale = true, uploads = 0, strip_uploads = 0) in memory.heap
 
-## The smoke grids of `set`'s own volume: non-empty fog grids but the look's
-## emission field.
+## How many fog drawings `set`'s own volume makes (see FogVolume.count).
 pub func fog_grid_count(set: const GeometrySet*) -> usize:
-    var count: usize = 0
-    while smoke_grid(set, (i64)count) != none: count += 1
-    return count
+    let volume = set_volume(set) else return 0
+    return fog_show_count(volume)
 
-## The content key of smoke grid `index` of `set` placed by `matrix` and lit
-## from `light` (see FogVolume.key); fails when there is no such grid.
+## The content key of fog drawing `index` of `set` placed by `matrix` and lit
+## from `light` (see FogVolume.key); fails when there is no such drawing.
 pub func fog_volume_key(set: const GeometrySet*, index: i64, matrix: Matrix4, light: Vector3) -> i64!:
-    let grid = smoke_grid(set, index) else error(errors.invalid, "the geometry has no such fog grid")
-    var key = mix_grid(0xCBF29CE484222325, grid)
-    if let field = emission_grid(set): key = mix_grid(key, field)
-    let placed = matrix.multiply(grid.transform)
+    let show = shown(set, index) else error(errors.invalid, "the geometry has no such fog drawing")
+    var key = mix_grid(0xCBF29CE484222325, show.density)
+    if let field = show.emission: key = mix_grid(key, field)
+    let placed = matrix.multiply(show.density.transform)
     for value in [placed.x, placed.y, placed.z, placed.translation, try light.normalized()]:
         key = mix(mix(mix(key, value.x), value.y), value.z)
     return (i64)(key >> 1)
 
-## `set`'s volume look as a FogLook: colors clamped to 0..1, the step to
-## 0.25..8, scales to their ranges.
-pub func fog_look_of(set: const GeometrySet*) -> FogLook:
-    let look = volume_look(set)
-    return FogLook(density = math.clamp(look.density, 0.0, 1.0e6), color = unit_color(look.smoke), shadow = math.clamp(look.shadow, 0.0, 100.0),
-                   emission = math.clamp(look.emission, 0.0, 1.0e6), emission_color = unit_color(look.emission_color), step = math.clamp(look.step, 0.25, 8.0))
+## The look fog drawing `index` of `set` draws with: its grid's, clamped to
+## what a FogVolume draws (colors to 0..1, the step to 0.25..8, scales to
+## their ranges); none past the drawings.
+pub func fog_look(set: const GeometrySet*, index: i64) -> VolumeLook?:
+    let show = shown(set, index) else return none
+    return clamped(&show.styled.look)
 
-func unit_color(value: Vector3) -> Color:
-    return Color(math.clamp(value.x, 0.0, 1.0), math.clamp(value.y, 0.0, 1.0), math.clamp(value.z, 0.0, 1.0))
+## The numbers of fog drawing `index` of `set`'s look (FogVolume.look_of).
+pub func fog_look_of(set: const GeometrySet*, index: i64) -> FogLook!:
+    let look = fog_look(set, index) else error(errors.invalid, "the geometry has no such fog drawing")
+    return numbers_of(&look)
 
-## The grid the look names as its emission field, if the volume has it.
-func emission_grid(set: const GeometrySet*) -> const SparseGrid*?:
-    let name = volume_look(set).emission_field
-    if name.length == 0: return none
+## Draw `volume` with `look` from now on: the atlas stays; the emission strip
+## is sent again on the next draw if `look` changes it.
+pub func restyle_fog(volume: FogVolume*, look: const VolumeLook*):
+    let old = volume.styled
+    volume.styled = clamped(look)
+    if old.emission_low != look.emission_low or old.emission_high != look.emission_high or old.emission_color != volume.styled.emission_color or not same_numbers(old.emission_ramp(), look.emission_ramp()):
+        volume.strip_stale = true
+
+func same_numbers(a: const f64[], b: const f64[]) -> bool:
+    if a.length != b.length: return false
+    for at in 0..<a.length:
+        if a[at] != b[at]: return false
+    return true
+
+## `look` with its numbers in the ranges a FogVolume draws.
+func clamped(look: const VolumeLook*) -> VolumeLook:
+    var made = *look
+    made.density = math.clamp(look.density, 0.0, 1.0e6)
+    made.smoke = unit_vector(look.smoke)
+    made.shadow = math.clamp(look.shadow, 0.0, 100.0)
+    made.emission = math.clamp(look.emission, 0.0, 1.0e6)
+    made.emission_color = unit_vector(look.emission_color)
+    made.step = math.clamp(look.step, 0.25, 8.0)
+    return made
+
+## A look's numbers as a FogLook.
+func numbers_of(look: const VolumeLook*) -> FogLook:
+    return FogLook(density = look.density, color = Color(look.smoke.x, look.smoke.y, look.smoke.z), shadow = look.shadow, emission = look.emission,
+                   emission_color = Color(look.emission_color.x, look.emission_color.y, look.emission_color.z), step = look.step)
+
+func unit_vector(value: Vector3) -> Vector3:
+    return Vector3(math.clamp(value.x, 0.0, 1.0), math.clamp(value.y, 0.0, 1.0), math.clamp(value.z, 0.0, 1.0))
+
+## Fog drawing `index` of `set`'s own volume, if it makes one.
+func shown(set: const GeometrySet*, index: i64) -> FogShow?:
+    if index < 0: return none
     let volume = set_volume(set) else return none
-    for at in 0..<volume.grid_count():
-        let grid = volume.grid(at)
-        if grid.name() == name and grid.leaf_count() > 0: return grid
-    return none
-
-func smoke_grid(set: const GeometrySet*, index: i64) -> const SparseGrid*?:
-    let volume = set_volume(set) else return none
-    let field = volume_look(set).emission_field
-    var seen: i64 = 0
-    for at in 0..<volume.grid_count():
-        let grid = volume.grid(at)
-        if grid.class != GridClass.fog or grid.leaf_count() == 0 or (field.length > 0 and grid.name() == field): continue
-        if seen == index: return grid
-        seen += 1
-    return none
+    return fog_show(volume, (usize)index)
 
 ## `key` with a grid's columns (their ids change with their contents).
 func mix_grid(key: u64, grid: const SparseGrid*) -> u64:

@@ -34,17 +34,20 @@ import renderers.knife
 pub type Knife = knife.Knife
 pub type KnifePlane = knife.KnifePlane
 import renderers.fog_volume
-## A fog grid ray-marched on the GPU, and how it looks.
+## A fog drawing ray-marched on the GPU, and its look's numbers.
 pub type FogVolume = fog_volume.FogVolume
 pub type FogLook = fog_volume.FogLook
 pub let fog_volume_type = fog_volume.fog_volume_type
-## A heap FogVolume of a set's fog grid, for Base callers (a worker).
+## A heap FogVolume of a set's fog drawing, for Base callers (a worker).
 pub let fog_volume_of = fog_volume.fog_volume
-## The smoke grids of a set's own volume.
+## The fog drawings of a set's own volume.
 pub let fog_grid_count = fog_volume.fog_grid_count
-## A set's smoke grid's content key, and the set's look, for Base callers.
+## A fog drawing's content key, its look (whole, and its numbers), and a
+## volume taking a new look, for Base callers.
 pub let fog_volume_key = fog_volume.fog_volume_key
+pub let fog_look = fog_volume.fog_look
 pub let fog_look_of = fog_volume.fog_look_of
+pub let restyle_fog = fog_volume.restyle_fog
 ## Release the shared fog shader and pipelines.
 pub let release_fog_pipelines = fog_volume.release_fog_pipelines
 import renderers.gaussian_splats

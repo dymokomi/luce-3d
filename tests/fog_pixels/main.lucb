@@ -1,7 +1,8 @@
 ## Offscreen pixels of fog volumes: a fog ball made through luce-geocore's
 ## grid API, ray-marched over a dark clear. Its middle is lit smoke, its edge
 ## fades into the background, a quad in front hides it and one behind shows
-## through it, the atlas goes to the GPU once, and emission glows its color.
+## through it, the atlas goes to the GPU once, emission glows its color or a
+## ramp's, and two grids of one set draw with a look each.
 ## The run ends with the GPU time of a 128³ ball filling a 1400×900 view at
 ## 2x (report only).
 from luce_gpu import gpu
@@ -12,7 +13,7 @@ import memory
 from luce_3d import graphics as three
 from luce_3d.graphics import FogVolume, FogLook, PerspectiveCamera, WireRenderer, Vector3, Matrix4, release_fog_pipelines
 from luce_geocore.geocore import GeometrySet
-from luce_geocore.kernel import GridClass, grid_of_leaves, key_leaf, leaf_key, new_volume, add_grid, volume_type, empty_set, adopt_set, release_volume, dispose_set, VolumeLook, put_volume_look
+from luce_geocore.kernel import GridClass, grid_of_leaves, key_leaf, leaf_key, new_volume, add_grid, volume_type, empty_set, adopt_set, release_volume, dispose_set, set_volume, share_grid, SparseGrid, VolumeLook, restyled
 
 let width: u32 = 160
 let height: u32 = 120
@@ -61,11 +62,18 @@ func fog_ball(radius: i64, voxel: f64, heat: bool = false) -> interop.Reference[
     try storage.put(volume_type(), (void*)volume)
     return try adopt_set(storage)
 
-## `fog` with `look` as its volvis_* details (what Volume Visualization does).
-func with_look(fog: interop.Reference[GeometrySet], look: const VolumeLook*) -> interop.Reference[GeometrySet]!:
+## `fog` with `look` on its grid named `name` (what Volume Visualization does
+## with that group): the grids' voxels shared.
+func with_look(fog: interop.Reference[GeometrySet], name: str, look: const VolumeLook*) -> interop.Reference[GeometrySet]!:
+    let source = set_volume(fog.value()) else trap("volume")
+    let volume = try new_volume()
+    errdefer release_volume(volume)
+    for at in 0..<source.grid_count():
+        let grid = source.grid(at)
+        try add_grid(volume, try restyled(grid, look) if grid.name() == name else share_grid((SparseGrid*)grid))
     let storage = try fog.value().storage()
     errdefer dispose_set(storage)
-    try put_volume_look(storage, look)
+    try storage.put(volume_type(), (void*)volume)
     return try adopt_set(storage)
 
 struct View:
@@ -170,10 +178,9 @@ pub func main(arguments: str[]) -> i32!:
     _ = try view.draw(volume, none_quads, image)
     let thick = luminance(image, 80, 60)
     assert(math.abs((f64)(thick - middle)) > 10.0 and volume.value().upload_count() == 1)
-    # The look on the geometry (Volume Visualization's details): a heat grid
-    # (the ball again) emits orange and is not drawn as smoke itself. Looks
-    # naming the same field share a key; another emission scale is a look
-    # change only.
+    # The look on the grid (Volume Visualization's): a heat grid (the ball
+    # again) emits orange and is not drawn as smoke itself. Looks naming the
+    # same field share a key; another emission scale is a look change only.
     let hot = try fog_ball(32, 1.0 / 32.0, true)
     defer hot.release()
     assert((try FogVolume.count(hot)) == 2)
@@ -181,23 +188,62 @@ pub func main(arguments: str[]) -> i32!:
     glow.density = 4.0
     glow.emission = 6.0
     glow.emission_color = Vector3(1.0, 0.4, 0.0)
-    glow.emission_field = "heat"
-    let glowing = try with_look(hot, &glow)
+    try glow.set_emission_field("heat")
+    let glowing = try with_look(hot, "density", &glow)
     defer glowing.release()
     glow.emission = 1.0
-    let dimmer = try with_look(hot, &glow)
+    let dimmer = try with_look(hot, "density", &glow)
     defer dimmer.release()
     assert((try FogVolume.count(glowing)) == 1 and (try FogVolume.key(glowing, 0)) == (try FogVolume.key(dimmer, 0)))
-    assert((try FogVolume.look_of(dimmer)).emission == 1.0 and (try FogVolume.look_of(hot)).emission == 0.0)
+    assert((try FogVolume.look_of(dimmer, 0)).emission == 1.0 and (try FogVolume.look_of(hot, 0)).emission == 0.0)
     let fire = try FogVolume.of(glowing, 0)
     defer fire.release()
-    assert(fire.value().look().emission == 6.0 and fire.value().look().density == 4.0)
+    assert(fire.value().look().emission == 6.0 and fire.value().look().density == 4.0 and not fire.value().ramped())
     _ = try view.draw(fire, none_quads, image)
     let (er, eg, eb) = pixel(image, 80, 60)
     # Orange added to the white smoke (121 in the middle): red and green
     # rise, blue stays.
     assert(er > 200 and er >= eg and eg > eb + 60 and eb < 160)
-    print("PASS fog volume: lit middle, fading edge, occlusion both ways, one upload, density and emission looks from the geometry")
+    assert(fire.value().strip_upload_count() == 1)
+    # A new emission scale sends nothing; a ramp from red at heat 0 to blue at
+    # heat 1 sends the strip once: the hot middle (heat near 1) glows blue,
+    # the cooler half radius redder.
+    try fire.value().restyle(dimmer, 0)
+    _ = try view.draw(fire, none_quads, image)
+    assert(fire.value().look().emission == 1.0 and fire.value().strip_upload_count() == 1 and fire.value().upload_count() == 1)
+    glow.emission = 6.0
+    glow.smoke = Vector3(0.0, 0.0, 0.0)
+    let ramp: f64[13] = [1.0, 3.0, 2.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0]
+    try glow.set_emission_ramp(ramp)
+    let ramped = try with_look(hot, "density", &glow)
+    defer ramped.release()
+    try fire.value().restyle(ramped, 0)
+    _ = try view.draw(fire, none_quads, image)
+    assert(fire.value().ramped() and fire.value().strip_upload_count() == 2 and fire.value().upload_count() == 1)
+    let (mr, _, mb) = pixel(image, 80, 60)
+    let (hr, _, hb) = pixel(image, 100, 60)
+    print(f"ramped emission: middle red {mr} blue {mb}, half radius red {hr} blue {hb}")
+    # The middle ray crosses cool heat on its way in, so it mixes; still bluer.
+    assert(mb > mr + 15 and hr - hb > mr - mb + 60)
+    # Two grids of one set, a look each: red smoke and blue smoke.
+    var red = VolumeLook()
+    red.density = 4.0
+    red.smoke = Vector3(1.0, 0.2, 0.2)
+    var blue = VolumeLook()
+    blue.density = 4.0
+    blue.smoke = Vector3(0.2, 0.3, 1.0)
+    let half = try with_look(hot, "density", &red)
+    defer half.release()
+    let both = try with_look(half, "heat", &blue)
+    defer both.release()
+    assert((try FogVolume.count(both)) == 2 and (try FogVolume.look_of(both, 0)).color.green == 0.2 and (try FogVolume.look_of(both, 1)).color.blue == 1.0)
+    for at in 0..<2:
+        let tinted = try FogVolume.of(both, (i64)at)
+        defer tinted.release()
+        _ = try view.draw(tinted, none_quads, image)
+        let (tr, _, tb) = pixel(image, 80, 60)
+        assert((tr > tb + 40) if at == 0 else (tb > tr + 40))
+    print("PASS fog volume: lit middle, fading edge, occlusion both ways, one upload, density, emission and ramp looks per grid")
     try timing(device)
     return 0
 

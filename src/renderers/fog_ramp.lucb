@@ -1,0 +1,32 @@
+## A fog volume's emission colors as a strip of 256 texels, the second image
+## shaders/fog.frag samples: texel i is the color its look emits at the emission
+## field value i/255 of the way along the look's emission range (luce-geocore's
+## VolumeLook.emission_color_at: the emission color ramp there, or the emission
+## color throughout). The shader finds a value's texel with `emission_fit`, so
+## the strip is all a ramp costs the GPU: 2 KiB, sent again only when it changes.
+from luce_std import math
+from luce_geocore.kernel import VolumeLook
+
+## Texels across the strip.
+pub let strip_texels: usize = 256
+## How far past 1 an emitted color may go (an HDR ramp's brightest point).
+let brightest: f64 = 100.0
+
+## Fill `out` (strip_texels × 4 half floats, rgba) with `look`'s emission
+## colors along its emission range.
+pub func emission_strip(look: const VolumeLook*, out: f16[]):
+    let span = look.emission_high - look.emission_low
+    for at in 0..<strip_texels:
+        let value = look.emission_low + span * (f64)at / (f64)(strip_texels - 1)
+        let color = look.emission_color_at(value)
+        out[at * 4] = (f16)math.clamp(color.x, 0.0, brightest)
+        out[at * 4 + 1] = (f16)math.clamp(color.y, 0.0, brightest)
+        out[at * 4 + 2] = (f16)math.clamp(color.z, 0.0, brightest)
+        out[at * 4 + 3] = (f16)1.0
+
+## Where the shader finds an emission field value `e` on the strip: at
+## clamp((e - low) * scale, 0, 1) of its length. A range of no length steps
+## from the first texel to the last at its value.
+pub func emission_fit(look: const VolumeLook*) -> (f64, f64):
+    let span = look.emission_high - look.emission_low
+    return (look.emission_low, 1.0 / span if span != 0.0 else 1.0e6)
