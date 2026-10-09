@@ -38,8 +38,11 @@ pub type FogLook = fog_volume.FogLook
 pub let fog_volume_type = fog_volume.fog_volume_type
 ## A heap FogVolume of a set's fog grid, for Base callers (a worker).
 pub let fog_volume_of = fog_volume.fog_volume
-## The non-empty fog grids of a set's own volume.
+## The smoke grids of a set's own volume.
 pub let fog_grid_count = fog_volume.fog_grid_count
+## A set's smoke grid's content key, and the set's look, for Base callers.
+pub let fog_volume_key = fog_volume.fog_volume_key
+pub let fog_look_of = fog_volume.fog_look_of
 ## Release the shared fog shader and pipelines.
 pub let release_fog_pipelines = fog_volume.release_fog_pipelines
 
