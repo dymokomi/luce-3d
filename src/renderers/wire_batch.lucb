@@ -33,7 +33,13 @@ pub struct WireBatch:
             high = Vector3(math.max(high.x, p.x), math.max(high.y, p.y), math.max(high.z, p.z))
         return Bounds(low, high)
 
-    pub func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color, width: f64 = 1.0) -> !:
+    ## Draw the lines, depth tested. With `writes_depth` off they leave the depth
+    ## buffer alone (the ground grid: splats and fog drawn later cover it) and
+    ## are built each frame instead of retained.
+    pub func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color, width: f64 = 1.0, writes_depth: bool = true) -> !:
+        if not writes_depth:
+            try WireRenderer.lines(self.points, camera, target, color, width, writes_depth = false)
+            return
         let native = try target.get()
         var device = gpu.device_of(native) catch failure:
             if failure.code != gpu.unavailable: error(failure.code, failure.message)

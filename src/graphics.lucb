@@ -19,6 +19,8 @@ import materials.basic
 import errors
 import renderers.wire
 pub type WireRenderer = wire.WireRenderer
+## Release the shared pipeline of lines that write no depth (the ground grid).
+pub let release_line_pipelines = wire.release_line_pipelines
 import renderers.wire_batch
 pub type WireBatch = wire_batch.WireBatch
 pub let wire_batch_type = wire_batch.wire_batch_type

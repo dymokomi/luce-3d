@@ -1,5 +1,9 @@
 ## Screen-space-width, depth-tested world-space lines. No UI dependency.
+## Lines that must not write depth (the ground grid) draw through a client
+## pipeline (shaders/line.frag) that tests depth only, so what is drawn after
+## them, splats and fog, covers them as it covers anything behind it.
 from luce_gpu import gpu
+from renderers.line_shaders import line_frag_words, line_frag_msl, line_frag_fast_math
 import interop
 from luce_std import math
 import memory
@@ -14,7 +18,7 @@ pub struct WireRenderer:
     ## Any count is accepted; vertices are generated in bounded chunks.
     ## `depth` false draws them over everything (a see-through pass).
     pub static func lines(points: const Vector3[], camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget],
-                          color: gpu.Color, width: f64 = 1.0, bias: f64 = 0.000001, depth: bool = true) -> !:
+                          color: gpu.Color, width: f64 = 1.0, bias: f64 = 0.000001, depth: bool = true, writes_depth: bool = true) -> !:
         if points.length % 2 != 0 or not math.is_finite(width) or width <= 0.0 or width > 32.0:
             error(errors.invalid, "invalid wire segment count or pixel width")
         let native = try target.get()
@@ -27,7 +31,7 @@ pub struct WireRenderer:
         var start: usize = 0
         while start < points.length:
             let end = start + chunk if points.length - start > chunk else points.length
-            try segments(points[start..<end], projection, native, vertices, color, width, bias, size.width, size.height, depth)
+            try segments(points[start..<end], projection, native, vertices, color, width, bias, size.width, size.height, depth, writes_depth)
             start = end
 
     ## Selection fills share the scene depth buffer, unlike 2D Painter triangles.
@@ -53,7 +57,7 @@ pub struct WireRenderer:
 let chunk: usize = 131070
 
 func segments(points: const Vector3[], projection: Projection, native: const gpu.RenderTarget*, vertices: gpu.Vertex[],
-              color: gpu.Color, width: f64, bias: f64, target_width: f64, target_height: f64, depth: bool) -> !:
+              color: gpu.Color, width: f64, bias: f64, target_width: f64, target_height: f64, depth: bool, writes_depth: bool) -> !:
     var count: usize = 0
     var index: usize = 0
     while index < points.length:
@@ -88,8 +92,65 @@ func segments(points: const Vector3[], projection: Projection, native: const gpu
         for vertex in [a0, b0, b1, a0, b1, a1]:
             vertices[count] = vertex
             count += 1
-    if count > 0:
-        try native.triangles(vertices[..<count], depth)
+    if count == 0: return
+    if depth and not writes_depth:
+        try depth_tested(native, vertices[..<count], color)
+        return
+    try native.triangles(vertices[..<count], depth)
+
+## Line triangles tested against the frame's depth without writing it (the
+## line pipeline); a frame without a device draws nothing.
+func depth_tested(native: const gpu.RenderTarget*, vertices: gpu.Vertex[], color: gpu.Color) -> !:
+    var device = gpu.device_of(native) catch failure:
+        if failure.code != gpu.unavailable: error(failure.code, failure.message)
+        recover gpu.Device()
+    defer device.destroy()
+    if not device.is_open(): return
+    for at in 0..<vertices.length: vertices[at].alpha = (f32)color.alpha
+    try gpu.shade_triangles(native, try line_pipeline(device, try native.pixel_format()), vertices)
+
+# mark: The shared pipeline
+
+## The line shader and its pipelines on one device, per target format (slot 0
+## for presentation surfaces, 1 + the format otherwise): made on first use and
+## kept. Main thread only, as drawing is.
+struct LinePipelines:
+    var device: gpu.Device
+    var shader: gpu.Shader
+    var pipelines: (gpu.Pipeline?)[9]
+
+var shared: LinePipelines? = none
+
+func line_pipeline(device: gpu.Device, pixel_format: gpu.Format?) -> gpu.Pipeline!:
+    var wanted = device
+    if let held = shared:
+        if not held.device.same(&wanted): release_line_pipelines()
+    if shared == none:
+        var shader = try gpu.Shader.create(device, line_frag_words, line_frag_msl, line_frag_fast_math)
+        errdefer shader.destroy()
+        shared = LinePipelines(device = try device.share(), shader = shader)
+    var held = shared else trap("line pipelines")
+    var slot: usize = 0
+    if let format = pixel_format: slot = (usize)(u8)format + 1
+    if let made = held.pipelines[slot]: return made
+    let made = try gpu.Pipeline.create(device, held.shader, gpu.Blend.over, pixel_format, depth_test = true)
+    held.pipelines[slot] = made
+    shared = held
+    return made
+
+## Release the shared line shader and pipelines (made again on the next draw):
+## for a clean shutdown, or before closing the device.
+pub func release_line_pipelines():
+    let held = shared else return
+    shared = none
+    for pipeline in held.pipelines:
+        if let made = pipeline:
+            var owned = made
+            owned.destroy()
+    var shader = held.shader
+    shader.destroy()
+    var device = held.device
+    device.destroy()
 
 func projected(point: Vector3, projection: Projection, color: gpu.Color, bias: f64) -> gpu.Vertex:
     let relative = point.subtract(projection.position)

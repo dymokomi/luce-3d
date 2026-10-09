@@ -111,6 +111,27 @@ pub func occlusion(device: gpu.Device) -> !:
     # Past the splat: the green wall.
     assert(view.at(150, 60, 1) == 1.0 and view.at(150, 60, 0) == 0.0)
 
+## The ground grid's lines write no depth: a dense splat drawn after a line
+## covers it, even where the line is nearer (a capture under the ground plane),
+## instead of the line cutting through the splat; a wall in front still hides
+## the line.
+pub func grid_lines(device: gpu.Device) -> !:
+    var view = try View(device, width, height)
+    defer view.close()
+    let splats: Splat[1] = [Splat(center = Vector3(), scale = Vector3(0.3, 0.3, 0.3), opacity = 0.9, color = Vector3(1.0, 0.0, 0.0))]
+    let set = try clouds.splat_set(splats, 0)
+    defer set.release()
+    let cloud = try GaussianSplats.of(set)
+    defer cloud.release()
+    let walls: Wall[1] = [Wall(x0 = -3.0, x1 = -1.0, z = 1.5, color = gpu.Color(0.0, 0.0, 1.0))]
+    let line: Vector3[2] = [Vector3(-3.0, 0.0, 1.0), Vector3(3.0, 0.0, 1.0)]
+    _ = try view.draw_lines(one(cloud), walls, line)
+    # The middle: the splat over the white line in front of it.
+    let alpha = expected_alpha(0.3, 0.9, distance, 80, 60)
+    assert(alpha > 0.8 and near(view.at(80, 60, 0), 1.0, 0.01) and near(view.at(80, 60, 1), 1.0 - alpha, 0.01))
+    # Past the splat the line shows; behind the wall it does not.
+    assert(view.at(150, 60, 1) > 0.9 and view.at(10, 60, 2) == 1.0 and view.at(10, 60, 1) == 0.0)
+
 ## A degree-3 splat with a rest frame, seen from several eyes: the middle
 ## pixel's color over its opacity is luce-geocore's display_color toward the
 ## eye in the splat's SH frame; capped at degree 0 it is Cd.

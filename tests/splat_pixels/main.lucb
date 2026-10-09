@@ -7,7 +7,7 @@
 from luce_gpu import gpu
 import os
 from luce_std import process
-from luce_3d.graphics import release_splat_pipelines
+from luce_3d.graphics import release_splat_pipelines, release_line_pipelines
 import pixels
 import sorting
 import timings
@@ -22,14 +22,16 @@ pub func main(arguments: str[]) -> i32!:
         error(failure.code, failure.message)
     defer device.destroy()
     defer release_splat_pipelines()
+    defer release_line_pipelines()
     try sorting.checks(device)
     try pixels.falloff(device)
     try pixels.depth_order(device)
     try pixels.occlusion(device)
+    try pixels.grid_lines(device)
     try pixels.harmonics(device)
     try pixels.dots(device)
     try pixels.uploads(device)
-    print("PASS gaussian splats: analytic falloff, depth order both ways, occlusion both ways, display_color, dots, one upload, GPU sort")
+    print("PASS gaussian splats: analytic falloff, depth order both ways, occlusion both ways, grid lines under splats, display_color, dots, one upload, GPU sort")
     let wanted = process.variable("SPLAT_TIMINGS") else "1"
     if wanted != "0":
         for count in [(usize)1000000, 3000000, 6000000]:

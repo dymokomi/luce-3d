@@ -47,9 +47,13 @@ pub struct View:
         try self.camera.value().set_position(eye)
         try self.camera.value().look_at(Vector3())
 
-    ## Draw `walls`, then `splats` in order, over a black clear; read the
-    ## pixels back when the view reads. The frame's submission.
+    ## Draw `walls`, then white `lines` that write no depth (as the ground
+    ## grid draws), then `splats` in order, over a black clear; read the pixels
+    ## back when the view reads. The frame's submission.
     pub func draw(splats: const interop.Reference[GaussianSplats][], walls: const Wall[]) -> gpu.Submission!:
+        return try self.draw_lines(splats, walls, no_lines())
+
+    pub func draw_lines(splats: const interop.Reference[GaussianSplats][], walls: const Wall[], lines: const Vector3[]) -> gpu.Submission!:
         let recording = try self.texture.frame()
         defer recording.release()
         let target = try recording.value().target()
@@ -58,6 +62,7 @@ pub struct View:
             let points: Vector3[6] = [Vector3(wall.x0, wall.y0, wall.z), Vector3(wall.x1, wall.y0, wall.z), Vector3(wall.x1, wall.y1, wall.z),
                                       Vector3(wall.x0, wall.y0, wall.z), Vector3(wall.x1, wall.y1, wall.z), Vector3(wall.x0, wall.y1, wall.z)]
             try WireRenderer.triangles(points, self.camera, target, wall.color)
+        if lines.length > 0: try WireRenderer.lines(lines, self.camera, target, gpu.Color(1.0, 1.0, 1.0), 3.0, writes_depth = false)
         for cloud in splats:
             try cloud.value().draw(self.camera, target)
         _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0))
@@ -78,3 +83,7 @@ pub struct View:
             free(self.halves) in memory.heap
         self.camera.release()
         self.texture.destroy()
+
+func no_lines() -> const Vector3[]:
+    var none_given: const Vector3[]
+    return none_given
