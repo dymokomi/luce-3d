@@ -75,8 +75,9 @@ struct CloudBuffers:
             owned.destroy()
         self.device.destroy()
 
-## Serials tell clouds apart in a view's signature (an address can be reused).
-var next_serial: u64 = 1
+## Serials tell clouds apart in a view's signature (an address can be reused);
+## clouds are made on worker threads, so the counter is atomic.
+var next_serial: @u64 = 1
 
 ## One point cloud ready to draw: its packed data until the first draw
 ## uploads it, then its buffers.
@@ -294,8 +295,7 @@ pub func gaussian_splats(set: const GeometrySet*, matrix: Matrix4) -> GaussianSp
     errdefer data.close()
     var occluding = try OccludingCloud.of(set, matrix)
     errdefer occluding.close()
-    let serial = next_serial
-    next_serial += 1
+    let serial = next_serial.add(1, .relaxed)
     return try new GaussianSplats(data = data, settings = SplatLook(), serial = serial, occluding = occluding) in memory.heap
 
 ## How many points `set`'s cloud holds (0 without one), for Base callers.
