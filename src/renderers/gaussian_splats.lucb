@@ -14,8 +14,8 @@ import interop
 import memory
 from luce_std import math
 import errors
-from luce_geocore.geocore import Vector3, Matrix4, GeometrySet, Bounds
-from luce_geocore.kernel import Selection, selection_bits
+from luce_geocore.geocore import Vector3, Matrix4, GeometrySet, Bounds, SplatOccluders
+from luce_geocore.kernel import Selection, selection_bits, OccludingCloud, add_occluding_cloud
 from cameras.perspective import PerspectiveCamera, Projection
 from renderers.splat_data import SplatData, splat_data, splat_key, cloud_count
 from renderers.splat_view import SplatView, SplatTimes, CloudInput, signature_words, open_view, close_view
@@ -93,6 +93,9 @@ pub struct GaussianSplats:
     var marks_changed: bool
     ## The view `draw` sorts in when it draws this cloud alone.
     var own_view: SplatView*?
+    ## The cloud's points and splat attributes as placed (shared columns),
+    ## for Edit GSplats' Visible only (`occlude`).
+    var occluding: OccludingCloud
 
     ## `geometry`'s point cloud placed by `matrix`: Gaussian splats when it
     ## has orient, scale and opacity, dots otherwise.
@@ -149,6 +152,12 @@ pub struct GaussianSplats:
     ## and no other cloud of the same size.
     pub func source_id() -> i64:
         return (i64)(self.data.source >> 1)
+
+    ## Add its splats, as placed, to `occluders`: luce-geocore's Edit GSplats
+    ## then hides an edited cloud's splats behind them (Visible only). It
+    ## shares the cloud's columns; plain points hide nothing.
+    pub func occlude(occluders: interop.Reference[SplatOccluders]) -> !:
+        try add_occluding_cloud(try occluders.get(), &self.occluding)
 
     ## Whether a selection is tinted on it (`set_marks`).
     pub func has_marks() -> bool:
@@ -265,6 +274,7 @@ pub struct GaussianSplats:
         if let view = self.own_view: close_view(view)
         self.own_view = none
         self.data.close()
+        self.occluding.close()
         if self.marks.length > 0: free(self.marks) in memory.heap
         var nothing: u32[]
         self.marks = nothing
@@ -282,9 +292,11 @@ pub let gaussian_splats_type: interop.Type[GaussianSplats] = interop.Type[Gaussi
 pub func gaussian_splats(set: const GeometrySet*, matrix: Matrix4) -> GaussianSplats*!:
     var data = try splat_data(set, matrix)
     errdefer data.close()
+    var occluding = try OccludingCloud.of(set, matrix)
+    errdefer occluding.close()
     let serial = next_serial
     next_serial += 1
-    return try new GaussianSplats(data = data, settings = SplatLook(), serial = serial) in memory.heap
+    return try new GaussianSplats(data = data, settings = SplatLook(), serial = serial, occluding = occluding) in memory.heap
 
 ## How many points `set`'s cloud holds (0 without one), for Base callers.
 pub func splat_count(set: const GeometrySet*) -> i64:
