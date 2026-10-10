@@ -1,0 +1,162 @@
+## luce-render's splats against the viewport (GaussianSplats), primary rays
+## only: a ball of 400 random splats with SH, seen by the same camera, drawn
+## by luce-3d (EWA projection, sorted by depth, alpha blended) and rendered by
+## luce-render (3DGRT: each Gaussian at its maximum response along the ray,
+## k-buffer composited), both in linear light over black. The two methods
+## approximate the same Gaussians differently (EWA's affine projection and
+## low-pass against the exact ray response, center depth order against
+## per-ray order), so they agree within that and the render's noise.
+import memory
+import interop
+from luce_std import math
+from luce_gpu import gpu
+from luce_render import render
+from luce_3d import graphics as three
+from luce_3d.graphics import GaussianSplats, PerspectiveCamera
+from luce_geocore.geocore import Vector3, GeometrySet
+from luce_geocore.kernel import Attribute, AttributeStore, Domain, DataType, Float3, empty_set, adopt_set, dispose_set, points_component, cloud_assembled
+from luce_geocore.core.shared import Column
+from luce_geocore.splats import Quat
+
+let width: u32 = 240
+let height: u32 = 160
+## The vertical field of view, degrees.
+let fov: f64 = 40.0
+
+pub func main(arguments: str[]) -> i32!:
+    _ = arguments
+    var device = gpu.Device.open() catch failure:
+        if failure.code == gpu.unavailable:
+            print("skip: no GPU device")
+            return 0
+        error(failure.code, failure.message)
+    defer device.destroy()
+    defer three.release_splat_pipelines()
+    let cloud = try ball(400, 11)
+    defer cloud.release()
+    let count = (usize)width * (usize)height * 4
+    let drawn = try new f32[count] --- in memory.heap
+    defer free(drawn) in memory.heap
+    let traced = try new f32[count] --- in memory.heap
+    defer free(traced) in memory.heap
+    try viewport(device, cloud, drawn)
+    try rendered(device, cloud, traced)
+    # Mean absolute difference over the mean signal, and the share of pixels
+    # off by more than 0.05.
+    var difference: f64 = 0.0
+    var signal: f64 = 0.0
+    var far: usize = 0
+    for at in 0..<(usize)width * (usize)height:
+        var worst: f64 = 0.0
+        for k in 0..<(usize)3:
+            let d = math.abs((f64)drawn[at * 4 + k] - (f64)traced[at * 4 + k])
+            difference += d
+            signal += math.abs((f64)drawn[at * 4 + k])
+            worst = math.max(worst, d)
+        if worst > 0.05: far += 1
+    let relative = difference / signal
+    let share = (f64)far / (f64)((usize)width * (usize)height)
+    print(f"splat render against the viewport: mean difference {relative * 100.0:.2f}% of the signal, {share * 100.0:.2f}% of pixels off by more than 0.05")
+    if relative > 0.04 or share > 0.02:
+        error(gpu.invalid_geometry, "luce-render's splats do not match the viewport")
+    print("PASS splats: luce-render's primary visibility matches the viewport")
+    return 0
+
+## `count` random splats in a ball of radius 1: σ 0.04..0.12 per axis, random
+## rotations, opacities 0.1..1, colors and band 1 of the SH at random.
+func ball(count: usize, seed: u64) -> interop.Reference[GeometrySet]!:
+    var state = seed
+    var store = AttributeStore()
+    let orient = try Attribute.create("orient", Domain.point, DataType.float32, 4, count)
+    let scale = try Attribute.create("scale", Domain.point, DataType.float32, 3, count)
+    let opacity = try Attribute.create("opacity", Domain.point, DataType.float32, 1, count)
+    let color = try Attribute.create("Cd", Domain.point, DataType.float32, 3, count)
+    let o = f32[]((f32*)orient.data.span().data, count * 4)
+    let s = f32[]((f32*)scale.data.span().data, count * 3)
+    let a = f32[]((f32*)opacity.data.span().data, count)
+    let colors = f32[]((f32*)color.data.span().data, count * 3)
+    var positions = try Column[Float3].allocate(count)
+    let out = positions.span()
+    var offsets = try Column[u8].allocate((count + 1) * 4)
+    let bounds = u32[]((u32*)offsets.span().data, count + 1)
+    var values = try Column[u8].allocate(count * 3 * 12)
+    let items = f32[]((f32*)values.span().data, count * 9)
+    for at in 0..<count:
+        var p = Vector3(2.0, 2.0, 2.0)
+        while p.length() > 1.0:
+            p = Vector3(2.0 * draw(&state) - 1.0, 2.0 * draw(&state) - 1.0, 2.0 * draw(&state) - 1.0)
+        out[at] = Float3.of(p)
+        let q = Quat(draw(&state) - 0.5, draw(&state) - 0.5, draw(&state) - 0.5, draw(&state) - 0.5).normalized()
+        let qv: f64[4] = [q.x, q.y, q.z, q.w]
+        for k in 0..<(usize)4: o[at * 4 + k] = (f32)qv[k]
+        for k in 0..<(usize)3:
+            s[at * 3 + k] = (f32)(0.04 + 0.08 * draw(&state))
+            colors[at * 3 + k] = (f32)draw(&state)
+        a[at] = (f32)(0.1 + 0.9 * draw(&state))
+        for k in 0..<(usize)9: items[at * 9 + k] = (f32)(0.3 * draw(&state) - 0.15)
+    for at in 0..<count + 1: bounds[at] = (u32)(at * 3)
+    for made in [orient, scale, opacity, color]: try store.put(made)
+    try store.put(try Attribute.ragged("sh", Domain.point, DataType.float32, 3, offsets, values))
+    let cloud = try cloud_assembled(positions, Vector3(), store)
+    let storage = empty_set() catch failure:
+        let close = points_component().close
+        close((void*)cloud)
+        error(failure.code, failure.message)
+    storage.put(points_component(), (void*)cloud) catch failure:
+        dispose_set(storage)
+        error(failure.code, failure.message)
+    return try adopt_set(storage)
+
+## A uniform number in [0, 1) (SplitMix64).
+func draw(state: u64*) -> f64:
+    *state = *state +% 0x9E3779B97F4A7C15
+    var z = *state
+    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9
+    z = (z ^ (z >> 27)) *% 0x94D049BB133111EB
+    return (f64)((z ^ (z >> 31)) >> 11) / 9007199254740992.0
+
+## The viewport's image from (0, 0, 4) toward the origin, linear Rec.709
+## turned to ACEScg as luce-render's images are.
+func viewport(device: gpu.Device, cloud: interop.Reference[GeometrySet], pixels: f32[]) -> !:
+    var texture = try gpu.Texture.create(device, width, height, gpu.Format.rgba16_float)
+    defer texture.destroy()
+    let camera = try interop.Reference[PerspectiveCamera].adopt(new PerspectiveCamera(fov, (f64)width / (f64)height, 0.1, 100.0) in memory.heap,
+                                                                three.perspective_camera_type, memory.heap)
+    defer camera.release()
+    try camera.value().set_position(Vector3(0.0, 0.0, 4.0))
+    try camera.value().look_at(Vector3())
+    let splats = try GaussianSplats.of(cloud)
+    defer splats.release()
+    let recording = try texture.frame()
+    defer recording.release()
+    let target = try recording.value().target()
+    defer target.release()
+    try splats.value().draw(camera, target)
+    _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0))
+    let halves = try new u8[pixels.length * 2] --- in memory.heap
+    defer free(halves) in memory.heap
+    try texture.read(halves)
+    for at in 0..<(usize)width * (usize)height:
+        let r = (f64)memory.read[f16]((void*)&halves[at * 8])
+        let g = (f64)memory.read[f16]((void*)&halves[at * 8 + 2])
+        let b = (f64)memory.read[f16]((void*)&halves[at * 8 + 4])
+        pixels[at * 4] = (f32)(0.613097 * r + 0.339523 * g + 0.047379 * b)
+        pixels[at * 4 + 1] = (f32)(0.070194 * r + 0.916354 * g + 0.013452 * b)
+        pixels[at * 4 + 2] = (f32)(0.020616 * r + 0.109570 * g + 0.869815 * b)
+        pixels[at * 4 + 3] = 1.0
+
+## luce-render's image through the same camera: primary rays only (one
+## bounce, no lights, a black background), RGB, 64 samples a pixel.
+func rendered(device: gpu.Device, cloud: interop.Reference[GeometrySet], pixels: f32[]) -> !:
+    let focal = 12.0 / math.tan(0.5 * fov * math.pi / 180.0)
+    let set = try cloud.value().with_camera("/camera", Vector3(0.0, 0.0, 4.0), Vector3(), 0, focal, 24.0 * (f64)width / (f64)height, 24.0, 0.1, 100.0, 0.0, 4.0)
+    defer set.release()
+    var scene = try render.compile_scene(set.value())
+    defer scene.close()
+    var settings = render.RenderSettings.of(width, height, 64)
+    settings.spectral = false
+    settings.max_bounces = 1
+    var renderer = try render.Renderer.create(device, &scene, settings)
+    defer renderer.destroy()
+    try renderer.finish()
+    try renderer.read(pixels)
