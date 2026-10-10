@@ -1,0 +1,149 @@
+## Which fog drawings a FogScene marches together, and the atlas a group
+## binds. Drawings whose boxes overlap (past their padding) march in one pass,
+## each sample summing every drawing that holds it (shaders/fog.frag's group
+## variant), so overlapping smokes mix and shadow each other. A pass binds one
+## atlas image beside the table and the scene's depth, so a group's atlases
+## are stacked into one texture (copied on the GPU when the group first
+## draws, kept while it stays the same). A pass holds at most
+## `most_together` drawings; a larger set of overlapping drawings (or one
+## whose stack would pass the largest texture) is cut into passes of
+## consecutive drawings by distance, farther first, composited one over the
+## next: where those passes overlap, the nearer veils the farther whole
+## rather than sample by sample.
+from luce_gpu import gpu
+import memory
+from luce_std import math
+from luce_geocore.geocore import Vector3
+from luce_geocore.core.growing import Growing
+from renderers.fog_volume import FogVolume, corner_of
+
+## The most drawings one pass marches together (shaders/fog.frag's `most`).
+pub let most_together: usize = 4
+## The tallest stacked atlas, in texels.
+let tallest: usize = 16384
+
+## One pass: up to `most_together` drawings, by their index in the scene's
+## drawings, farther first.
+pub struct FogPass:
+    pub var members: usize[4]
+    pub var count: usize
+
+## The passes of `drawn` (its drawings, `order` farther first): each drawing
+## with the drawings whose boxes meet its own, directly or through others, up
+## to `most_together` and the tallest stack. Appended to `passes` in the order
+## of their farthest members, so passes draw back to front.
+pub func fog_passes(drawn: FogVolume*[], order: const usize[], passes: Growing[FogPass]*) -> !:
+    let count = order.length
+    # Union-find over the drawings whose boxes meet.
+    let parent = try new usize[count + 1] --- in memory.heap
+    defer free(parent) in memory.heap
+    for at in 0..<count: parent[at] = at
+    for a in 0..<count:
+        for b in a + 1..<count:
+            if boxes_meet(drawn[order[a]], drawn[order[b]]): join(parent[..<count], a, b)
+    # Each set's open pass (an index into `passes`, or `count` for none) and
+    # its stack's height; drawings join their set's open pass farther first,
+    # so every pass starts at its farthest member and passes are in order.
+    let open = try new usize[count + 1] --- in memory.heap
+    defer free(open) in memory.heap
+    let height = try new usize[count + 1] in memory.heap
+    defer free(height) in memory.heap
+    for at in 0..<count: open[at] = count
+    for at in 0..<count:
+        let root = find(parent[..<count], at)
+        let atlas_height = drawn[order[at]].texel_data().height
+        if open[root] != count:
+            let pass = &passes.items[open[root]]
+            if pass.count == most_together or height[root] + atlas_height > tallest: open[root] = count
+        if open[root] == count:
+            open[root] = passes.count
+            height[root] = 0
+            try passes.push(FogPass(members = [0, 0, 0, 0], count = 0))
+        let pass = &passes.items[open[root]]
+        pass.members[pass.count] = order[at]
+        pass.count += 1
+        height[root] += atlas_height
+
+func find(parent: usize[], at: usize) -> usize:
+    var root = at
+    while parent[root] != root: root = parent[root]
+    var walk = at
+    while parent[walk] != root:
+        let next = parent[walk]
+        parent[walk] = root
+        walk = next
+    return root
+
+func join(parent: usize[], a: usize, b: usize):
+    let ra = find(parent, a)
+    let rb = find(parent, b)
+    if ra != rb: parent[rb] = ra
+
+## Whether two drawings' boxes overlap past their padding (the texel of
+## background around each), in world boxes around them: then they march in one
+## pass. Boxes meeting only in padding hold no fog in common.
+pub func boxes_meet(a: const FogVolume*, b: const FogVolume*) -> bool:
+    let (a_low, a_high) = world_box(a)
+    let (b_low, b_high) = world_box(b)
+    return a_low.x < b_high.x and b_low.x < a_high.x and a_low.y < b_high.y and b_low.y < a_high.y and a_low.z < b_high.z and b_low.z < a_high.z
+
+## The world box around a drawing's texels inside their padding.
+func world_box(volume: const FogVolume*) -> (Vector3, Vector3):
+    let data = volume.texel_data()
+    let inset = Vector3(1.0 / (f64)data.counts[0], 1.0 / (f64)data.counts[1], 1.0 / (f64)data.counts[2])
+    let span = Vector3(1.0 - 2.0 * inset.x, 1.0 - 2.0 * inset.y, 1.0 - 2.0 * inset.z)
+    var low = Vector3(1.0e300, 1.0e300, 1.0e300)
+    var high = Vector3(-1.0e300, -1.0e300, -1.0e300)
+    for corner in 0..<(usize)8:
+        let at = corner_of(corner)
+        let p = data.box.transform_point(Vector3(inset.x + at.x * span.x, inset.y + at.y * span.y, inset.z + at.z * span.z))
+        low = Vector3(math.min(low.x, p.x), math.min(low.y, p.y), math.min(low.z, p.z))
+        high = Vector3(math.max(high.x, p.x), math.max(high.y, p.y), math.max(high.z, p.z))
+    return (low, high)
+
+## A group's atlases stacked top to bottom in one texture: its drawings (by
+## their serials, in pass order) and where each one's atlas starts.
+pub struct StackedAtlas:
+    pub var drawings: u64[4]
+    pub var count: usize
+    pub var texture: gpu.Texture
+    pub var width: usize
+    pub var height: usize
+    pub var starts: usize[4]
+    ## Whether the frame being drawn uses it (those left unused are freed).
+    pub var used: bool
+
+    pub func close():
+        self.texture.destroy()
+
+## Whether `stack` holds `pass`'s drawings in its order.
+pub func stack_holds(stack: const StackedAtlas*, pass: const FogPass*, drawn: FogVolume*[]) -> bool:
+    if stack.count != pass.count: return false
+    for at in 0..<pass.count:
+        if stack.drawings[at] != drawn[pass.members[at]].drawing_id(): return false
+    return true
+
+## A new stack of `pass`'s atlases (`atlases`, by drawing index) on `device`,
+## each copied as it is stored.
+pub func stack_atlases(device: gpu.Device, pass: const FogPass*, drawn: FogVolume*[], atlases: const gpu.Texture[]) -> StackedAtlas!:
+    var width: usize = 0
+    var height: usize = 0
+    var drawings: u64[4] = [0, 0, 0, 0]
+    var starts: usize[4] = [0, 0, 0, 0]
+    for at in 0..<pass.count:
+        let data = drawn[pass.members[at]].texel_data()
+        drawings[at] = drawn[pass.members[at]].drawing_id()
+        starts[at] = height
+        if data.width > width: width = data.width
+        height += data.height
+    var texture = try gpu.Texture.create(device, (u32)width, (u32)height, gpu.Format.rgba16_float)
+    errdefer texture.destroy()
+    let recording = try texture.frame()
+    defer recording.release()
+    let target = try recording.value().target()
+    defer target.release()
+    for at in 0..<pass.count:
+        let data = drawn[pass.members[at]].texel_data()
+        try gpu.copy_image(try target.get(), atlases[pass.members[at]], gpu.Rect(0.0, (f64)starts[at], (f64)data.width, (f64)data.height))
+    _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))
+    return StackedAtlas(drawings = drawings, count = pass.count, texture = texture, width = width, height = height, starts = starts, used = true)

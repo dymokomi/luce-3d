@@ -5,10 +5,10 @@
 ## boxes on screen and marches each pixel's eye ray through them, ending at the
 ## scene's depth (luce-gpu's scene_depth) a fraction of a step if need be, from
 ## a blue-noise start: a mesh inside the fog cuts it smoothly at any depth.
-## Two drawings whose boxes overlap share a pass (shaders/fog.frag's pair
-## variant; two atlases are the most a draw binds beside the table and the
-## scene depth), each sample summing both, so crossing smokes mix; others
-## draw in passes of their own, farther first.
+## Drawings whose boxes overlap share a pass, up to four (renderers/fog_groups:
+## their atlases stacked into one; shaders/fog.frag's group variant), each
+## sample summing every drawing holding it, so crossing smokes mix and shadow
+## each other; others draw in passes of their own, farther first.
 from luce_gpu import gpu
 import interop
 import memory
@@ -18,14 +18,19 @@ from luce_geocore.geocore import Vector3
 from cameras.perspective import PerspectiveCamera, Projection
 from core.material import Color, check_color
 from renderers.fog_volume import FogVolume, corner_of
+from renderers.fog_groups import FogPass, StackedAtlas, fog_passes, stack_holds, stack_atlases
+from luce_geocore.core.growing import Growing
 from renderers.fog_ramp import emission_strip, emission_fit
 from renderers.fog_noise import blue_noise, noise_side
-from renderers.fog_shaders import fog_frag_words, fog_frag_msl, fog_frag_fast_math, fog_pair_frag_words, fog_pair_frag_msl, fog_pair_frag_fast_math
+from renderers.fog_shaders import fog_frag_words, fog_frag_msl, fog_frag_fast_math, fog_group_frag_words, fog_group_frag_msl, fog_group_frag_fast_math
 
 ## The table: 256 texels wide; the noise tile's rows, then two rows a drawing.
 let table_width: usize = 256
 ## Texels of a drawing's numbers (shaders/fog.frag's `meet` reads them).
 let number_texels: usize = 8
+## The most vertices a pass's outline takes: a fan over the hull of four
+## boxes' 32 corners.
+let outline_vertices: usize = 90
 ## The most steps a ray takes through all its boxes.
 let most_steps: f64 = 4096.0
 
@@ -37,6 +42,13 @@ pub struct FogScene:
     var drawn: FogVolume*[]
     var versions: u64[]
     var tables: i64
+    ## Where each drawing's atlas sat in the image its pass bound (texels
+    ## down, that image's width and height), as the table holds it.
+    var bounds: f32[]
+    ## The groups' stacked atlases, kept while their groups stay the same.
+    var stacks: Growing[StackedAtlas]
+    ## Passes of the last draw (tests and reports).
+    var passes_drawn: i64
 
     ## Draw `volumes` over what `target` holds, through `camera`: the key light
     ## colored `key` (intensity folded in) and a sky light of `ambient`. A
@@ -64,9 +76,6 @@ pub struct FogScene:
             let (atlas, first) = try drawn[at].atlas(device)
             atlases[at] = atlas
             sent = sent or first
-        # A volume drawn for the first time may sit where another was.
-        try self.fill_table(device, drawn, sent)
-        let table = self.table else return
         let projection = try camera.value().projection(size.width / size.height)
         let pixel_format = try native.pixel_format()
         # Drawings by distance, farther first, so a nearer pass veils a
@@ -90,37 +99,91 @@ pub struct FogScene:
         let placement = try native.placement()
         let scale = size.pixel_width / size.width
         let view: f64[4] = [placement.x * scale, placement.y * scale, size.pixel_width, size.pixel_height]
-        # A drawing shares a pass with the next nearer one only where their
-        # boxes meet: others draw apart, back to front, each over its own
+        # Drawings whose boxes meet march together, up to four a pass, their
+        # atlases stacked into one; passes draw back to front, each over its
         # outline.
-        let outline = try new gpu.Vertex[42] --- in memory.heap
+        var passes = Growing[FogPass]()
+        defer passes.close()
+        try fog_passes(drawn, order, &passes)
+        let images = try new gpu.Texture[passes.count + 1] --- in memory.heap
+        defer free(images) in memory.heap
+        let bounds = try new f32[drawn.length * 3] --- in memory.heap
+        defer free(bounds) in memory.heap
+        try self.bind_passes(device, passes.items[..<passes.count], drawn, atlases, images, bounds)
+        # A volume drawn for the first time may sit where another was.
+        try self.fill_table(device, drawn, bounds, sent)
+        let table = self.table else return
+        let outline = try new gpu.Vertex[outline_vertices] --- in memory.heap
         defer free(outline) in memory.heap
-        var first: usize = 0
-        while first < drawn.length:
-            var count: usize = 1
-            if first + 1 < drawn.length and boxes_meet(drawn[order[first]], drawn[order[first + 1]]): count = 2
-            let group = order[first..<first + count]
-            first += count
+        for at in 0..<passes.count:
+            let pass = &passes.items[at]
+            let group = pass.members[..<pass.count]
             let corners = cover(projection, drawn, group, outline)
             if corners == 0: continue
             var uniforms = uniforms_of(projection, group, key, ambient, view)
-            let second = atlases[group[1]] if count > 1 else atlases[group[0]]
-            let pipeline = try fog_pipeline(device, pixel_format, count > 1)
-            try gpu.shade_triangles(native, pipeline, outline[..<corners], u8[]((u8*)&uniforms[0], 128), [atlases[group[0]], table, second], gpu.Filter.linear)
+            let pipeline = try fog_pipeline(device, pixel_format, pass.count > 1)
+            try gpu.shade_triangles(native, pipeline, outline[..<corners], u8[]((u8*)&uniforms[0], 128), [images[at], table], gpu.Filter.linear)
+        self.passes_drawn = (i64)passes.count
+
+    ## The image each pass binds into `images`: a lone drawing's own atlas, a
+    ## group's stacked atlases (kept from the last draw when the group is the
+    ## same, else stacked now; stacks no pass uses are freed); and where each
+    ## drawing's atlas sits in its pass's image into `bounds` (3 per drawing).
+    func bind_passes(device: gpu.Device, passes: const FogPass[], drawn: FogVolume*[], atlases: const gpu.Texture[], images: gpu.Texture[], bounds: f32[]) -> !:
+        for at in 0..<self.stacks.count: self.stacks.items[at].used = false
+        for (at, pass) in passes.indexed():
+            if pass.count == 1:
+                let index = pass.members[0]
+                let data = drawn[index].texel_data()
+                images[at] = atlases[index]
+                bounds[index * 3] = 0.0
+                bounds[index * 3 + 1] = (f32)data.width
+                bounds[index * 3 + 2] = (f32)data.height
+                continue
+            var found = self.stacks.count
+            for held in 0..<self.stacks.count:
+                if not self.stacks.items[held].used and stack_holds(&self.stacks.items[held], &pass, drawn): found = held
+            if found == self.stacks.count: try self.stacks.push(try stack_atlases(device, &pass, drawn, atlases))
+            let stack = &self.stacks.items[found]
+            stack.used = true
+            images[at] = stack.texture
+            for member in 0..<pass.count:
+                let index = pass.members[member]
+                bounds[index * 3] = (f32)stack.starts[member]
+                bounds[index * 3 + 1] = (f32)stack.width
+                bounds[index * 3 + 2] = (f32)stack.height
+        var kept: usize = 0
+        for at in 0..<self.stacks.count:
+            if self.stacks.items[at].used:
+                self.stacks.items[kept] = self.stacks.items[at]
+                kept += 1
+            else:
+                self.stacks.items[at].close()
+        self.stacks.count = kept
+
+    ## How many passes the last draw made (one per lone drawing, one per group).
+    pub func pass_count() -> i64:
+        return self.passes_drawn
+
+    ## How many stacked atlases it keeps for its groups.
+    pub func stack_count() -> i64:
+        return (i64)self.stacks.count
 
     ## How many times the table was sent (the first draw, a new look, other
     ## drawings).
     pub func table_count() -> i64:
         return self.tables
 
-    ## Send the table again if the drawings, or a look, changed, or `sent` (a
-    ## volume new to the GPU): the noise tile, then each drawing's numbers
-    ## and emission strip.
-    func fill_table(device: gpu.Device, drawn: FogVolume*[], sent: bool) -> !:
+    ## Send the table again if the drawings, a look or where their atlases sit
+    ## (`bounds`) changed, or `sent` (a volume new to the GPU): the noise tile,
+    ## then each drawing's numbers and emission strip.
+    func fill_table(device: gpu.Device, drawn: FogVolume*[], bounds: const f32[], sent: bool) -> !:
         var current = self.table != none and not sent and drawn.length == self.drawn.length
         if current:
             for at in 0..<drawn.length:
                 if self.drawn[at] != drawn[at] or self.versions[at] != drawn[at].look_version(): current = false
+            for at in 0..<bounds.length:
+                if self.bounds[at] != bounds[at]: current = false
         if current: return
         let rows = noise_side + 2 * drawn.length
         let values = try new f32[table_width * rows * 4] in memory.heap
@@ -138,7 +201,7 @@ pub struct FogScene:
         for at in 0..<drawn.length:
             let volume = drawn[at]
             let row = noise_side + 2 * at
-            write_numbers(values[row * table_width * 4..<(row * table_width + number_texels) * 4], volume)
+            write_numbers(values[row * table_width * 4..<(row * table_width + number_texels) * 4], volume, bounds[at * 3..<at * 3 + 3])
             emission_strip(volume.styled_look(), values[(row + 1) * table_width * 4..<(row + 2) * table_width * 4])
             _ = volume.take_strip()
             kept[at] = volume
@@ -149,18 +212,24 @@ pub struct FogScene:
             self.table_rows = rows
         let table = self.table else trap("fog table")
         try table.upload(u8[]((u8*)values.data, values.length * 4))
+        let kept_bounds = try new f32[bounds.length + 1] --- in memory.heap
+        memory.copy(kept_bounds[..<bounds.length], bounds, bounds.length)
         self.forget()
         self.drawn = kept
         self.versions = versions
+        self.bounds = kept_bounds
         self.tables += 1
 
     func forget():
         if self.drawn.length > 0: free(self.drawn) in memory.heap
         if self.versions.length > 0: free(self.versions) in memory.heap
+        if self.bounds.length > 0: free(self.bounds) in memory.heap
         var no_drawn: FogVolume*[]
         var no_versions: u64[]
+        var no_bounds: f32[]
         self.drawn = no_drawn
         self.versions = no_versions
+        self.bounds = no_bounds
 
     func release_table():
         if let table = self.table:
@@ -173,16 +242,18 @@ pub struct FogScene:
     pub func close():
         self.release_table()
         self.forget()
+        for at in 0..<self.stacks.count: self.stacks.items[at].close()
+        self.stacks.close()
 
 pub let fog_scene_type: interop.Type[FogScene] = interop.Type[FogScene]("FogScene", FogScene.close, closeable = true, main_thread = true)
 
 ## Triangles over the outline of the boxes of `group` on screen (the convex
 ## hull of their corners; the whole view when one reaches behind the near
-## plane), written into `out` (42 vertices at most); how many.
+## plane), written into `out` (`outline_vertices` at most); how many.
 func cover(projection: Projection, drawn: FogVolume*[], group: const usize[], out: gpu.Vertex[]) -> usize:
     let forward = projection.backward.multiply_scalar(-1.0)
-    var xs: f64[16]
-    var ys: f64[16]
+    var xs: f64[32]
+    var ys: f64[32]
     var count: usize = 0
     for index in group:
         let box = drawn[index].texel_data().box
@@ -196,7 +267,7 @@ func cover(projection: Projection, drawn: FogVolume*[], group: const usize[], ou
             ys[count] = relative.dot(projection.up) * projection.focal / depth
             count += 1
     # Andrew's monotone chain: sort by x then y, lower then upper hull.
-    var order: usize[16]
+    var order: usize[32]
     for at in 0..<count: order[at] = at
     for at in 1..<count:
         var probe = at
@@ -205,7 +276,7 @@ func cover(projection: Projection, drawn: FogVolume*[], group: const usize[], ou
             order[probe] = order[probe - 1]
             order[probe - 1] = held
             probe -= 1
-    var hull: usize[33]
+    var hull: usize[65]
     var size: usize = 0
     for pass in 0..<(usize)2:
         let start = size
@@ -216,14 +287,14 @@ func cover(projection: Projection, drawn: FogVolume*[], group: const usize[], ou
             size += 1
         size -= 1
     if size < 3: return 0
-    var points: f64[64]
+    var points: f64[130]
     for at in 0..<size:
         points[at * 2] = xs[hull[at]]
         points[at * 2 + 1] = ys[hull[at]]
-    return fan(points[..<64], size, out)
+    return fan(points[..<130], size, out)
 
 ## The cross product of (b - a) and (c - a): positive when a, b, c turn left.
-func turn(xs: const f64[16], ys: const f64[16], a: usize, b: usize, c: usize) -> f64:
+func turn(xs: const f64[32], ys: const f64[32], a: usize, b: usize, c: usize) -> f64:
     return (xs[b] - xs[a]) * (ys[c] - ys[a]) - (ys[b] - ys[a]) * (xs[c] - xs[a])
 
 ## The convex polygon of `count` points (x, y pairs in clip space) as a fan of
@@ -235,28 +306,6 @@ func fan(points: const f64[], count: usize, out: gpu.Vertex[]) -> usize:
             out[written] = gpu.Vertex(x = (f32)points[corner * 2], y = (f32)points[corner * 2 + 1], z = 0.0, w = 1.0, red = 1.0, green = 1.0, blue = 1.0)
             written += 1
     return written
-
-## Whether two drawings' boxes overlap past their padding (the texel of
-## background around each), in world boxes around them: then they march in one
-## pass. Boxes meeting only in padding hold no fog in common.
-func boxes_meet(a: const FogVolume*, b: const FogVolume*) -> bool:
-    let (a_low, a_high) = world_box(a)
-    let (b_low, b_high) = world_box(b)
-    return a_low.x < b_high.x and b_low.x < a_high.x and a_low.y < b_high.y and b_low.y < a_high.y and a_low.z < b_high.z and b_low.z < a_high.z
-
-## The world box around a drawing's texels inside their padding.
-func world_box(volume: const FogVolume*) -> (Vector3, Vector3):
-    let data = volume.texel_data()
-    let inset = Vector3(1.0 / (f64)data.counts[0], 1.0 / (f64)data.counts[1], 1.0 / (f64)data.counts[2])
-    let span = Vector3(1.0 - 2.0 * inset.x, 1.0 - 2.0 * inset.y, 1.0 - 2.0 * inset.z)
-    var low = Vector3(1.0e300, 1.0e300, 1.0e300)
-    var high = Vector3(-1.0e300, -1.0e300, -1.0e300)
-    for corner in 0..<(usize)8:
-        let at = corner_of(corner)
-        let p = data.box.transform_point(Vector3(inset.x + at.x * span.x, inset.y + at.y * span.y, inset.z + at.z * span.z))
-        low = Vector3(math.min(low.x, p.x), math.min(low.y, p.y), math.min(low.z, p.z))
-        high = Vector3(math.max(high.x, p.x), math.max(high.y, p.y), math.max(high.z, p.z))
-    return (low, high)
 
 ## The fragment stage's uniforms (shaders/fog.frag's Params) for a pass
 ## over `group`, in a view at `view` (x, y, width, height in frame pixels).
@@ -279,8 +328,10 @@ func uniforms_of(projection: Projection, group: const usize[], key: Color, ambie
 ## Write `volume`'s numbers (shaders/fog.frag's `number`) into `out`, 8 rgba
 ## texels: the world-to-box rows, its texel counts and atlas columns, its
 ## atlas's size, second block and world step, its smoke color and shadow
-## scale, its density and emission scales and the strip's fit.
-func write_numbers(out: f32[], volume: const FogVolume*):
+## scale, its density and emission scales and the strip's fit, and where its
+## atlas sits in the image its pass binds (`bound`: texels down, the image's
+## width and height).
+func write_numbers(out: f32[], volume: const FogVolume*, bound: const f32[]):
     let data = volume.texel_data()
     let look = volume.styled_look()
     let inverse = data.box.inverse() catch failure: trap(failure.message)
@@ -297,43 +348,43 @@ func write_numbers(out: f32[], volume: const FogVolume*):
                             (f32)data.width, (f32)data.height, (f32)data.block, (f32)(look.step * data.voxel),
                             (f32)look.smoke.x, (f32)look.smoke.y, (f32)look.smoke.z, (f32)look.shadow,
                             (f32)look.density, (f32)look.emission, (f32)low, (f32)fit,
-                            0.0, 0.0, 0.0, 0.0]
+                            bound[0], bound[1], bound[2], 0.0]
     for at in 0..<(usize)20: out[12 + at] = numbers[at]
 
 # mark: The shared pipeline and noise
 
-## The fog shaders (one drawing a pass, two) and their pipelines on one
+## The fog shaders (one drawing a pass, a group) and their pipelines on one
 ## device, per target format (slot 0 for presentation surfaces, 1 + the format
-## otherwise; pairs 9 slots on): made on first use and kept, so a new scene
+## otherwise; groups 9 slots on): made on first use and kept, so a new scene
 ## compiles nothing; and the blue noise tile. Main thread only, as drawing is.
 struct FogPipelines:
     var device: gpu.Device
     var shader: gpu.Shader
-    var pair_shader: gpu.Shader
+    var group_shader: gpu.Shader
     var pipelines: (gpu.Pipeline?)[18]
 
 var shared: FogPipelines? = none
 var noise_tile: f32[]
 
-## The fog pipeline drawing one drawing a pass, or a `pair`, into targets of
+## The fog pipeline drawing one drawing a pass, or a `group`, into targets of
 ## `pixel_format` on `device`: no depth test, the scene's depth read instead
 ## (where the march ends).
-func fog_pipeline(device: gpu.Device, pixel_format: gpu.Format?, pair: bool) -> gpu.Pipeline!:
+func fog_pipeline(device: gpu.Device, pixel_format: gpu.Format?, group: bool) -> gpu.Pipeline!:
     var wanted = device
     if let held = shared:
         if not held.device.same(&wanted): release_fog_pipelines()
     if shared == none:
         var shader = try gpu.Shader.create(device, fog_frag_words, fog_frag_msl, fog_frag_fast_math)
         errdefer shader.destroy()
-        var pair_shader = try gpu.Shader.create(device, fog_pair_frag_words, fog_pair_frag_msl, fog_pair_frag_fast_math)
-        errdefer pair_shader.destroy()
-        shared = FogPipelines(device = try device.share(), shader = shader, pair_shader = pair_shader)
+        var group_shader = try gpu.Shader.create(device, fog_group_frag_words, fog_group_frag_msl, fog_group_frag_fast_math)
+        errdefer group_shader.destroy()
+        shared = FogPipelines(device = try device.share(), shader = shader, group_shader = group_shader)
     var held = shared else trap("fog pipelines")
     var slot: usize = 0
     if let format = pixel_format: slot = (usize)(u8)format + 1
-    if pair: slot += 9
+    if group: slot += 9
     if let made = held.pipelines[slot]: return made
-    let made = try gpu.Pipeline.create(device, held.pair_shader if pair else held.shader, gpu.Blend.over, pixel_format, scene_depth = true)
+    let made = try gpu.Pipeline.create(device, held.group_shader if group else held.shader, gpu.Blend.over, pixel_format, scene_depth = true)
     held.pipelines[slot] = made
     shared = held
     return made
@@ -358,7 +409,7 @@ pub func release_fog_pipelines():
             owned.destroy()
     var shader = held.shader
     shader.destroy()
-    var pair_shader = held.pair_shader
-    pair_shader.destroy()
+    var group_shader = held.group_shader
+    group_shader.destroy()
     var device = held.device
     device.destroy()

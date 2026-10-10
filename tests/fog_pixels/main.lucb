@@ -5,14 +5,17 @@
 ## ramp's (read at an emission color field's values when the look names
 ## one), and two grids of one set draw with a look each. Then a quad leaning
 ## through the fog cuts it without bands, and two crossing smokes mix the
-## same from in front and from behind.
-## The run ends with the GPU time of a 128³ ball filling a 1400×900 view at
-## 2x (report only).
+## same from in front and from behind. Overlapping grids shadow each other,
+## three march in one pass over their stacked atlases, and five fall back to
+## two passes.
+## The run ends with GPU times (report only): a 128³ ball filling a 1400×900
+## view at 2x, and two and three overlapping 64³ balls.
 from luce_gpu import gpu
 import interop
 import os
 from luce_std import math
 import memory
+import strings
 from luce_3d import graphics as three
 from luce_3d.graphics import FogVolume, FogScene, FogLook, PerspectiveCamera, WireRenderer, Vector3, Matrix4, release_fog_pipelines
 from luce_geocore.geocore import GeometrySet
@@ -28,6 +31,8 @@ struct Ball:
     let radius: f64
     ## 1 minus the ball's value instead (1 at its edge, 0 in its middle).
     var inverted: bool = false
+    ## 1: the upper half only (y above the middle); -1 the lower; 0 all of it.
+    var half: i64 = 0
 
 func fill_ball(context: void*?, leaf: usize, key: u64, values: f32[], mask: u64[]):
     _ = leaf
@@ -40,7 +45,8 @@ func fill_ball(context: void*?, leaf: usize, key: u64, values: f32[], mask: u64[
                 let y = (f64)(ly * 8 + j)
                 let z = (f64)(lz * 8 + k)
                 let r = math.sqrt(x * x + y * y + z * z) / ball.radius
-                let value = math.max(0.0, 1.0 - r)
+                var value = math.max(0.0, 1.0 - r)
+                if (ball.half > 0 and y < 0.0) or (ball.half < 0 and y >= 0.0): value = 0.0
                 values[(usize)(i + j * 8 + k * 64)] = (f32)(1.0 - value if ball.inverted else value)
     for at in 0..<mask.length: mask[at] = 0xFFFFFFFFFFFFFFFF
 
@@ -69,6 +75,33 @@ func fog_ball(radius: i64, voxel: f64, heat: bool = false, shift: f64 = 0.0, col
     if cold:
         var inverted = Ball((f64)radius, true)
         try add_grid(volume, try grid_of_leaves("cold", GridClass.fog, 0.0, moved, keys, fill_ball, (void*)&inverted))
+    let storage = try empty_set()
+    errdefer dispose_set(storage)
+    try storage.put(volume_type(), (void*)volume)
+    return try adopt_set(storage)
+
+## A set of fog balls of `radius` voxels each `voxel` wide, one grid per
+## entry of `shifts` (moved that far along x; named "g0", "g1", ...), each
+## the whole ball, or its upper or lower half by `halves` (1, -1; 0 whole).
+func fog_balls(radius: i64, voxel: f64, shifts: const f64[], halves: const i64[]) -> interop.Reference[GeometrySet]!:
+    let leaves = (radius + 7) // 8
+    let side = (usize)(leaves * 2)
+    let keys = try new u64[side * side * side] --- in memory.heap
+    defer free(keys) in memory.heap
+    var at: usize = 0
+    for z in -leaves..<leaves:
+        for y in -leaves..<leaves:
+            for x in -leaves..<leaves:
+                keys[at] = leaf_key(x, y, z)
+                at += 1
+    let volume = try new_volume()
+    errdefer release_volume(volume)
+    for (index, shift) in shifts.indexed():
+        var ball = Ball((f64)radius, false, halves[index])
+        let transform = Matrix4(Vector3(voxel, 0.0, 0.0), Vector3(0.0, voxel, 0.0), Vector3(0.0, 0.0, voxel), Vector3(shift, 0.0, 0.0))
+        var room: u8[16]
+        let name = try strings.format(room, f"g{index}")
+        try add_grid(volume, try grid_of_leaves(name, GridClass.fog, 0.0, transform, keys, fill_ball, (void*)&ball))
     let storage = try empty_set()
     errdefer dispose_set(storage)
     try storage.put(volume_type(), (void*)volume)
@@ -293,7 +326,10 @@ pub func main(arguments: str[]) -> i32!:
     print("PASS fog volume: lit middle, fading edge, occlusion both ways, one upload, density, emission and ramp looks per grid")
     try surface_cut(device)
     try crossing(device)
+    try shadowing(device)
+    try three_together(device)
     try timing(device)
+    try group_timing(device)
     return 0
 
 ## A quad leaning through the fog, from 0.8 in front of the middle on the
@@ -382,6 +418,95 @@ func crossing(device: gpu.Device) -> !:
         assert(ab > ar + 30)
     print("PASS fog volumes together: a surface inside fog cuts it smoothly; crossing smokes mix the same from both sides")
 
+## Overlapping grids shadow each other: an upper half of dense smoke over a
+## lower half, in two grids of one box, lit from above (the key light). The
+## lower half's light is the optical depth through every grid covering a
+## sample, so with the upper half beside it its smoke is darker than alone
+## (where each grid shadowed only itself, it was as bright), while the upper
+## half, nearer the light, is as bright as alone; the view looks across, so
+## neither half veils the other.
+func shadowing(device: gpu.Device) -> !:
+    let shifts: f64[2] = [0.0, 0.0]
+    let halves: i64[2] = [1, -1]
+    let fog = try fog_balls(32, 1.0 / 32.0, shifts, halves)
+    defer fog.release()
+    let upper = try FogVolume.of(fog, 0)
+    defer upper.release()
+    let lower = try FogVolume.of(fog, 1)
+    defer lower.release()
+    var look = FogLook()
+    look.density = 6.0
+    try upper.value().set_look(look)
+    try lower.value().set_look(look)
+    var view = try View(device, width, height)
+    defer view.close()
+    let image = try new u8[(usize)(width * height * 4)] --- in memory.heap
+    defer free(image) in memory.heap
+    var none_quads: f64[]
+    _ = try view.draw(lower, none_quads, image)
+    let alone = luminance(image, 80, 75)
+    _ = try view.draw(upper, none_quads, image)
+    let top_alone = luminance(image, 80, 45)
+    _ = try view.draw_all([upper, lower], none_quads, image)
+    let together = luminance(image, 80, 75)
+    let top_together = luminance(image, 80, 45)
+    print(f"shadowing: lower half {alone} alone, {together} under the upper; upper {top_alone} alone, {top_together} together; {view.scene.pass_count()} pass")
+    assert(view.scene.pass_count() == 1 and together + 15 < alone and (top_together - top_alone <= 3 and top_alone - top_together <= 3))
+
+## Three balls crossing (red at x -0.25, green at 0, blue at 0.25,
+## unshadowed) march in one pass over one stacked atlas, so every sample sums
+## all three: the middle is as red as it is blue from in front and from
+## behind, with green in it, and each side shows its own color. Five balls
+## overlapping in a row fall back to two passes (four, then one), and drawing
+## the three again stacks nothing new.
+func three_together(device: gpu.Device) -> !:
+    let shifts: f64[3] = [-0.25, 0.0, 0.25]
+    let halves: i64[3] = [0, 0, 0]
+    let fog = try fog_balls(32, 1.0 / 32.0, shifts, halves)
+    defer fog.release()
+    let colors: Vector3[3] = [Vector3(1.0, 0.1, 0.1), Vector3(0.1, 1.0, 0.1), Vector3(0.1, 0.1, 1.0)]
+    var volumes: interop.Reference[FogVolume][3] = [try FogVolume.of(fog, 0), try FogVolume.of(fog, 1), try FogVolume.of(fog, 2)]
+    defer:
+        for volume in volumes: volume.release()
+    for at in 0..<(usize)3:
+        var look = FogLook()
+        look.density = 3.0
+        look.shadow = 0.0
+        look.color = three.Color(colors[at].x, colors[at].y, colors[at].z)
+        try volumes[at].value().set_look(look)
+    var view = try View(device, width, height)
+    defer view.close()
+    let image = try new u8[(usize)(width * height * 4)] --- in memory.heap
+    defer free(image) in memory.heap
+    var none_quads: f64[]
+    for side in 0..<2:
+        let behind = side == 1
+        try view.camera.value().set_position(Vector3(0.0, 0.0, -4.0 if behind else 4.0))
+        try view.camera.value().look_at(Vector3())
+        _ = try view.draw_all(volumes, none_quads, image)
+        let (mr, mg, mb) = pixel(image, 80, 60)
+        let (lr, _, lb) = pixel(image, 44, 60)
+        let (rr, _, rb) = pixel(image, 116, 60)
+        let seen = "behind" if behind else "in front"
+        print(f"three smokes from {seen}: middle {mr} {mg} {mb}, left {lr}/{lb}, right {rr}/{rb}; {view.scene.pass_count()} pass, {view.scene.stack_count()} stack")
+        assert(view.scene.pass_count() == 1 and view.scene.stack_count() == 1)
+        assert((mr - mb <= 8 and mb - mr <= 8) and mg > 40 and mr > 40)
+        if behind:
+            assert(rr > rb + 30 and lb > lr + 30)
+        else:
+            assert(lr > lb + 30 and rb > rr + 30)
+    let row: f64[5] = [-0.4, -0.2, 0.0, 0.2, 0.4]
+    let none_halves: i64[5] = [0, 0, 0, 0, 0]
+    let five = try fog_balls(32, 1.0 / 32.0, row, none_halves)
+    defer five.release()
+    var many: interop.Reference[FogVolume][5] = [try FogVolume.of(five, 0), try FogVolume.of(five, 1), try FogVolume.of(five, 2), try FogVolume.of(five, 3), try FogVolume.of(five, 4)]
+    defer:
+        for volume in many: volume.release()
+    _ = try view.draw_all(many, none_quads, image)
+    print(f"five smokes in a row: {view.scene.pass_count()} passes, {view.scene.stack_count()} stack")
+    assert(view.scene.pass_count() == 2 and view.scene.stack_count() == 1)
+    print("PASS fog groups: overlapping grids shadow each other; three march in one pass over one stack; five fall back to two passes")
+
 ## The GPU time of a 128³ fog ball filling a 1400×900 view at 2x, mean of
 ## 60 frames after 10 warm-up frames (report only).
 func timing(device: gpu.Device) -> !:
@@ -412,3 +537,35 @@ func timing(device: gpu.Device) -> !:
         print("skip fog timing: no frame was timed")
         return
     print(f"fog timing: {volume.value().texels(0)}³ texels, 2800×1800 pixels, mean GPU frame {(f64)total / (f64)timed / 1.0e6} ms over {timed} frames")
+
+## The GPU time of two and three overlapping 64³ balls (radius 0.5, 0.3
+## apart along x) filling a 2800×1800 view, each grid alone and all together
+## in one pass, mean of 60 frames after 10 (report only).
+func group_timing(device: gpu.Device) -> !:
+    if not (try device.limits()).timestamps: return
+    let shifts: f64[3] = [-0.3, 0.0, 0.3]
+    let halves: i64[3] = [0, 0, 0]
+    let fog = try fog_balls(32, 1.0 / 64.0, shifts, halves)
+    defer fog.release()
+    var volumes: interop.Reference[FogVolume][3] = [try FogVolume.of(fog, 0), try FogVolume.of(fog, 1), try FogVolume.of(fog, 2)]
+    defer:
+        for volume in volumes: volume.release()
+    for volume in volumes:
+        var look = FogLook()
+        look.density = 4.0
+        try volume.value().set_look(look)
+    var view = try View(device, 2800, 1800)
+    defer view.close()
+    try view.camera.value().set_position(Vector3(0.0, 0.0, 1.6))
+    var none_quads: f64[]
+    for count in [(usize)1, 2, 3]:
+        var total: u64 = 0
+        var timed: u64 = 0
+        for frame in 0..<70:
+            let submission = try view.draw_all(volumes[..<count], none_quads, none)
+            try device.wait(submission)
+            if frame < 10: continue
+            if let time = try device.gpu_time(submission):
+                total += time.elapsed()
+                timed += 1
+        if timed > 0: print(f"fog group timing: {count} overlapping 64³ balls, {view.scene.pass_count()} pass, mean GPU frame {(f64)total / (f64)timed / 1.0e6} ms")

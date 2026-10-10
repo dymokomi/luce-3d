@@ -49,6 +49,9 @@ pub struct FogVolume:
     var strip_stale: bool
     var uploads: i64
     var strip_uploads: i64
+    ## Which drawing this is, never reused (a FogScene keys the atlases it
+    ## stacks for a group on it).
+    let serial: u64
 
     ## Fog drawing `index` of `geometry`'s own volume (see `count`), placed by
     ## `matrix`, lit from `light` (a world direction toward the key light),
@@ -157,6 +160,10 @@ pub struct FogVolume:
         self.data.close()
         return (texture, true)
 
+    ## Its serial: which drawing this is, never reused.
+    pub func drawing_id() -> u64:
+        return self.serial
+
     ## The whole look it draws with, and its version (new with each look).
     pub func styled_look() -> const VolumeLook*:
         return &self.styled
@@ -191,7 +198,11 @@ pub func fog_volume(set: const GeometrySet*, index: i64, matrix: Matrix4, light:
     let direction = try light.normalized()
     var data = try fog_texels(show.density, show.emission, show.emission_color, matrix, direction)
     errdefer data.close()
-    return try new FogVolume(data = data, texture = none, styled = clamped(&show.styled.look), version = 1, strip_stale = true, uploads = 0, strip_uploads = 0) in memory.heap
+    return try new FogVolume(data = data, texture = none, styled = clamped(&show.styled.look), version = 1, strip_stale = true, uploads = 0, strip_uploads = 0,
+                             serial = next_fog_serial.add(1, .relaxed) + 1) in memory.heap
+
+## The last FogVolume serial handed out (volumes are made on workers too).
+var next_fog_serial: @u64
 
 ## How many fog drawings `set`'s own volume makes (see FogVolume.count).
 pub func fog_grid_count(set: const GeometrySet*) -> usize:
