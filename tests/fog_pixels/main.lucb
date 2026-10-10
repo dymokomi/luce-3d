@@ -9,7 +9,7 @@
 ## three march in one pass over their stacked atlases, and five fall back to
 ## two passes.
 ## The run ends with GPU times (report only): a 128³ ball filling a 1400×900
-## view at 2x, and two and three overlapping 64³ balls.
+## view at 2x, and one, two and three overlapping 64³ balls at 1x.
 from luce_gpu import gpu
 import interop
 import os
@@ -538,9 +538,10 @@ func timing(device: gpu.Device) -> !:
         return
     print(f"fog timing: {volume.value().texels(0)}³ texels, 2800×1800 pixels, mean GPU frame {(f64)total / (f64)timed / 1.0e6} ms over {timed} frames")
 
-## The GPU time of two and three overlapping 64³ balls (radius 0.5, 0.3
-## apart along x) filling a 2800×1800 view, each grid alone and all together
-## in one pass, mean of 60 frames after 10 (report only).
+## The GPU time of one, two and three overlapping 64³ balls (radius 0.5,
+## 0.3 apart along x) filling a 1400×900 view, all together in one pass, mean
+## of 60 frames after 10 (report only; smaller than the 128³ ball's view, so
+## a slow GPU's frames stay well under its watchdog).
 func group_timing(device: gpu.Device) -> !:
     if not (try device.limits()).timestamps: return
     let shifts: f64[3] = [-0.3, 0.0, 0.3]
@@ -554,7 +555,7 @@ func group_timing(device: gpu.Device) -> !:
         var look = FogLook()
         look.density = 4.0
         try volume.value().set_look(look)
-    var view = try View(device, 2800, 1800)
+    var view = try View(device, 1400, 900)
     defer view.close()
     try view.camera.value().set_position(Vector3(0.0, 0.0, 1.6))
     var none_quads: f64[]

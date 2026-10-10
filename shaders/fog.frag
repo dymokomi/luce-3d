@@ -129,14 +129,18 @@ bool inside(Drawing g, float depth) {
 }
 
 #if GROUP
-// The most drawings a group marches together (fog_scene's most_together).
-const int most = 4;
-Drawing drawn[most];
+// Up to four drawings march together (fog_groups' most_together). They are
+// four named drawings, not an array: an array indexed in a loop goes to
+// scratch memory on some GPUs (RADV), a large slowdown.
+Drawing d0;
+Drawing d1;
+Drawing d2;
+Drawing d3;
 int members;
 
-// What the group's drawings hold at view depth `depth`, summed: extinction,
-// smoke color weighted by density, optical depths toward the key light and
-// the sky (each drawing's through its own grid, so every grid covering the
+// What the group's drawings hold at a view depth, summed: extinction, smoke
+// color weighted by density, optical depths toward the key light and the
+// sky (each drawing's through its own grid, so every grid covering the
 // sample shadows it), and emission.
 struct FogSample {
     float sigma;
@@ -146,26 +150,31 @@ struct FogSample {
     vec3 emitted;
 };
 
+// Add drawing `g`'s sample at view depth `depth` to `s`, if it holds it.
+void add_drawing(Drawing g, float depth, inout FogSample s) {
+    if (!inside(g, depth)) return;
+    vec3 q = g.origin + g.direction * depth;
+    vec4 v = texels(g, q, 0.0);
+    float density = v.r * g.glow.x;
+    s.sigma += density;
+    s.smoke += density * g.smoke.rgb;
+    s.light += v.g * g.smoke.w * g.glow.x;
+    s.sky += v.b * g.glow.x;
+    if (g.glow.y > 0.0 && v.a > 0.0) {
+        // Strength from the emission field (light is never negative); color
+        // from the emission color field (the second block) or the emission
+        // field itself, either through the strip's range.
+        float c = g.place.z > 0.0 ? texels(g, q, 1.0).r : v.a;
+        s.emitted += strip_color(g, c) * (g.glow.y * v.a);
+    }
+}
+
 FogSample sample_group(float depth) {
     FogSample s = FogSample(0.0, vec3(0.0), 0.0, 0.0, vec3(0.0));
-    for (int k = 0; k < members; k++) {
-        Drawing g = drawn[k];
-        if (!inside(g, depth)) continue;
-        vec3 q = g.origin + g.direction * depth;
-        vec4 v = texels(g, q, 0.0);
-        float density = v.r * g.glow.x;
-        s.sigma += density;
-        s.smoke += density * g.smoke.rgb;
-        s.light += v.g * g.smoke.w * g.glow.x;
-        s.sky += v.b * g.glow.x;
-        if (g.glow.y > 0.0 && v.a > 0.0) {
-            // Strength from the emission field (light is never negative); color
-            // from the emission color field (the second block) or the emission
-            // field itself, either through the strip's range.
-            float c = g.place.z > 0.0 ? texels(g, q, 1.0).r : v.a;
-            s.emitted += strip_color(g, c) * (g.glow.y * v.a);
-        }
-    }
+    add_drawing(d0, depth, s);
+    add_drawing(d1, depth, s);
+    if (members > 2) add_drawing(d2, depth, s);
+    if (members > 3) add_drawing(d3, depth, s);
     return s;
 }
 
@@ -180,33 +189,43 @@ void absorb_sample(FogSample s, float length_world, inout vec3 radiance, inout f
     transmittance *= 1.0 - alpha;
 }
 
+// Drawing `g`'s step if it holds view depth `s`, else `never`.
+float step_at(Drawing g, float s) {
+    return inside(g, s) ? g.place.w : never;
+}
+
 // The group's step at view depth `s`: the finest step of the drawings
 // holding it, or the finest of all where none does.
 float group_step(float s) {
-    float h = never;
-    float finest = never;
-    for (int k = 0; k < members; k++) {
-        finest = min(finest, drawn[k].place.w);
-        if (inside(drawn[k], s)) h = min(h, drawn[k].place.w);
+    float h = min(step_at(d0, s), step_at(d1, s));
+    float finest = min(d0.place.w, d1.place.w);
+    if (members > 2) {
+        h = min(h, step_at(d2, s));
+        finest = min(finest, d2.place.w);
+    }
+    if (members > 3) {
+        h = min(h, step_at(d3, s));
+        finest = min(finest, d3.place.w);
     }
     return h < never ? h : finest;
 }
 
+// Drawing `g`'s entry if it is past `s`, else `never`.
+float entry_past(Drawing g, float s) {
+    return g.enter > s ? g.enter : never;
+}
+
 // The view depth past `s` where the next drawing begins, or `never`.
 float next_entry(float s) {
-    float next = never;
-    for (int k = 0; k < members; k++) {
-        if (drawn[k].enter > s) next = min(next, drawn[k].enter);
-    }
+    float next = min(entry_past(d0, s), entry_past(d1, s));
+    if (members > 2) next = min(next, entry_past(d2, s));
+    if (members > 3) next = min(next, entry_past(d3, s));
     return next;
 }
 
 // Whether some drawing holds view depth `s`.
 bool held(float s) {
-    for (int k = 0; k < members; k++) {
-        if (inside(drawn[k], s)) return true;
-    }
-    return false;
+    return inside(d0, s) || inside(d1, s) || (members > 2 && inside(d2, s)) || (members > 3 && inside(d3, s));
 }
 
 // The group from `first` to `last`: segments as long as the finest step of
@@ -294,14 +313,19 @@ void main() {
     vec4 color;
 #if GROUP
     members = int(params.right.w);
-    float first = never;
-    float last = 0.0;
-    for (int k = 0; k < members; k++) {
-        drawn[k] = meet(params.drawings[k], ray, near, scene);
-        if (drawn[k].enter < never) {
-            first = min(first, drawn[k].enter);
-            last = max(last, drawn[k].leave);
-        }
+    d0 = meet(params.drawings.x, ray, near, scene);
+    d1 = meet(params.drawings.y, ray, near, scene);
+    d2 = meet(params.drawings.z, ray, near, scene);
+    d3 = meet(params.drawings.w, ray, near, scene);
+    float first = min(d0.enter, d1.enter);
+    float last = max(d0.enter < never ? d0.leave : 0.0, d1.enter < never ? d1.leave : 0.0);
+    if (members > 2 && d2.enter < never) {
+        first = min(first, d2.enter);
+        last = max(last, d2.leave);
+    }
+    if (members > 3 && d3.enter < never) {
+        first = min(first, d3.enter);
+        last = max(last, d3.leave);
     }
     if (first >= never) {
         discard;
