@@ -134,6 +134,10 @@ vec3 splat_color(uint i, vec3 center, bool harmonics_on) {
 // center's depth; one at or behind the near plane never is.
 bool below_lod(uint s) {
     vec4 c = centers[s];
+    // A merged Gaussian that does not stand for its members (a run cut by a
+    // surface, or one jumping between cells: splat_lod's gaussian_fits) says
+    // so with a negative coverage; its children are drawn instead.
+    if (c.w < 0.0) return false;
     float tz = dot(c.xyz - p.eye_near.xyz, p.forward_fy.xyz);
     if (tz <= p.eye_near.w) return false;
     uint base = s * 6u;

@@ -18,7 +18,10 @@
 ## pixels per unit at its depth. splat.frag then draws the members' composite,
 ## 1 - exp(-z g) out to 3σ, not a Gaussian clamped at opacity 1: clamping lost
 ## up to 11% of a dense cloud's brightness far away (now within about 3% on
-## the 20M field and the bonsai capture). Merged splats carry no SH. Per view
+## the 20M field and the bonsai capture). Merged splats carry no SH. A run
+## whose Gaussian reaches well past its members along an axis (cut by a
+## surface, or jumping between Morton cells: gaussian_fits) gets a negative
+## coverage and is never drawn; its children stand in. Per view
 ## splat_project.comp draws the coarsest merged splat whose footprint is
 ## under a few pixels in place of its members (SplatLook.lod_pixels); a cloud
 ## far away then costs down to a 256th of its splats to sort and draw.
@@ -26,7 +29,7 @@ from luce_std import math, parallel
 import memory
 import errors
 from luce_geocore.geocore import Vector3
-from luce_geocore.splats import ColorSpace, to_linear, from_linear
+from luce_geocore.splats import ColorSpace, Mat3, to_linear, from_linear, symmetric_eigen
 
 ## Merged levels, and splats a level-0 run holds (each level 4 times more).
 pub let lod_levels: usize = 4
@@ -280,7 +283,9 @@ func merge_group(work: Merging*, start: usize, stop: usize, at: usize):
     for k in 0..<(usize)6: sigma[k] = sigma[k] / weight
     let extent = mean_extent(sigma)
     # Unclamped: past 1 the members overlap (splat_project.comp, splat.frag).
-    let opacity = weight / extent if extent > 0.0 else 1.0
+    # Negative when the Gaussian does not stand for its members: never drawn.
+    var opacity = weight / extent if extent > 0.0 else 1.0
+    if not gaussian_fits(work, start, stop, mean, sigma): opacity = -opacity
     work.centers[at * 4] = (f32)mean.x
     work.centers[at * 4 + 1] = (f32)mean.y
     work.centers[at * 4 + 2] = (f32)mean.z
@@ -290,6 +295,39 @@ func merge_group(work: Merging*, start: usize, stop: usize, at: usize):
     work.colors[at * 4 + 1] = (f16)from_linear(color.y, work.space)
     work.colors[at * 4 + 2] = (f16)from_linear(color.z, work.space)
     work.colors[at * 4 + 3] = (f16)opacities
+
+## Whether the moment-matched Gaussian (mean `mean`, covariance `sigma`) of
+## packed splats start..<stop stands for them: along each of its axes, both
+## ways, its 3σ reach is at most `overreach` times as far as its members go
+## (their centers and 3 of their own deviations). An even ball's Gaussian
+## reaches 1.34 times as far, an even cube's or segment's 1.73. A run cut by
+## a surface does not fit: at a dense cloud's rim the Gaussian of a cell the
+## surface truncates reaches as far outward as inward, past the members, and
+## drawn opaque where they pile up it fattened the rim (a random ball 16% too
+## bright from 40 units at 4 px). Nor does a Morton run that jumps between
+## distant cells: two clumps, the Gaussian over the gap and past both.
+## splat_project then draws the run's children in its place.
+func gaussian_fits(work: const Merging*, start: usize, stop: usize, mean: Vector3, sigma: const f64[6]) -> bool:
+    let eigen = symmetric_eigen(Mat3([sigma[0], sigma[1], sigma[2], sigma[1], sigma[3], sigma[4], sigma[2], sigma[4], sigma[5]]))
+    let values: f64[3] = [eigen.values.x, eigen.values.y, eigen.values.z]
+    for axis in 0..<(usize)3:
+        let e = eigen.vectors.column(axis)
+        var outward = 0.0
+        var inward = 0.0
+        for i in start..<stop:
+            if splat_weight(work, i) <= 0.0: continue
+            let along = center_of(work, i).subtract(mean).dot(e)
+            let c = work.covariances[i * 6..<i * 6 + 6]
+            let own = e.x * ((f64)c[0] * e.x + (f64)c[1] * e.y + (f64)c[2] * e.z) + e.y * ((f64)c[1] * e.x + (f64)c[3] * e.y + (f64)c[4] * e.z) + e.z * ((f64)c[2] * e.x + (f64)c[4] * e.y + (f64)c[5] * e.z)
+            let own_reach = 3.0 * math.sqrt(math.max(own, 0.0))
+            outward = math.max(outward, along + own_reach)
+            inward = math.max(inward, own_reach - along)
+        let reach = 3.0 * math.sqrt(math.max(values[axis], 0.0))
+        if reach > overreach * outward or reach > overreach * inward: return false
+    return true
+
+## How much farther than its members a fitting merged Gaussian may reach.
+let overreach: f64 = 2.5
 
 ## Packed splat i's DC color decoded to linear light.
 func linear_color(work: const Merging*, i: usize) -> Vector3:
