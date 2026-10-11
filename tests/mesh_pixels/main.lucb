@@ -165,6 +165,20 @@ func picking(view: View*, cube: interop.Reference[geocore.Mesh], image: u8[]) ->
     assert(face >= 0 and face == (try cube.value().ray_face(eye, try aim.subtract(eye).normalized())))
     assert((try renderer.pick_face(cube, view.camera, 1.0, 1.0, (f64)width, (f64)height)) == -1)
     assert((try renderer.pick_face(cube, view.camera, (f64)width * 0.5, (f64)height * 0.5, (f64)width, (f64)height)) == face)
+    # A box over the whole view selects from the same id image what shows:
+    # 3 faces, 9 edges and 7 corners of the cube, and through the depth all.
+    let shown: i64[3] = [3, 9, 7]
+    let every: i64[3] = [6, 12, 8]
+    let domains: i64[3] = [2, 4, 0]
+    for at in 0..<(usize)3:
+        let empty = try geocore.Selection.empty(cube, domains[at])
+        defer empty.release()
+        let seen = try renderer.select_box(cube, view.camera, empty, 0.0, 0.0, (f64)width, (f64)height, (f64)width, (f64)height, 0)
+        defer seen.release()
+        assert(seen.value().count() == shown[at])
+        let through = try renderer.select_box(cube, view.camera, empty, 0.0, 0.0, (f64)width, (f64)height, (f64)width, (f64)height, 0, false)
+        defer through.release()
+        assert(through.value().count() == every[at])
     # The picked face, selected: the renderer tints it from one bit per face.
     let at = (usize)((height // 2 * width + width // 2) * 4)
     try renderer.set_face_selection(cube, [face], Color(1.0, 0.0, 0.0), 1.0)

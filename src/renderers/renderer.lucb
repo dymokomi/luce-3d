@@ -17,7 +17,8 @@ from core.object import Object3D, ObjectNode, Light, LightKind
 from luce_geocore import geocore
 from luce_geocore.geocore import Geometry, Vector3, Matrix4, Selection
 from luce_geocore.kernel import selection_bits, subdivided_display, mesh_dispose
-from renderers.subdivision_draw import display_highlight, cage_face_of
+from renderers.subdivision_draw import display_highlight, cage_face_of, cage_faces
+from renderers.box_select import ScreenBox, IdImage, box_selection
 from core.material import Material, Color, check_color
 from cameras.perspective import PerspectiveCamera, Projection
 from renderers.projection import projection_matrix
@@ -151,13 +152,39 @@ pub struct Renderer:
         return try self.pick_mesh(geometry, world, projection, x, y, width, height)
 
     func pick_mesh(geometry: const geocore.Mesh*, world: Matrix4, projection: Projection, x: f64, y: f64, width: f64, height: f64) -> i64!:
-        var key = geometry.points_id() *% 0x9E3779B97F4A7C15 ^ geometry.triangles_id()
-        let values: f64[25] = [world.x.x, world.x.y, world.x.z, world.y.x, world.y.y, world.y.z, world.z.x, world.z.y, world.z.z,
-                               world.translation.x, world.translation.y, world.translation.z, projection.position.x, projection.position.y,
-                               projection.position.z, projection.backward.x, projection.backward.y, projection.backward.z, projection.up.x,
-                               projection.up.y, projection.up.z, projection.focal, projection.near, width, height]
-        for value in values: key = (key ^ memory.read[u64]((void*)&value)) *% 0x100000001B3
+        let key = ids_key(geometry, world, projection, width, height)
         return try self.picker.face(&self.arrays, self.arrays.device_handle(), geometry, world, projection, key, x, y, (u32)width, (u32)height)
+
+    ## `current` (on points, edges or faces of `mesh`) changed by what the
+    ## screen box from (x0, y0) to (x1, y1) of a `width` x `height` view
+    ## through `camera` touches: points inside it, edges and faces it meets;
+    ## replaced (operation 0), added to (1) or taken from (2). With
+    ## `visible_only`, only what shows there: the faces of the id pass
+    ## pick_face reads, as the last frame placed `mesh` (a subdivided
+    ## cage's display, answered as the cage). Before a frame has drawn on a
+    ## device, or when it did not draw `mesh`, view rays say what shows.
+    pub func select_box(mesh: interop.Reference[geocore.Mesh], camera: interop.Reference[PerspectiveCamera], current: interop.Reference[Selection],
+                        x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64, operation: i64, visible_only: bool = true) -> interop.Reference[Selection]!:
+        if not (width >= 1.0 and height >= 1.0 and width <= 16384.0 and height <= 16384.0): error(errors.invalid, "a box selection needs a view of 1..16384 points a side")
+        let geometry = try mesh.get()
+        let chosen = try current.get()
+        let projection = try camera.value().projection(width / height)
+        let box = ScreenBox.between(x0, y0, x1, y1)
+        var found: Matrix4? = none
+        for placement in self.placements.view():
+            if placement.points == geometry.points_id(): found = placement.world
+        let world = found else return try box_selection(geometry, Matrix4(), projection, box, width, height, chosen, operation, visible_only, none)
+        if not visible_only or geometry.face_count() == 0 or not self.arrays.has_device():
+            return try box_selection(geometry, world, projection, box, width, height, chosen, operation, visible_only, none)
+        let device = self.arrays.device_handle()
+        if let display = try subdivided_display(geometry):
+            defer mesh_dispose(display)
+            let pixels = try self.picker.image(&self.arrays, device, display, world, projection, ids_key(display, world, projection, width, height), (u32)width, (u32)height)
+            let ids = IdImage(pixels, (u32)width, (u32)height, try cage_faces(display))
+            return try box_selection(geometry, world, projection, box, width, height, chosen, operation, true, ids)
+        let pixels = try self.picker.image(&self.arrays, device, geometry, world, projection, ids_key(geometry, world, projection, width, height), (u32)width, (u32)height)
+        var own_faces: u32[]
+        return try box_selection(geometry, world, projection, box, width, height, chosen, operation, true, IdImage(pixels, (u32)width, (u32)height, own_faces))
 
     ## Tint `faces` of `mesh` (and of later meshes with its topology, such as
     ## its Moves) with `color` at `weight` in the surface shading: a face
@@ -675,3 +702,14 @@ func same_matrix(a: Matrix4, b: Matrix4) -> bool:
 func fold(state: u64, value: f64) -> u64:
     var bits = value
     return (state ^ memory.read[u64](&bits)) *% 0x100000001B3
+
+## Everything an id pass of `geometry` depends on: its points and triangles,
+## its placement and the view.
+func ids_key(geometry: const geocore.Mesh*, world: Matrix4, projection: Projection, width: f64, height: f64) -> u64:
+    var key = geometry.points_id() *% 0x9E3779B97F4A7C15 ^ geometry.triangles_id()
+    let values: f64[25] = [world.x.x, world.x.y, world.x.z, world.y.x, world.y.y, world.y.z, world.z.x, world.z.y, world.z.z,
+                           world.translation.x, world.translation.y, world.translation.z, projection.position.x, projection.position.y,
+                           projection.position.z, projection.backward.x, projection.backward.y, projection.backward.z, projection.up.x,
+                           projection.up.y, projection.up.z, projection.focal, projection.near, width, height]
+    for value in values: key = (key ^ memory.read[u64]((void*)&value)) *% 0x100000001B3
+    return key

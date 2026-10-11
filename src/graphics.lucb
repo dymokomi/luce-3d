@@ -40,6 +40,9 @@ pub let edit_overlay_type = edit_overlay.edit_overlay_type
 import renderers.knife
 pub type Knife = knife.Knife
 pub type KnifePlane = knife.KnifePlane
+import renderers.box_select
+## Box selection: components a screen box touches, and whether a mesh shows in one.
+pub type BoxSelect = box_select.BoxSelect
 import renderers.fog_volume
 import renderers.fog_scene
 ## A fog drawing ray-marched on the GPU, and its look's numbers.

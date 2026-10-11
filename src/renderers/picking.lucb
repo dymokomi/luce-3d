@@ -32,26 +32,38 @@ pub struct FacePicker:
     pub func face(arrays: GpuArrays*, device: gpu.Device, mesh: const geocore.Mesh*, world: Matrix4, projection: Projection,
                   key: u64, x: f64, y: f64, width: u32, height: u32) -> i64!:
         if width == 0 or height == 0 or not (x >= 0.0 and y >= 0.0 and x < (f64)width and y < (f64)height): return -1
-        if key != self.key or width != self.width or height != self.height:
-            self.key = 0
-            if width != self.width or height != self.height:
-                self.texture.destroy()
-                self.texture = try gpu.Texture.create(device, width, height, gpu.Format.rgba8_linear)
-                self.width = width
-                self.height = height
-            let recording = try self.texture.frame()
-            defer recording.release()
-            let target = try recording.value().target()
-            defer target.release()
-            try draw_polygon_ids(arrays, try target.get(), mesh, world, projection, 0)
-            _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))
-            try self.pixels.fill((usize)(width * height * 4), 0)
-            try self.texture.read(self.pixels.items[..<self.pixels.count])
-            self.key = key
+        try self.prepare(arrays, device, mesh, world, projection, key, width, height)
         let at = ((usize)y * (usize)width + (usize)x) * 4
         let bytes = self.pixels.items
         let id = (u32)bytes[at] | ((u32)bytes[at + 1] << 8) | ((u32)bytes[at + 2] << 16) | ((u32)bytes[at + 3] << 24)
         return (i64)id - 1
+
+    ## The id image of `mesh` (as `face` draws it), for reading many pixels:
+    ## a box selection's visible faces.
+    pub func image(arrays: GpuArrays*, device: gpu.Device, mesh: const geocore.Mesh*, world: Matrix4, projection: Projection,
+                   key: u64, width: u32, height: u32) -> const u8[]!:
+        try self.prepare(arrays, device, mesh, world, projection, key, width, height)
+        return self.pixels.items[..<self.pixels.count]
+
+    ## Draw the id pass and read it back, unless the last one had `key`.
+    func prepare(arrays: GpuArrays*, device: gpu.Device, mesh: const geocore.Mesh*, world: Matrix4, projection: Projection,
+                 key: u64, width: u32, height: u32) -> !:
+        if key == self.key and width == self.width and height == self.height: return
+        self.key = 0
+        if width != self.width or height != self.height:
+            self.texture.destroy()
+            self.texture = try gpu.Texture.create(device, width, height, gpu.Format.rgba8_linear)
+            self.width = width
+            self.height = height
+        let recording = try self.texture.frame()
+        defer recording.release()
+        let target = try recording.value().target()
+        defer target.release()
+        try draw_polygon_ids(arrays, try target.get(), mesh, world, projection, 0)
+        _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))
+        try self.pixels.fill((usize)(width * height * 4), 0)
+        try self.texture.read(self.pixels.items[..<self.pixels.count])
+        self.key = key
 
     pub func close():
         self.texture.destroy()

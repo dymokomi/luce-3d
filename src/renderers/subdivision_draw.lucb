@@ -35,8 +35,16 @@ pub func display_highlight(cage: const FaceHighlight*, display: const geocore.Me
 ## The cage face display face `face` came from (a pick's -1 stays).
 pub func cage_face_of(display: const geocore.Mesh*, face: i64) -> i64!:
     if face < 0: return face
-    let index = display.find_attribute(".cage_face", (i64)(u8)Domain.face)
-    if index < 0: return face
-    let entry = try display.attribute_entry(index)
-    let owners = u32[]((u32*)entry.data.view().data, (usize)display.face_count())
+    let owners = try cage_faces(display)
+    if owners.length == 0: return face
     return (i64)owners[(usize)face] if (usize)face < owners.length else -1
+
+## The cage face of each of `display`'s faces (empty: it has no
+## `.cage_face`, its faces are their own).
+pub func cage_faces(display: const geocore.Mesh*) -> const u32[]!:
+    let index = display.find_attribute(".cage_face", (i64)(u8)Domain.face)
+    if index < 0:
+        var empty: u32[]
+        return empty
+    let entry = try display.attribute_entry(index)
+    return u32[]((u32*)entry.data.view().data, (usize)display.face_count())

@@ -1,5 +1,5 @@
 from luce_geocore import geocore
-from luce_3d.graphics import Knife, EditOverlay, SurfaceHits, Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
+from luce_3d.graphics import Knife, BoxSelect, EditOverlay, SurfaceHits, Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
 from luce_gpu.gpu import Frame
 from luce_gpu import gpu
 from luce_window import window
@@ -32,6 +32,7 @@ pub func main(arguments: list[str]) -> int!:
     scene.add(mesh)
     assert(group.node().child_count() == 0 and scene.node().child_count() == 4)
     edit_overlays(target)
+    box_selection()
     cad_edges()
     surface_hits()
     static_reuse(target)
@@ -130,6 +131,37 @@ func edit_overlays(target: gpu.RenderTarget) -> unit!:
     let high = screen(camera, cloud.point(1))
     assert(overlay.pick(camera, high[0] + 3.0, high[1], 200.0, 160.0) == 1)
     assert(overlay.pick(camera, high[0] + 40.0, high[1], 200.0, 160.0) == -1)
+
+## A box selects the points inside it and the edges and faces it touches,
+## through the depth or only what view rays reach; objects show in a box
+## when any face meets it.
+func box_selection() -> unit!:
+    let cube = geocore.Mesh.cube(2.0)
+    let camera = PerspectiveCamera(50.0, 1.0, 0.1, 100.0)
+    camera.set_position(Vector3(3.0, 4.0, 5.0))
+    camera.look_at(Vector3(0.0, 1.0, 0.0))
+    # The whole view: from here 7 corners, 9 edges and 3 faces show.
+    for (domain, all, seen) in [(0, 8, 7), (4, 12, 9), (2, 6, 3)]:
+        let none_yet = geocore.Selection.empty(cube, domain)
+        let through = BoxSelect.select(cube, camera, none_yet, 0.0, 0.0, 200.0, 160.0, 200.0, 160.0, 0, visible_only = false)
+        assert(through.count() == all, f"domain {domain}: {through.count()} through")
+        let visible = BoxSelect.select(cube, camera, none_yet, 200.0, 160.0, 0.0, 0.0, 200.0, 160.0, 0)
+        assert(visible.count() == seen, f"domain {domain}: {visible.count()} visible")
+        # Taking the visible from everything leaves the hidden; adding them back all.
+        let hidden = BoxSelect.select(cube, camera, through, 0.0, 0.0, 200.0, 160.0, 200.0, 160.0, 2)
+        assert(hidden.count() == all - seen)
+        assert(BoxSelect.select(cube, camera, hidden, 0.0, 0.0, 200.0, 160.0, 200.0, 160.0, 1).count() == all)
+    # A small box around the top corner nearest the camera (point 6) takes
+    # just it; a box inside the top face, no corner in it, touches that face.
+    let corner = screen(camera, cube.point(6))
+    let points = BoxSelect.select(cube, camera, geocore.Selection.empty(cube, 0), corner[0] - 3.0, corner[1] - 3.0, corner[0] + 3.0, corner[1] + 3.0, 200.0, 160.0, 0)
+    assert(points.count() == 1 and points.contains(6))
+    let top = screen(camera, Vector3(0.0, 2.0, 0.0))
+    let faces = BoxSelect.select(cube, camera, geocore.Selection.empty(cube, 2), top[0] - 2.0, top[1] - 2.0, top[0] + 2.0, top[1] + 2.0, 200.0, 160.0, 0)
+    assert(faces.count() == 1 and faces.contains(2), f"{faces.count()} faces in the top face's middle")
+    assert(BoxSelect.touches(cube, camera, top[0] - 2.0, top[1] - 2.0, top[0] + 2.0, top[1] + 2.0, 200.0, 160.0))
+    assert(BoxSelect.touches(cube, camera, -50.0, -50.0, 250.0, 250.0, 200.0, 160.0))
+    assert(not BoxSelect.touches(cube, camera, 0.0, 0.0, 6.0, 6.0, 200.0, 160.0))
 
 ## View rays meet the nearest visible polygon face, placed by its parents;
 ## hidden objects are skipped; a construction plane catches the rest.

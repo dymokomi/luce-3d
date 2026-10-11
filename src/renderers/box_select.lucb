@@ -1,0 +1,305 @@
+## Box selection in Base, as the viewport's marquee selects: points inside a
+## screen rectangle, and the edges and faces it touches (Houdini's rule:
+## meeting the box is enough). Through the depth, or only what shows there:
+## an id pass of the visible faces (IdImage, from Renderer.select_box), else
+## view rays when no id pass is at hand. Objects ask BoxSelect.touches.
+## Every loop here is over the mesh's own arrays; callers never loop over
+## its elements.
+import interop
+from luce_std import math
+import errors
+from luce_geocore.geocore import Vector3, Matrix4, Mesh, Selection
+from luce_geocore.kernel import BitsBuilder, GroupReport, Domain, adopt_selection, selection_bits
+from cameras.perspective import PerspectiveCamera, Projection
+from renderers.edit_screen import project
+
+## A screen rectangle in logical pixels, y down.
+pub struct ScreenBox:
+    pub let left: f64
+    pub let top: f64
+    pub let right: f64
+    pub let bottom: f64
+
+    ## The box between corners (x0, y0) and (x1, y1), either way round.
+    pub static func between(x0: f64, y0: f64, x1: f64, y1: f64) -> ScreenBox:
+        return ScreenBox(math.min(x0, x1), math.min(y0, y1), math.max(x0, x1), math.max(y0, y1))
+
+    pub func holds(x: f64, y: f64) -> bool:
+        return x >= self.left and x <= self.right and y >= self.top and y <= self.bottom
+
+    ## The part of the screen segment a → b inside the box, as fractions
+    ## along it (Liang-Barsky), or none when the segment misses the box.
+    pub func clip(a: Vector3, b: Vector3) -> Along?:
+        var start = 0.0
+        var end = 1.0
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let steps: f64[4] = [-dx, dx, -dy, dy]
+        let room: f64[4] = [a.x - self.left, self.right - a.x, a.y - self.top, self.bottom - a.y]
+        for side in 0..<(usize)4:
+            if steps[side] == 0.0:
+                if room[side] < 0.0: return none
+                continue
+            let t = room[side] / steps[side]
+            if steps[side] < 0.0:
+                start = math.max(start, t)
+            else:
+                end = math.min(end, t)
+            if start > end: return none
+        return Along(start, end)
+
+## A stretch of a segment, as fractions from its start.
+pub struct Along:
+    pub let start: f64
+    pub let end: f64
+
+## What shows at each pixel of a view: the last id pass (face + 1 per pixel,
+## zero where nothing is), its faces answered as cage faces through
+## `owners` when it drew a subdivided display (empty: its own faces).
+pub struct IdImage:
+    pub let pixels: const u8[]
+    pub let width: u32
+    pub let height: u32
+    pub let owners: const u32[]
+
+    ## The face at (x, y), or -1 where nothing is (or outside the image).
+    pub func face(x: f64, y: f64) -> i64:
+        if not (x >= 0.0 and y >= 0.0 and x < (f64)self.width and y < (f64)self.height): return -1
+        let at = ((usize)y * (usize)self.width + (usize)x) * 4
+        let bytes = self.pixels
+        let id = (i64)((u32)bytes[at] | ((u32)bytes[at + 1] << 8) | ((u32)bytes[at + 2] << 16) | ((u32)bytes[at + 3] << 24)) - 1
+        if id < 0 or self.owners.length == 0: return id
+        return (i64)self.owners[(usize)id] if (usize)id < self.owners.length else -1
+
+    ## Whether the component with points `a` and `b` (-1: a point alone)
+    ## shows at (x, y): within a pixel, a face holding it is seen there, or
+    ## nothing covers that spot at all.
+    pub func shows(mesh: const Mesh*, x: f64, y: f64, a: i64, b: i64) -> bool:
+        var covered = false
+        for row in 0..<(usize)3:
+            for column in 0..<(usize)3:
+                let face = self.face(x + (f64)column - 1.0, y + (f64)row - 1.0)
+                if face < 0: continue
+                covered = true
+                if holds_point(mesh, face, a) and (b < 0 or holds_point(mesh, face, b)): return true
+        return not covered
+
+pub struct BoxSelect:
+    let reserved: u8 = 0
+
+    ## `current` (on points, edges or faces of `mesh`) changed by what the
+    ## screen box from (x0, y0) to (x1, y1) of a `width` x `height` view
+    ## through `camera` touches: replaced (operation 0), added to (1) or
+    ## taken from (2). With `visible_only`, only what view rays reach
+    ## (Renderer.select_box asks the GPU instead, once a frame drew `mesh`).
+    pub static func select(mesh: interop.Reference[Mesh], camera: interop.Reference[PerspectiveCamera], current: interop.Reference[Selection],
+                           x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64, operation: i64, visible_only: bool = true) -> interop.Reference[Selection]!:
+        let projection = try camera.value().projection(math.max(1.0, width) / math.max(1.0, height))
+        return try box_selection(try mesh.get(), Matrix4(), projection, ScreenBox.between(x0, y0, x1, y1), width, height, try current.get(), operation, visible_only, none)
+
+    ## Whether `mesh` (in world space) shows anywhere in the box from
+    ## (x0, y0) to (x1, y1) through the depth: one of its faces meets it,
+    ## or for a mesh of points alone one of its points is inside. An object
+    ## pick by box: its bounds answer first when they can.
+    pub static func touches(mesh: interop.Reference[Mesh], camera: interop.Reference[PerspectiveCamera], x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64) -> bool!:
+        let geometry = try mesh.get()
+        let p = try camera.value().projection(math.max(1.0, width) / math.max(1.0, height))
+        let box = ScreenBox.between(x0, y0, x1, y1)
+        let view = BoxView(mesh = geometry, world = Matrix4(), inverse = Matrix4(), p = p, box = box, width = width, height = height, ids = none, rays = false)
+        let bounds = geometry.bounds()
+        var left = 1.0e300
+        var top = 1.0e300
+        var right = -1.0e300
+        var bottom = -1.0e300
+        var ahead = true
+        for corner in 0..<(usize)8:
+            let point = Vector3(bounds.maximum.x if corner % 2 == 1 else bounds.minimum.x, bounds.maximum.y if (corner // 2) % 2 == 1 else bounds.minimum.y,
+                                bounds.maximum.z if corner >= 4 else bounds.minimum.z)
+            let at = project(point, p, width, height)
+            ahead = ahead and at.z > p.near
+            left = math.min(left, at.x)
+            top = math.min(top, at.y)
+            right = math.max(right, at.x)
+            bottom = math.max(bottom, at.y)
+        if ahead:
+            if right < box.left or left > box.right or bottom < box.top or top > box.bottom: return false
+            if left >= box.left and right <= box.right and top >= box.top and bottom <= box.bottom: return true
+        if geometry.face_count() == 0:
+            for point in 0..<geometry.point_count():
+                let at = view.screen(point)
+                if at.z > p.near and box.holds(at.x, at.y): return true
+            return false
+        for face in 0..<geometry.face_count():
+            if view.face_meets(face): return true
+        return false
+
+## `chosen` changed by what `box` touches of `mesh` (placed by `world`) in a
+## `width` x `height` view through `p`; see BoxSelect.select. `ids`, when
+## given, says what shows (visible only); else `visible_only` casts rays.
+pub func box_selection(mesh: const Mesh*, world: Matrix4, p: Projection, box: ScreenBox, width: f64, height: f64, chosen: const Selection*,
+                       operation: i64, visible_only: bool, ids: IdImage?) -> interop.Reference[Selection]!:
+    if operation < 0 or operation > 2: error(errors.invalid, "a box selection replaces (0), adds (1) or removes (2)")
+    let domain = chosen.domain()
+    if domain != 0 and domain != 2 and domain != 4: error(errors.invalid, "a box selects points, edges or faces")
+    let count = (usize)chosen.size()
+    let inverse = try world.inverse()
+    # A mesh without faces has nothing to hide its points.
+    let rays = visible_only and ids == none and mesh.face_count() > 0
+    let view = BoxView(mesh = mesh, world = world, inverse = inverse, p = p, box = box, width = width, height = height,
+                       ids = ids if visible_only and mesh.face_count() > 0 else none, rays = rays)
+    var bits = (try BitsBuilder.copy_of(selection_bits(chosen))) if operation != 0 else (try BitsBuilder.zeros(count))
+    errdefer bits.close()
+    if domain == 0:
+        for point in 0..<count:
+            let at = view.screen((i64)point)
+            if at.z <= p.near or not box.holds(at.x, at.y): continue
+            if try view.point_shows((i64)point, at): mark(&bits, point, operation)
+    elif domain == 4:
+        let edges = try mesh.edge_span()
+        for edge in 0..<count:
+            let a = (i64)edges[edge * 2]
+            let b = (i64)edges[edge * 2 + 1]
+            let start = view.screen(a)
+            let end = view.screen(b)
+            if start.z <= p.near or end.z <= p.near: continue
+            let along = box.clip(start, end) else continue
+            if try view.edge_shows(a, b, start, end, along): mark(&bits, edge, operation)
+    elif view.ids != none:
+        faces_seen(&bits, view.ids else error(errors.invalid, "no id image"), box, count, operation)
+    else:
+        for face in 0..<count:
+            if not view.face_meets((i64)face): continue
+            if not rays or try view.face_seen((i64)face): mark(&bits, face, operation)
+    return try adopt_selection(bits.finish(), count, Domain.point if domain == 0 else (Domain.edge if domain == 4 else Domain.face), (u64)mesh.topology_hash(), GroupReport())
+
+## The faces an id image shows inside `box` are those under it.
+func faces_seen(bits: BitsBuilder*, image: IdImage, box: ScreenBox, count: usize, operation: i64):
+    if box.right < 0.0 or box.bottom < 0.0 or box.left >= (f64)image.width or box.top >= (f64)image.height: return
+    let left = (usize)math.max(0.0, math.floor(box.left))
+    let top = (usize)math.max(0.0, math.floor(box.top))
+    let right = (usize)math.min((f64)image.width - 1.0, math.floor(box.right))
+    let bottom = (usize)math.min((f64)image.height - 1.0, math.floor(box.bottom))
+    for y in top..<bottom + 1:
+        for x in left..<right + 1:
+            let face = image.face((f64)x, (f64)y)
+            if face >= 0 and (usize)face < count: mark(bits, (usize)face, operation)
+
+func mark(bits: BitsBuilder*, at: usize, operation: i64):
+    if operation == 2:
+        bits.clear(at)
+    else:
+        bits.set(at)
+
+## Whether face `face` has point `point` among its corners.
+func holds_point(mesh: const Mesh*, face: i64, point: i64) -> bool:
+    let offsets = mesh.offset_span()
+    if face < 0 or (usize)face + 1 >= offsets.length: return false
+    let corners = mesh.corner_span()
+    for corner in (usize)offsets[(usize)face]..<(usize)offsets[(usize)face + 1]:
+        if (i64)corners[corner] == point: return true
+    return false
+
+## A mesh seen through a view for one box: where its points land, and
+## whether a component shows (by `ids`, by view rays, or always).
+struct BoxView:
+    let mesh: const Mesh*
+    let world: Matrix4
+    let inverse: Matrix4
+    let p: Projection
+    let box: ScreenBox
+    let width: f64
+    let height: f64
+    let ids: IdImage?
+    let rays: bool
+
+    ## Point `point` on screen: x, y and its view depth.
+    func screen(point: i64) -> Vector3:
+        return project(self.place(point), self.p, self.width, self.height)
+
+    ## Point `point` in world space.
+    func place(point: i64) -> Vector3:
+        let local = self.mesh.point_span()[(usize)point].vector().add(self.mesh.position_origin())
+        return self.world.transform_point(local)
+
+    func point_shows(point: i64, at: Vector3) -> bool!:
+        if let image = self.ids:
+            return image.shows(self.mesh, at.x, at.y, point, -1)
+        if not self.rays: return true
+        return try self.reaches(self.place(point))
+
+    ## Edge (a, b), its ends on screen at `start` and `end`, shows inside the
+    ## box: somewhere along its part in the box (a sample every 2 pixels).
+    func edge_shows(a: i64, b: i64, start: Vector3, end: Vector3, along: Along) -> bool!:
+        if let image = self.ids:
+            let length = math.hypot(end.x - start.x, end.y - start.y) * (along.end - along.start)
+            let samples = (i64)math.clamp(math.ceil(length / 2.0), 1.0, 256.0)
+            for k in 0..<samples:
+                let t = along.start + (along.end - along.start) * ((f64)k + 0.5) / (f64)samples
+                if image.shows(self.mesh, start.x + (end.x - start.x) * t, start.y + (end.y - start.y) * t, a, b): return true
+            return false
+        if not self.rays: return true
+        let middle = (along.start + along.end) * 0.5
+        let origin = self.place(a)
+        return try self.reaches(origin.add(self.place(b).subtract(origin).multiply_scalar(middle)))
+
+    ## Whether face `face` meets the box on screen: one of its sides crosses
+    ## it, or (all in front of the camera) it holds the box's middle.
+    func face_meets(face: i64) -> bool:
+        let offsets = self.mesh.offset_span()
+        let corners = self.mesh.corner_span()
+        let first = (usize)offsets[(usize)face]
+        let last = (usize)offsets[(usize)face + 1]
+        let middle_x = (self.box.left + self.box.right) * 0.5
+        let middle_y = (self.box.top + self.box.bottom) * 0.5
+        var ahead = true
+        var winding = 0.0
+        for corner in first..<last:
+            let a = self.screen((i64)corners[corner])
+            let b = self.screen((i64)corners[corner + 1 if corner + 1 < last else first])
+            if a.z <= self.p.near or b.z <= self.p.near:
+                ahead = false
+                continue
+            if self.box.clip(a, b) != none: return true
+            winding += math.atan2((a.x - middle_x) * (b.y - middle_y) - (a.y - middle_y) * (b.x - middle_x), (a.x - middle_x) * (b.x - middle_x) + (a.y - middle_y) * (b.y - middle_y))
+        return ahead and math.abs(winding) > math.pi
+
+    ## By view rays: face `face` is the first thing seen toward its middle
+    ## or a spot just inside one of its corners, inside the box; or, when
+    ## none of those is in the box, under the box's middle.
+    func face_seen(face: i64) -> bool!:
+        let offsets = self.mesh.offset_span()
+        let corners = self.mesh.corner_span()
+        let first = (usize)offsets[(usize)face]
+        let last = (usize)offsets[(usize)face + 1]
+        var center = Vector3()
+        for corner in first..<last:
+            center = center.add(self.place((i64)corners[corner]))
+        center = center.multiply_scalar(1.0 / (f64)(last - first))
+        var inside = false
+        for corner in first..<last + 1:
+            let spot = center if corner == last else self.place((i64)corners[corner]).multiply_scalar(0.95).add(center.multiply_scalar(0.05))
+            let at = project(spot, self.p, self.width, self.height)
+            if at.z <= self.p.near or not self.box.holds(at.x, at.y): continue
+            inside = true
+            if try self.first_face(spot) == face: return true
+        if inside: return false
+        let p = self.p
+        let x = (self.box.left + self.box.right) * 0.5
+        let y = (self.box.top + self.box.bottom) * 0.5
+        let direction = p.right.multiply_scalar((x / self.width * 2.0 - 1.0) * p.aspect / p.focal).add(p.up.multiply_scalar((1.0 - y / self.height * 2.0) / p.focal)).subtract(p.backward)
+        return try self.first_face(p.position.add(direction)) == face
+
+    ## The face the view ray toward world point `point` meets first (-1: none).
+    func first_face(point: Vector3) -> i64!:
+        let eye = self.inverse.transform_point(self.p.position)
+        return try self.mesh.ray_face(eye, try self.inverse.transform_point(point).subtract(eye).normalized())
+
+    ## Whether the view ray to world point `point` meets nothing of the
+    ## mesh before it.
+    func reaches(point: Vector3) -> bool!:
+        let eye = self.inverse.transform_point(self.p.position)
+        let offset = self.inverse.transform_point(point).subtract(eye)
+        let distance = offset.length()
+        if distance < 1.0e-12: return true
+        let hit = try self.mesh.ray_distance(eye, try offset.normalized())
+        return hit < 0.0 or hit >= distance * (1.0 - 1.0e-5) - 1.0e-9
