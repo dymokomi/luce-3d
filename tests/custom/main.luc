@@ -56,6 +56,8 @@ class Blue: Material:
         return Color(0.0, 0.0, 1.0)
     pub func is_lit(self) -> bool:
         return false
+    pub func fade(self) -> float:
+        return 0.0
 
 pub func main(arguments: list[str]) -> int!:
     let triangle = Triangle()

@@ -21,6 +21,7 @@ const uint flag_splats = 8u;   // the cloud has orient, scale and opacity
 const uint flag_marks = 16u;   // selection marks are stored: marked splats are tinted
 const uint flag_antialiased = 64u; // trained with Mip-Splatting's 2D filter: compensate opacity for the low-pass
 const uint flag_lod = 32u;     // merged levels (runs of 4, 16, 64, 256 splats) follow the splats
+const uint flag_faded = 128u;  // drawn as context: colors greyed, opacity lowered
 
 // Workgroups of 256 splats in a 2D grid: the splat this invocation handles.
 uint splat_index() {

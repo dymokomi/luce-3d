@@ -98,11 +98,12 @@ pub struct FrameLighting:
 ## and, when `wire_width` > 0, its edges in `wire_color`.
 pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh: const Mesh*, world: Matrix4, projection: Projection,
                       lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*, slope_bias: f64,
-                      surfaces: bool, wire_width: f64, wire_color: Color, highlight: const FaceHighlight*? = none) -> !:
+                      surfaces: bool, wire_width: f64, wire_color: Color, highlight: const FaceHighlight*? = none, fade: f64 = 0.0) -> !:
     if mesh.face_count() == 0: return
     var buffers = gpu.MeshBuffers()
     buffers.positions = try positions(arrays, mesh)
     var block = parameters(mesh, world, projection, lighting, tint, lit, shading)
+    block[gpu.mesh_fade] = (f32)fade
     if let marked = highlight:
         if marked.words.count > 0 and marked.topology == mesh.corners_id():
             buffers.flags = try flag_buffer(arrays, marked)
@@ -169,8 +170,8 @@ pub func draw_polygon_ids(arrays: GpuArrays*, target: const gpu.RenderTarget*, m
         first += count
         part += 1
 
-func parameters(mesh: const Mesh*, world: Matrix4, projection: Projection, lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*) -> f32[124]:
-    var block: f32[124]
+func parameters(mesh: const Mesh*, world: Matrix4, projection: Projection, lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*) -> f32[128]:
+    var block: f32[128]
     let view = projection_matrix(projection)
     # Positions are f32 offsets from the mesh's f64 origin; the origin joins
     # the placement here, in f64.

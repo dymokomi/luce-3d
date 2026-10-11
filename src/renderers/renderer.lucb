@@ -318,13 +318,13 @@ pub struct Renderer:
             if self.highlight.topology == cage.corners_id(): try display_highlight(&self.highlight, display, &self.display_highlight)
             else: self.display_highlight.words.clear()
             try draw_polygon(&self.arrays, target, display, item.world, projection, lighting, tint, appearance.is_lit(), &shading,
-                             bias, self.surfaces, 0.0, self.edge_color, &self.display_highlight)
+                             bias, self.surfaces, 0.0, self.edge_color, &self.display_highlight, appearance.fade())
             if self.edge_width > 0.0:
                 try draw_polygon(&self.arrays, target, cage, item.world, projection, lighting, tint, appearance.is_lit(), &shading,
-                                 0.0, false, self.edge_width, self.edge_color, none)
+                                 0.0, false, self.edge_width, self.edge_color, none, appearance.fade())
             return
         try draw_polygon(&self.arrays, target, cage, item.world, projection, lighting, tint, appearance.is_lit(), &shading,
-                         bias, self.surfaces, self.edge_width, self.edge_color, &self.highlight)
+                         bias, self.surfaces, self.edge_width, self.edge_color, &self.highlight, appearance.fade())
 
     ## Ambient lights summed, and the first four directional lights.
     func frame_lighting() -> FrameLighting:

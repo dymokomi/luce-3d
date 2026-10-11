@@ -260,13 +260,19 @@ void main() {
                 vec3 color = splat_color(source, c.xyz, splats && !merged);
                 if ((p.counts.w & flag_marks) != 0u && !merged && ((marks[source >> 5u] >> (source & 31u)) & 1u) != 0u)
                     color = mix(color, highlight, highlight_mix);
+                // Faded: toward its grey, and a third as opaque (dots too).
+                float shown_opacity = opacity;
+                if ((p.counts.w & flag_faded) != 0u) {
+                    color = mix(color, vec3(dot(color, vec3(0.2126, 0.7152, 0.0722))), 0.85);
+                    shown_opacity = opacity * 0.3;
+                }
                 vec2 to_clip = tz / half_size;
                 uint slot = first + i;
                 records[slot * 3u] = vec4(at * to_clip, far * (tz - near) / (far - near), tz);
                 records[slot * 3u + 1u] = vec4(h1 * to_clip, h2 * to_clip);
                 // A dot says so with an opacity of 2 (splat.frag draws it opaque and round).
                 // A merged splat's record says so with its opacity negated.
-                records[slot * 3u + 2u] = vec4(color, splats ? (merged ? -opacity : opacity) : 2.0);
+                records[slot * 3u + 2u] = vec4(color, splats ? (merged ? -shown_opacity : shown_opacity) : 2.0);
                 // Farther first: the view depth's float bits, high 24 of them, reversed.
                 key = 0xFFFFFFu - (floatBitsToUint(tz) >> 7u);
                 atomicAdd(visible_count, 1u);

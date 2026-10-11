@@ -1,12 +1,16 @@
 import interop
+import errors
 from core.material import Material, Color, check_color
 
 pub struct MeshLambertMaterial: Material:
     var tint: Color
+    ## See Material.fade: 0 opaque, up to 1 a see-through grey.
+    var fading: f64
 
     pub func init(color: Color = Color(1.0, 1.0, 1.0)) -> !:
         try check_color(color)
         self.tint = color
+        self.fading = 0.0
 
     pub func color() -> Color:
         return self.tint
@@ -17,6 +21,14 @@ pub struct MeshLambertMaterial: Material:
 
     pub func is_lit() -> bool:
         return true
+
+    pub func fade() -> f64:
+        return self.fading
+
+    ## Fade the surface toward a see-through grey (0 opaque, 1 most faded).
+    pub func set_fade(amount: f64) -> !:
+        if not (amount >= 0.0 and amount <= 1.0): error(errors.invalid, "a material fade lies in 0..1")
+        self.fading = amount
 
     pub func close():
         # Color is inline; the shared owner enforces closure across mesh aliases.

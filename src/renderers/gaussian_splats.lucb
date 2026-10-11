@@ -29,6 +29,8 @@ let flag_splats: u32 = 8
 let flag_marks: u32 = 16
 let flag_lod: u32 = 32
 let flag_antialiased: u32 = 64
+## Faded (drawn as context around what is edited): grey and see-through.
+let flag_faded: u32 = 128
 
 ## How a cloud draws.
 pub enum SplatMode as u8:
@@ -92,6 +94,8 @@ pub struct GaussianSplats:
     var marks: u32[]
     var marks_key: u64
     var marks_changed: bool
+    ## Drawn faded: desaturated and see-through (set_faded).
+    var faded: bool
     ## The view `draw` sorts in when it draws this cloud alone.
     var own_view: SplatView*?
     ## The cloud's points and splat attributes as placed (shared columns),
@@ -159,6 +163,11 @@ pub struct GaussianSplats:
     ## shares the cloud's columns; plain points hide nothing.
     pub func occlude(occluders: interop.Reference[SplatOccluders]) -> !:
         try add_occluding_cloud(try occluders.get(), &self.occluding)
+
+    ## Draw it faded, as context around what is being edited: its colors
+    ## greyed and its splats see-through. Uploads nothing.
+    pub func set_faded(faded: bool):
+        self.faded = faded
 
     ## Whether a selection is tinted on it (`set_marks`).
     pub func has_marks() -> bool:
@@ -256,6 +265,7 @@ pub struct GaussianSplats:
         if buffers.marks.is_open(): flags = flags | flag_marks
         if self.has_lod(): flags = flags | flag_lod
         if self.data.antialiased: flags = flags | flag_antialiased
+        if self.faded: flags = flags | flag_faded
         let used = (look.sh_degree + 1) * (look.sh_degree + 1) - 1
         let rotation = self.data.rotation
         let uniforms: f32[32] = [(f32)eye.x, (f32)eye.y, (f32)eye.z, (f32)projection.near,
