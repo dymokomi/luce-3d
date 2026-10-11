@@ -89,6 +89,8 @@ pub func pick(mesh: const Mesh*, edges: bool, p: Projection, x: f64, y: f64, wid
                 closest = distance
                 nearest = point
         return nearest
+    if edges and mesh.find_attribute("cad_edge", 4) >= 0:
+        return try cad_edge_at(mesh, p, x, y, width, height)
     let face = try face_under(mesh, p, x, y, width, height, known)
     if face < 0 or face >= mesh.face_count(): return -1
     let size = try mesh.face_size(face)
@@ -111,4 +113,32 @@ pub func pick(mesh: const Mesh*, edges: bool, p: Projection, x: f64, y: f64, wid
                 best = distance
                 found = try mesh.face_point(face, at)
         previous = here
+    return found
+
+## CAD boundaries may span many tessellation polygons. Search their tagged
+## segments, ignoring interior mesh edges, and test visibility at the edge.
+func cad_edge_at(mesh: const Mesh*, p: Projection, x: f64, y: f64, width: f64, height: f64) -> i64!:
+    let owners = try mesh.attribute_entry(mesh.find_attribute("cad_edge", 4))
+    var found: i64 = -1
+    var best = reach
+    for edge in 0..<(try mesh.edge_count()):
+        if owners.number((usize)edge, 0) < 0.0: continue
+        let a = try mesh.point(try mesh.edge_point(edge, 0))
+        let b = try mesh.point(try mesh.edge_point(edge, 1))
+        let start = project(a, p, width, height)
+        let end = project(b, p, width, height)
+        if start.z <= p.near or end.z <= p.near: continue
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let t = math.clamp(((x - start.x) * dx + (y - start.y) * dy) / math.max(1e-12, dx * dx + dy * dy), 0.0, 1.0)
+        let distance = math.hypot(x - start.x - t * dx, y - start.y - t * dy)
+        if distance >= best: continue
+        # Perspective-correct point on the actual segment.
+        let fraction = (t / end.z) / ((1.0 - t) / start.z + t / end.z)
+        let offset = a.add(b.subtract(a).multiply_scalar(fraction)).subtract(p.position)
+        let depth = offset.length()
+        let hit = try mesh.ray_distance(p.position, try offset.normalized())
+        if hit >= 0.0 and hit < depth - math.max(1e-5, depth * 1e-5): continue
+        found = edge
+        best = distance
     return found

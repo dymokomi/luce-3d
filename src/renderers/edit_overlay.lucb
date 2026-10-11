@@ -232,6 +232,9 @@ pub struct EditOverlay:
         return (i64)self.faces.count // 3
 
     ## Selection rebuilds so far: hover and camera changes must not add any.
+    pub func hover_segments() -> i64:
+        return (i64)self.hover.count // 2
+
     pub func selection_builds() -> i64:
         return self.builds
 
@@ -365,8 +368,19 @@ pub struct EditOverlay:
         let id = self.hovered
         if id < 0: return
         if self.mode == 1 and id < (try mesh.edge_count()):
-            try self.hover.push(try mesh.point(try mesh.edge_point(id, 0)))
-            try self.hover.push(try mesh.point(try mesh.edge_point(id, 1)))
+            let tag = mesh.find_attribute("cad_edge", 4)
+            let owner = mesh.find_attribute("cad_edge_model", 4)
+            if tag >= 0 and owner >= 0:
+                let edge_id = try mesh.attribute_value(tag, id)
+                let model_id = try mesh.attribute_value(owner, id)
+                if edge_id < 0.0: return
+                for edge in 0..<(try mesh.edge_count()):
+                    if (try mesh.attribute_value(tag, edge)) != edge_id or (try mesh.attribute_value(owner, edge)) != model_id: continue
+                    try self.hover.push(try mesh.point(try mesh.edge_point(edge, 0)))
+                    try self.hover.push(try mesh.point(try mesh.edge_point(edge, 1)))
+            else:
+                try self.hover.push(try mesh.point(try mesh.edge_point(id, 0)))
+                try self.hover.push(try mesh.point(try mesh.edge_point(id, 1)))
         if self.mode == 2 and id < mesh.face_count():
             for chosen in self.selection.view():
                 if chosen == id: return
