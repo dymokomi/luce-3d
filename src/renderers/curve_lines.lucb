@@ -120,9 +120,10 @@ pub struct CurveLines:
         try append_curve_segments(try geometry.get(), Matrix4(), &lines, none)
         return (i64)(lines.count // 2)
 
-    ## The evaluated curves of `geometry` as a batch, or their hulls.
-    pub static func batch(geometry: interop.Reference[GeometrySet], hull: bool = false) -> interop.Reference[WireBatch]!:
+    ## The evaluated curves of `geometry` as a batch, or their hulls, placed
+    ## by `matrix`.
+    pub static func batch(geometry: interop.Reference[GeometrySet], hull: bool = false, matrix: Matrix4 = Matrix4()) -> interop.Reference[WireBatch]!:
         var points = Growing[Vector3]()
         defer points.close()
-        try append_curve_segments(try geometry.get(), Matrix4(), &points if not hull else none, &points if hull else none)
+        try append_curve_segments(try geometry.get(), matrix, &points if not hull else none, &points if hull else none)
         return try interop.Reference[WireBatch].adopt(try new WireBatch(points.view()) in memory.heap, wire_batch_type, memory.heap)
