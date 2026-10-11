@@ -10,6 +10,7 @@ cd "$(dirname "$0")/.."
 python3 ../luce-gpu/tools/embed_shaders.py src/renderers/fog_shaders.lucb --public --fast-math fog --fast-math fog_group \
     shaders/fog.frag:fog:GROUP=0 shaders/fog.frag:fog_group:GROUP=1
 python3 ../luce-gpu/tools/embed_shaders.py src/renderers/line_shaders.lucb --public shaders/line.frag
+python3 ../luce-gpu/tools/embed_shaders.py src/renderers/silhouette_shaders.lucb --public shaders/silhouette.frag
 python3 ../luce-gpu/tools/embed_shaders.py src/renderers/splat_shaders.lucb --public -I shaders --fast-math splat --fast-math splat_project \
     shaders/splat.frag shaders/splat_project.comp shaders/splat_offsets.comp shaders/splat_compact.comp \
     shaders/radix_count.comp shaders/radix_scan.comp shaders/radix_scatter.comp

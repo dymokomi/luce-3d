@@ -1,0 +1,144 @@
+## Selection contours around rendered coverage, including holes, disjoint
+## pieces, splats and fog. No triangulation or bounding-box edges are shown.
+## The opacity mask is retained until its content key or camera changes.
+from luce_gpu import gpu
+from luce_geocore.geocore import Mesh, Matrix4
+from luce_geocore.kernel import subdivided_display, mesh_dispose
+from cameras.perspective import PerspectiveCamera
+from core.material import Color
+from renderers.gpu_arrays import GpuArrays
+from renderers.mesh_batch import draw_polygon, MeshShading, FrameLighting
+from renderers.splat_scene import SplatScene
+from renderers.gaussian_splats import GaussianSplats, SplatLook
+from renderers.fog_scene import FogScene
+from renderers.fog_volume import FogVolume
+from renderers.silhouette_shaders import silhouette_frag_words, silhouette_frag_msl, silhouette_frag_fast_math
+import interop
+import memory
+from luce_std import math
+import errors
+
+pub struct Silhouette:
+    var device: gpu.Device
+    var texture: gpu.Texture
+    var shader: gpu.Shader
+    var pipelines: (gpu.Pipeline?)[9]
+    var arrays: GpuArrays
+    var splats: SplatScene
+    var fog: FogScene
+    var width: u32 = 0
+    var height: u32 = 0
+    var key: u64 = 0
+    var valid: bool = false
+    var builds: i64 = 0
+
+    pub func init():
+        self.device = gpu.Device()
+        self.texture = gpu.Texture()
+        self.shader = gpu.Shader()
+        self.pipelines = [none, none, none, none, none, none, none, none, none]
+        self.arrays = GpuArrays()
+        self.splats = SplatScene()
+        self.fog = FogScene()
+        self.width = 0
+        self.height = 0
+        self.key = 0
+        self.valid = false
+        self.builds = 0
+
+    ## `key` changes with the selected objects, geometry or display settings.
+    ## Meshes are already in world space, just like viewport picking meshes.
+    ## A full-resolution mask with a logical-pixel stroke stays sharp on Retina.
+    pub func draw(meshes: const interop.Reference[Mesh][], clouds: const interop.Reference[GaussianSplats][], volumes: const interop.Reference[FogVolume][],
+                  camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color,
+                  key: i64, look: SplatLook = SplatLook(), width: f64 = 3.0) -> !:
+        if not (width > 0.0 and width <= 4.0): error(errors.invalid, "outline width must be in (0, 4]")
+        if meshes.length + clouds.length + volumes.length == 0: return
+        let native = try target.get()
+        let size = try native.size()
+        if size.width <= 0.0 or size.height <= 0.0: return
+        var device = gpu.device_of(native) catch failure:
+            if failure.code != gpu.unavailable: error(failure.code, failure.message)
+            recover gpu.Device()
+        defer device.destroy()
+        if not device.is_open(): return
+        if self.device.is_open() and not self.device.same(&device): self.close()
+        if not self.device.is_open():
+            self.device = try device.share()
+            self.shader = try gpu.Shader.create(device, silhouette_frag_words, silhouette_frag_msl, silhouette_frag_fast_math)
+        let columns = (u32)math.ceil(size.pixel_width)
+        let rows = (u32)math.ceil(size.pixel_height)
+        let scale = size.pixel_width / size.width
+        if columns != self.width or rows != self.height:
+            self.valid = false
+            self.texture.destroy()
+            self.texture = try gpu.Texture.create(device, columns, rows, gpu.Format.rgba8_linear)
+            self.width = columns
+            self.height = rows
+        let projection = try camera.value().projection(size.width / size.height)
+        var signature = (u64)key
+        for value in [projection.position.x, projection.position.y, projection.position.z,
+                      projection.right.x, projection.right.y, projection.right.z,
+                      projection.up.x, projection.up.y, projection.up.z,
+                      projection.backward.x, projection.backward.y, projection.backward.z,
+                      projection.focal, projection.aspect, projection.near, projection.far]:
+            var bits = value
+            signature = (signature ^ memory.read[u64](&bits)) *% 0x100000001B3
+        if not self.valid or signature != self.key:
+            let recording = try self.texture.frame()
+            defer recording.release()
+            let mask = try recording.value().target()
+            defer mask.release()
+            try self.arrays.begin(device)
+            let shading = MeshShading(mode = gpu.Shading.unlit)
+            let lighting = FrameLighting()
+            for reference in meshes:
+                let cage = try reference.get()
+                let display = try subdivided_display(cage)
+                defer:
+                    if let mesh = display: mesh_dispose(mesh)
+                let mesh = display else cage
+                try draw_polygon(&self.arrays, try mask.get(), mesh, Matrix4(), projection, &lighting, Color(1.0, 1.0, 1.0), false, &shading, 0.0, true, 0.0, Color())
+            var mask_look = look
+            mask_look.dot_size *= scale
+            mask_look.max_size *= scale
+            mask_look.lod_pixels *= scale
+            try self.splats.set_look(mask_look)
+            try self.splats.draw(clouds, camera, mask)
+            try self.fog.draw(volumes, camera, mask)
+            _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))
+            self.arrays.trim()
+            self.key = signature
+            self.valid = true
+            self.builds += 1
+        let format = try native.pixel_format()
+        var slot: usize = 0
+        if let held = format: slot = (usize)(u8)held + 1
+        if self.pipelines[slot] == none:
+            self.pipelines[slot] = try gpu.Pipeline.create(device, self.shader, gpu.Blend.over, format)
+        let pipeline = self.pipelines[slot] else trap("outline pipeline")
+        let placement = try native.placement()
+        let uniforms: f32[8] = [(f32)(placement.x * scale), (f32)(placement.y * scale), (f32)size.pixel_width, (f32)size.pixel_height,
+                                 (f32)(scale / (f64)columns), (f32)(scale / (f64)rows), (f32)width, 0.12]
+        try gpu.shade(native, pipeline, gpu.Rect(0.0, 0.0, size.width, size.height), u8[]((u8*)&uniforms[0], 32), [self.texture], color = color)
+
+    pub func mask_builds() -> i64:
+        return self.builds
+
+    pub func close():
+        self.arrays.close()
+        self.splats.close()
+        self.fog.close()
+        self.texture.destroy()
+        for at in 0..<self.pipelines.length:
+            if let held = self.pipelines[at]:
+                var pipeline = held
+                pipeline.destroy()
+                self.pipelines[at] = none
+        self.shader.destroy()
+        self.device.destroy()
+        self.width = 0
+        self.height = 0
+        self.valid = false
+
+pub let silhouette_type: interop.Type[Silhouette] = interop.Type[Silhouette]("Silhouette", Silhouette.close, closeable = true, main_thread = true)

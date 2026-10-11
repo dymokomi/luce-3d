@@ -18,6 +18,9 @@ import materials.lambert
 import materials.basic
 import errors
 import renderers.wire
+import renderers.silhouette
+pub type Silhouette = silhouette.Silhouette
+pub let silhouette_type = silhouette.silhouette_type
 pub type WireRenderer = wire.WireRenderer
 ## Release the shared pipeline of lines that write no depth (the ground grid).
 pub let release_line_pipelines = wire.release_line_pipelines
