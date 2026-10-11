@@ -31,8 +31,9 @@ pub struct SplatScene:
 
     ## Draw `clouds` over what `target` holds, through `camera`, sorted
     ## together. An unchanged view with the same clouds sorts nothing. A
-    ## standalone frame (no device) draws nothing.
-    pub func draw(clouds: const interop.Reference[GaussianSplats][], camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget]) -> !:
+    ## standalone frame (no device) draws nothing. `point_scale` overrides
+    ## the target scale for offscreen passes; zero uses the target's scale.
+    pub func draw(clouds: const interop.Reference[GaussianSplats][], camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], point_scale: f64 = 0.0) -> !:
         if clouds.length == 0: return
         let native = try target.get()
         var device = gpu.device_of(native) catch failure:
@@ -51,7 +52,7 @@ pub struct SplatScene:
         let pointers = try new GaussianSplats*[clouds.length] --- in memory.heap
         defer free(pointers) in memory.heap
         for index in 0..<clouds.length: pointers[index] = try clouds[index].get()
-        try draw_clouds(view, pointers, self.settings, camera, native, device, size.pixel_width, size.pixel_height, size.pixel_width / size.width)
+        try draw_clouds(view, pointers, self.settings, camera, native, device, size.pixel_width, size.pixel_height, point_scale if point_scale > 0.0 else size.pixel_width / size.width)
 
     ## How many views it sorted.
     pub func sort_count() -> i64:

@@ -99,12 +99,8 @@ pub struct Silhouette:
                     if let mesh = display: mesh_dispose(mesh)
                 let mesh = display else cage
                 try draw_polygon(&self.arrays, try mask.get(), mesh, Matrix4(), projection, &lighting, Color(1.0, 1.0, 1.0), false, &shading, 0.0, true, 0.0, Color())
-            var mask_look = look
-            mask_look.dot_size *= scale
-            mask_look.max_size *= scale
-            mask_look.lod_pixels *= scale
-            try self.splats.set_look(mask_look)
-            try self.splats.draw(clouds, camera, mask)
+            try self.splats.set_look(look)
+            try self.splats.draw(clouds, camera, mask, point_scale = scale)
             try self.fog.draw(volumes, camera, mask)
             _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))
             self.arrays.trim()
