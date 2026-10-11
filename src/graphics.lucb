@@ -24,6 +24,10 @@ pub let silhouette_type = silhouette.silhouette_type
 pub type WireRenderer = wire.WireRenderer
 ## Release the shared pipeline of lines that write no depth (the ground grid).
 pub let release_line_pipelines = wire.release_line_pipelines
+import renderers.ground_grid
+pub type GroundGrid = ground_grid.GroundGrid
+## Release the shared pipeline of the ground grid.
+pub let release_grid_pipelines = ground_grid.release_grid_pipelines
 import renderers.wire_batch
 pub type WireBatch = wire_batch.WireBatch
 pub let wire_batch_type = wire_batch.wire_batch_type

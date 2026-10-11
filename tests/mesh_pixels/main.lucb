@@ -1,4 +1,5 @@
-## Offscreen pixels of the polygon-mesh path (GPU arrays, shader lighting):
+## Offscreen pixels of the polygon-mesh path (GPU arrays, shader lighting)
+## and the ground grid (hidden behind meshes, fading with distance):
 ## it matches the per-vertex path in lit and flat modes, uploads only the
 ## positions after a Move, and its zebra stripes scale with their count, break
 ## at a crease (separate normals per face) and flow across a smooth seam.
@@ -10,7 +11,7 @@ import memory
 from luce_3d import graphics as three
 from luce_geocore import geocore
 from luce_geocore.geocore import MeshNormals, MeshPrimitives, AttributeKernels, Vector3, Verbs, Subdivision
-from luce_3d.graphics import Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer, Color, WireRenderer, MeshGeometry
+from luce_3d.graphics import Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer, Color, WireRenderer, MeshGeometry, GroundGrid
 
 let width: u32 = 160
 let height: u32 = 120
@@ -96,6 +97,20 @@ struct View:
         defer result.release()
         try result.get()
         if lines.length > 0: try WireRenderer.lines(lines, self.camera, target, gpu.Color(1.0, 0.0, 0.0), 2.0, 0.0)
+        _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0))
+        try self.texture.read(image)
+
+    ## Draw the scene, then the ground grid in red (its axes green) on y = 0,
+    ## faded out `fade` from the eye.
+    func draw_grid(image: u8[], fade: f64) -> !:
+        let recording = try self.texture.frame()
+        defer recording.release()
+        let target = try recording.value().target()
+        defer target.release()
+        let result = self.renderer.value().render(self.root, self.camera, target, true)
+        defer result.release()
+        try result.get()
+        try GroundGrid.draw(self.camera, target, 0.0, 0.25, gpu.Color(1.0, 0.0, 0.0), gpu.Color(1.0, 0.0, 0.0), gpu.Color(0.0, 1.0, 0.0), fade)
         _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0))
         try self.texture.read(image)
 
@@ -196,6 +211,41 @@ func occlusion(view: View*, cube: interop.Reference[geocore.Mesh], image: u8[]) 
     try view.draw_lines(image, lines)
     let behind = red_pixels(image)
     assert(alone > 100 and behind * 4 < alone * 3)
+
+## The ground grid: lines below the horizon only, its axes in their own color,
+## hidden behind a mesh in front (depth tested, after the meshes), and fading
+## with distance: faded out sooner, the far half of the view shows less of it.
+func ground_grid(view: View*, cube: interop.Reference[geocore.Mesh], image: u8[]) -> !:
+    try view.camera.value().set_position(Vector3(2.0, 3.0, 4.0))
+    try view.camera.value().look_at(Vector3(0.0, 0.5, 0.0))
+    view.hide()
+    try view.draw_grid(image, 30.0)
+    let alone = grid_pixels(image)
+    var green: usize = 0
+    for at in 0..<(usize)(width * height):
+        if image[at * 4 + 1] > 100 and image[at * 4] < 60: green += 1
+    let far = upper_red(image)
+    try view.draw_grid(image, 6.0)
+    let faded = upper_red(image)
+    try view.show(cube, false)
+    try view.draw_grid(image, 30.0)
+    let behind = grid_pixels(image)
+    if not (alone > 300 and green > 20 and behind * 10 < alone * 9 and far > 0 and faded * 2 < far):
+        print(f"ground grid: {alone} red pixels, {green} green, {behind} behind a cube, the far half's red {far}, faded sooner {faded}")
+        assert(false)
+
+## The red of the image's upper half, where the plane is farthest.
+func upper_red(image: const u8[]) -> i64:
+    var sum: i64 = 0
+    for at in 0..<(usize)(width * height // 2): sum += (i64)image[at * 4]
+    return sum
+
+## Pixels a red line covers at least in part.
+func grid_pixels(image: const u8[]) -> usize:
+    var count: usize = 0
+    for at in 0..<(usize)(width * height):
+        if image[at * 4] > 50 and (i64)image[at * 4 + 1] * 2 < (i64)image[at * 4]: count += 1
+    return count
 
 ## A subdivided cube draws its limit surface: rounder, so it covers fewer
 ## pixels than the cage, and the same pixels as its display mesh drawn
@@ -418,6 +468,7 @@ pub func main(arguments: str[]) -> i32!:
     try curvature_map(&view, image)
     try picking(&view, cube, image)
     try occlusion(&view, cube, image)
+    try ground_grid(&view, cube, image)
     try two_sided(&view, cube, legacy_image, image)
     try subdivided(&view, cube, image, legacy_image)
     print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded; inside-out meshes light on the eye's side; curvature maps; GPU face picking and selection tint")

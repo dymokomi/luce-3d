@@ -1,0 +1,113 @@
+## The ground grid as Blender's overlay draws it: one plane under the camera,
+## reaching as far as the grid fades, whose fragments (shaders/grid.frag) find
+## the lines of every level of the grid around them, in screen-pixel widths,
+## fading in finer levels as the camera nears and out with distance and toward
+## the horizon. The axes through the origin keep their own color.
+##
+## The plane is depth tested and writes no depth, as the overlay lines do
+## (wire.lucb): a mesh in front hides it, and splats and fog drawn after it
+## cover it as they cover anything behind them.
+from luce_gpu import gpu
+from luce_geocore.geocore import Vector3
+from cameras.perspective import PerspectiveCamera, Projection
+from renderers.grid_shaders import grid_frag_words, grid_frag_msl, grid_frag_fast_math
+import interop
+from luce_std import math
+import errors
+
+pub struct GroundGrid:
+    let reserved: u8 = 0
+
+    ## Draw the grid on the plane y = `height` into `target` through `camera`:
+    ## lines every `step` and every fifth level of it (5, 25, ... times),
+    ## `width` logical pixels wide, `minor` where lines are close on screen and
+    ## `major` where they are far apart, the axes in `axis`; it has faded out
+    ## `fade` from the eye (at most 0.9 of the camera's far distance).
+    pub static func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], height: f64, step: f64,
+                         minor: gpu.Color, major: gpu.Color, axis: gpu.Color, fade: f64, width: f64 = 1.0) -> !:
+        if not (step > 0.0) or not (fade > 0.0) or not (width > 0.0) or not math.is_finite(height):
+            error(errors.invalid, "a grid needs a positive step, fade and width, and a finite height")
+        let native = try target.get()
+        let size = try native.size()
+        if size.width <= 0.0 or size.height <= 0.0: return
+        var device = gpu.device_of(native) catch failure:
+            if failure.code != gpu.unavailable: error(failure.code, failure.message)
+            recover gpu.Device()
+        defer device.destroy()
+        if not device.is_open(): return
+        let p = try camera.value().projection(size.width / size.height)
+        let reach = math.min(fade, 0.9 * p.far)
+        # A square on the plane round the point under the eye, reaching as far
+        # as the grid fades; the GPU clips what lies behind the camera.
+        let x = p.position.x
+        let z = p.position.z
+        let a = clip(Vector3(x - reach, height, z - reach), p, axis)
+        let b = clip(Vector3(x + reach, height, z - reach), p, axis)
+        let c = clip(Vector3(x + reach, height, z + reach), p, axis)
+        let d = clip(Vector3(x - reach, height, z + reach), p, axis)
+        let vertices: gpu.Vertex[6] = [a, b, c, a, c, d]
+        let scale = size.pixel_width / size.width
+        let placement = try native.placement()
+        let forward = p.backward.multiply_scalar(-1.0)
+        let right = p.right.multiply_scalar(p.aspect / p.focal)
+        let up = p.up.multiply_scalar(1.0 / p.focal)
+        let uniforms: f32[28] = [(f32)(placement.x * scale), (f32)(placement.y * scale), (f32)size.pixel_width, (f32)size.pixel_height,
+                                  (f32)p.position.x, (f32)p.position.y, (f32)p.position.z, (f32)reach,
+                                  (f32)right.x, (f32)right.y, (f32)right.z, (f32)step,
+                                  (f32)up.x, (f32)up.y, (f32)up.z, (f32)(width * scale),
+                                  (f32)forward.x, (f32)forward.y, (f32)forward.z, (f32)height,
+                                  (f32)major.red, (f32)major.green, (f32)major.blue, (f32)major.alpha,
+                                  (f32)minor.red, (f32)minor.green, (f32)minor.blue, (f32)minor.alpha]
+        try gpu.shade_triangles(native, try grid_pipeline(device, try native.pixel_format()), vertices, u8[]((u8*)&uniforms[0], 112))
+
+## `point` in clip space through `p` (as the scene's meshes are: projection.lucb),
+## carrying `color` to the fragments.
+func clip(point: Vector3, p: Projection, color: gpu.Color) -> gpu.Vertex:
+    let relative = point.subtract(p.position)
+    let distance = -relative.dot(p.backward)
+    return gpu.Vertex(x = (f32)(relative.dot(p.right) * p.focal / p.aspect), y = (f32)(relative.dot(p.up) * p.focal),
+                      z = (f32)(p.far * (distance - p.near) / (p.far - p.near)), w = (f32)distance,
+                      red = (f32)color.red, green = (f32)color.green, blue = (f32)color.blue, alpha = (f32)color.alpha)
+
+# mark: The shared pipeline
+
+## The grid shader and its pipelines on one device, per target format (slot 0
+## for presentation surfaces, 1 + the format otherwise): made on first use and
+## kept. Main thread only, as drawing is.
+struct GridPipelines:
+    var device: gpu.Device
+    var shader: gpu.Shader
+    var pipelines: (gpu.Pipeline?)[9]
+
+var shared: GridPipelines? = none
+
+func grid_pipeline(device: gpu.Device, pixel_format: gpu.Format?) -> gpu.Pipeline!:
+    var wanted = device
+    if let held = shared:
+        if not held.device.same(&wanted): release_grid_pipelines()
+    if shared == none:
+        var shader = try gpu.Shader.create(device, grid_frag_words, grid_frag_msl, grid_frag_fast_math)
+        errdefer shader.destroy()
+        shared = GridPipelines(device = try device.share(), shader = shader)
+    var held = shared else trap("grid pipelines")
+    var slot: usize = 0
+    if let format = pixel_format: slot = (usize)(u8)format + 1
+    if let made = held.pipelines[slot]: return made
+    let made = try gpu.Pipeline.create(device, held.shader, gpu.Blend.over, pixel_format, depth_test = true)
+    held.pipelines[slot] = made
+    shared = held
+    return made
+
+## Release the shared grid shader and pipelines (made again on the next draw):
+## for a clean shutdown, or before closing the device.
+pub func release_grid_pipelines():
+    let held = shared else return
+    shared = none
+    for pipeline in held.pipelines:
+        if let made = pipeline:
+            var owned = made
+            owned.destroy()
+    var shader = held.shader
+    shader.destroy()
+    var device = held.device
+    device.destroy()
