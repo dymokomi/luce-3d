@@ -90,11 +90,8 @@ pub struct EditOverlay:
             changed_mesh = current.value() != geometry
         if changed_mesh:
             # The field holds the new mesh before the old one is released:
-            # a release may run the cycle collector (std ownership's
-            # possible_root), which must not trace an edge already dropped.
-            # LUCE-BUG: the collector runs inside a release, so a field
-            # released before it is reassigned is traced stale (Windows
-            # trapped in cycles.lucb, integer overflow).
+            # a last release runs a dispose that can re-enter Luce code, so
+            # nothing reachable may point at the dropped mesh by then.
             let previous = self.mesh
             self.mesh = mesh.clone()
             if let current = previous: current.release()
