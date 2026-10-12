@@ -164,7 +164,7 @@ pub struct Renderer:
     ## cage's display, answered as the cage). Before a frame has drawn on a
     ## device, or when it did not draw `mesh`, view rays say what shows.
     pub func select_box(mesh: interop.Reference[geocore.Mesh], camera: interop.Reference[PerspectiveCamera], current: interop.Reference[Selection],
-                        x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64, operation: i64, visible_only: bool = true) -> interop.Reference[Selection]!:
+                        x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64, operation: i64, visible_only: bool = true, wholly: bool = false) -> interop.Reference[Selection]!:
         if not (width >= 1.0 and height >= 1.0 and width <= 16384.0 and height <= 16384.0): error(errors.invalid, "a box selection needs a view of 1..16384 points a side")
         let geometry = try mesh.get()
         let chosen = try current.get()
@@ -173,18 +173,18 @@ pub struct Renderer:
         var found: Matrix4? = none
         for placement in self.placements.view():
             if placement.points == geometry.points_id(): found = placement.world
-        let world = found else return try box_selection(geometry, Matrix4(), projection, box, width, height, chosen, operation, visible_only, none)
+        let world = found else return try box_selection(geometry, Matrix4(), projection, box, width, height, chosen, operation, visible_only, none, wholly)
         if not visible_only or geometry.face_count() == 0 or not self.arrays.has_device():
-            return try box_selection(geometry, world, projection, box, width, height, chosen, operation, visible_only, none)
+            return try box_selection(geometry, world, projection, box, width, height, chosen, operation, visible_only, none, wholly)
         let device = self.arrays.device_handle()
         if let display = try subdivided_display(geometry):
             defer mesh_dispose(display)
             let pixels = try self.picker.image(&self.arrays, device, display, world, projection, ids_key(display, world, projection, width, height), (u32)width, (u32)height)
             let ids = IdImage(pixels, (u32)width, (u32)height, try cage_faces(display))
-            return try box_selection(geometry, world, projection, box, width, height, chosen, operation, true, ids)
+            return try box_selection(geometry, world, projection, box, width, height, chosen, operation, true, ids, wholly)
         let pixels = try self.picker.image(&self.arrays, device, geometry, world, projection, ids_key(geometry, world, projection, width, height), (u32)width, (u32)height)
         var own_faces: u32[]
-        return try box_selection(geometry, world, projection, box, width, height, chosen, operation, true, IdImage(pixels, (u32)width, (u32)height, own_faces))
+        return try box_selection(geometry, world, projection, box, width, height, chosen, operation, true, IdImage(pixels, (u32)width, (u32)height, own_faces), wholly)
 
     ## Tint `faces` of `mesh` (and of later meshes with its topology, such as
     ## its Moves) with `color` at `weight` in the surface shading: a face

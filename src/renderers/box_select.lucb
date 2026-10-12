@@ -3,6 +3,8 @@
 ## meeting the box is enough). Through the depth, or only what shows there:
 ## an id pass of the visible faces (IdImage, from Renderer.select_box), else
 ## view rays when no id pass is at hand. Objects ask BoxSelect.touches.
+## A window (`wholly`, Fusion's left-to-right box and the CAD rule) takes
+## only edges and faces whose every point is inside the box.
 ## Every loop here is over the mesh's own arrays; callers never loop over
 ## its elements.
 import interop
@@ -91,11 +93,12 @@ pub struct BoxSelect:
     ## screen box from (x0, y0) to (x1, y1) of a `width` x `height` view
     ## through `camera` touches: replaced (operation 0), added to (1) or
     ## taken from (2). With `visible_only`, only what view rays reach
-    ## (Renderer.select_box asks the GPU instead, once a frame drew `mesh`).
+    ## (Renderer.select_box asks the GPU instead, once a frame drew `mesh`);
+    ## with `wholly`, only edges and faces wholly inside the box.
     pub static func select(mesh: interop.Reference[Mesh], camera: interop.Reference[PerspectiveCamera], current: interop.Reference[Selection],
-                           x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64, operation: i64, visible_only: bool = true) -> interop.Reference[Selection]!:
+                           x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64, operation: i64, visible_only: bool = true, wholly: bool = false) -> interop.Reference[Selection]!:
         let projection = try camera.value().projection(math.max(1.0, width) / math.max(1.0, height))
-        return try box_selection(try mesh.get(), Matrix4(), projection, ScreenBox.between(x0, y0, x1, y1), width, height, try current.get(), operation, visible_only, none)
+        return try box_selection(try mesh.get(), Matrix4(), projection, ScreenBox.between(x0, y0, x1, y1), width, height, try current.get(), operation, visible_only, none, wholly)
 
     ## Whether `mesh` (in world space) shows anywhere in the box from
     ## (x0, y0) to (x1, y1) through the depth: one of its faces meets it,
@@ -136,8 +139,10 @@ pub struct BoxSelect:
 ## `chosen` changed by what `box` touches of `mesh` (placed by `world`) in a
 ## `width` x `height` view through `p`; see BoxSelect.select. `ids`, when
 ## given, says what shows (visible only); else `visible_only` casts rays.
+## With `wholly`, an edge or face counts only when all its points are in the
+## box (and it shows there, when only what shows counts).
 pub func box_selection(mesh: const Mesh*, world: Matrix4, p: Projection, box: ScreenBox, width: f64, height: f64, chosen: const Selection*,
-                       operation: i64, visible_only: bool, ids: IdImage?) -> interop.Reference[Selection]!:
+                       operation: i64, visible_only: bool, ids: IdImage?, wholly: bool = false) -> interop.Reference[Selection]!:
     if operation < 0 or operation > 2: error(errors.invalid, "a box selection replaces (0), adds (1) or removes (2)")
     let domain = chosen.domain()
     if domain != 0 and domain != 2 and domain != 4: error(errors.invalid, "a box selects points, edges or faces")
@@ -162,8 +167,22 @@ pub func box_selection(mesh: const Mesh*, world: Matrix4, p: Projection, box: Sc
             let start = view.screen(a)
             let end = view.screen(b)
             if start.z <= p.near or end.z <= p.near: continue
+            if wholly and not (box.holds(start.x, start.y) and box.holds(end.x, end.y)): continue
             let along = box.clip(start, end) else continue
             if try view.edge_shows(a, b, start, end, along): mark(&bits, edge, operation)
+    elif wholly:
+        # Faces wholly inside, shown there (by the id pass, or rays).
+        var seen = try BitsBuilder.zeros(count)
+        defer seen.close()
+        if let image = view.ids:
+            faces_seen(&seen, image, box, count, 0)
+        for face in 0..<count:
+            if not view.face_inside((i64)face): continue
+            if view.ids != none:
+                if not seen.view().get(face): continue
+            elif rays and not (try view.face_seen((i64)face)):
+                continue
+            mark(&bits, face, operation)
     elif view.ids != none:
         faces_seen(&bits, view.ids else error(errors.invalid, "no id image"), box, count, operation)
     else:
@@ -241,6 +260,15 @@ struct BoxView:
         let middle = (along.start + along.end) * 0.5
         let origin = self.place(a)
         return try self.reaches(origin.add(self.place(b).subtract(origin).multiply_scalar(middle)))
+
+    ## Whether every corner of face `face` is on screen inside the box.
+    func face_inside(face: i64) -> bool:
+        let offsets = self.mesh.offset_span()
+        let corners = self.mesh.corner_span()
+        for corner in (usize)offsets[(usize)face]..<(usize)offsets[(usize)face + 1]:
+            let at = self.screen((i64)corners[corner])
+            if at.z <= self.p.near or not self.box.holds(at.x, at.y): return false
+        return true
 
     ## Whether face `face` meets the box on screen: one of its sides crosses
     ## it, or (all in front of the camera) it holds the box's middle.
