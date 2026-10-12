@@ -427,6 +427,15 @@ func curvature_map(view: View*, image: u8[]) -> !:
     try view.renderer.value().set_curvature(0, 10.0)
     try view.draw(image)
     assert(image[at + 1] > image[at])
+    # The radius band: a unit sphere is tighter than 2 (magenta), flatter
+    # than 0.5 (grey).
+    try view.renderer.value().set_curvature(0, 0.0, 2.0, 0.0)
+    try view.draw(image)
+    assert(image[at] > 150 and image[at + 1] < 120 and image[at + 2] > 150)
+    try view.renderer.value().set_curvature(0, 0.0, 0.0, 0.5)
+    try view.draw(image)
+    assert(math.abs((f64)image[at] - (f64)image[at + 1]) < 8.0 and math.abs((f64)image[at + 1] - (f64)image[at + 2]) < 8.0)
+    try view.renderer.value().set_curvature(0)
     let grid = try MeshPrimitives.grid(4.0, 8)
     defer grid.release()
     try view.camera.value().set_position(Vector3(0.0, 4.0, 0.5))
@@ -438,6 +447,28 @@ func curvature_map(view: View*, image: u8[]) -> !:
     try view.renderer.value().set_shading(0)
     try view.camera.value().set_position(Vector3(0.0, 1.0, 5.0))
     try view.camera.value().look_at(Vector3(0.0, 1.0, 0.0))
+
+## Draft shading: the sphere's middle faces the camera; pulled toward the
+## camera it has all the draft (green), pulled up none (yellow, within the
+## angle asked for), pulled away it faces backwards (red).
+func draft_map(view: View*, image: u8[]) -> !:
+    try view.camera.value().set_position(Vector3(0.0, 1.0, 5.0))
+    try view.camera.value().look_at(Vector3(0.0, 1.0, 0.0))
+    let sphere = try MeshPrimitives.sphere(1.0, 48)
+    defer sphere.release()
+    try view.show(sphere, false)
+    let at = (usize)((height // 2 * width + width // 2) * 4)
+    try view.renderer.value().set_draft(3.0)
+    try view.renderer.value().set_shading(7, axis = Vector3(0.0, 0.0, 1.0))
+    try view.draw(image)
+    assert(image[at + 1] > 150 and image[at] < 120 and image[at + 2] < 120)
+    try view.renderer.value().set_shading(7, axis = Vector3(0.0, 1.0, 0.0))
+    try view.draw(image)
+    assert(image[at] > 150 and image[at + 1] > 120 and image[at + 2] < 100)
+    try view.renderer.value().set_shading(7, axis = Vector3(0.0, 0.0, -1.0))
+    try view.draw(image)
+    assert(image[at] > 150 and image[at + 1] < 100 and image[at + 2] < 100)
+    try view.renderer.value().set_shading(0)
 
 pub func main(arguments: str[]) -> i32!:
     # Metal's validation, read when the device is made
@@ -480,10 +511,11 @@ pub func main(arguments: str[]) -> i32!:
     try equivalence(&view, moved, false, legacy_image, image, 24)
     try zebra(&view, image)
     try curvature_map(&view, image)
+    try draft_map(&view, image)
     try picking(&view, cube, image)
     try occlusion(&view, cube, image)
     try ground_grid(&view, cube, image)
     try two_sided(&view, cube, legacy_image, image)
     try subdivided(&view, cube, image, legacy_image)
-    print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded; inside-out meshes light on the eye's side; curvature maps; GPU face picking and selection tint")
+    print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded; inside-out meshes light on the eye's side; curvature maps and their radius band; draft against a pull direction; GPU face picking and selection tint")
     return 0

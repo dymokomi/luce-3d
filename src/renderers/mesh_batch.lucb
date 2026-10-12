@@ -28,7 +28,8 @@ let tag_flags: u8 = 10
 let chunk_triangles: usize = 11184810
 
 ## How surfaces are shaded: a luce-gpu Shading mode and the zebra / isophote
-## stripe settings. Stripes run around (cylinder) or along (planar) `axis`.
+## stripe settings. Stripes run around (cylinder) or along (planar) `axis`;
+## draft shading measures against `axis` as its pull direction.
 pub struct MeshShading:
     pub var mode: gpu.Shading = gpu.Shading.lit
     pub var stripes: f64 = 20.0
@@ -42,6 +43,12 @@ pub struct MeshShading:
     ## larger |k|) and the value the map spans (0: the 98th percentile).
     pub var curvature: i64 = 0
     pub var curvature_range: f64 = 0.0
+    ## Curvature mode's radius band: smallest radii under `band_low` draw
+    ## magenta, over `band_high` grey (0: no limit).
+    pub var band_low: f64 = 0.0
+    pub var band_high: f64 = 0.0
+    ## Draft mode: the draft angle asked for, in degrees.
+    pub var draft: f64 = 1.0
 
 ## Faces tinted with an accent (a face selection): one bit per face of the
 ## topology whose corners array is `topology`. `key` names the bits' GPU copy.
@@ -122,6 +129,8 @@ pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh:
             block[gpu.mesh_mode + 2] = (f32)curvature.1
             block[gpu.mesh_curvature] = (f32)shading.curvature
             block[gpu.mesh_curvature + 1] = (f32)curvature.2
+            block[gpu.mesh_curvature + 2] = (f32)shading.band_low
+            block[gpu.mesh_curvature + 3] = (f32)shading.band_high
         else:
             let colors = try color_buffer(arrays, mesh)
             if let buffer = colors.0: buffers.colors = buffer
@@ -226,6 +235,7 @@ func parameters(mesh: const Mesh*, world: Matrix4, projection: Projection, light
     block[gpu.mesh_zebra_axis] = (f32)shading.axis.x
     block[gpu.mesh_zebra_axis + 1] = (f32)shading.axis.y
     block[gpu.mesh_zebra_axis + 2] = (f32)shading.axis.z
+    block[gpu.mesh_zebra_axis + 3] = (f32)shading.draft
     block[gpu.mesh_zebra_dark] = (f32)shading.dark.red
     block[gpu.mesh_zebra_dark + 1] = (f32)shading.dark.green
     block[gpu.mesh_zebra_dark + 2] = (f32)shading.dark.blue

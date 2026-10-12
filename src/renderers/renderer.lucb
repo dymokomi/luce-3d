@@ -99,24 +99,35 @@ pub struct Renderer:
         self.flat = value
 
     ## Surface shading of polygon meshes: 0 lit, 1 flat, 2 zebra, 3 isophotes,
-    ## 4 normals, 5 unlit. Zebra and isophote stripes: `stripes` over a turn
-    ## (or across the planar model), `duty` the dark share, around `axis`.
+    ## 4 normals, 5 unlit, 6 curvature, 7 draft. Zebra and isophote stripes:
+    ## `stripes` over a turn (or across the planar model), `duty` the dark
+    ## share, around `axis`; draft against `axis` as the pull direction.
     ## Shading is draw state: changing it uploads nothing.
     pub func set_shading(mode: i64, stripes: f64 = 20.0, duty: f64 = 0.5, axis: Vector3 = Vector3(0.0, 1.0, 0.0), planar: bool = false, stripes_only: bool = false) -> !:
-        if mode < 0 or mode > 6 or not (stripes >= 1.0 and stripes <= 256.0) or not (duty > 0.0 and duty < 1.0) or not axis.is_finite() or axis.length() < 0.000001:
-            error(errors.invalid, "shading needs a mode 0..6, 1..256 stripes, a duty in (0,1) and a nonzero axis")
-        let kind = self.shading.curvature
-        let range = self.shading.curvature_range
-        self.shading = MeshShading(mode = gpu.Shading((u8)mode), stripes = stripes, duty = duty, planar = planar, stripes_only = stripes_only, axis = try axis.normalized(), curvature = kind, curvature_range = range)
+        if mode < 0 or mode > 7 or not (stripes >= 1.0 and stripes <= 256.0) or not (duty > 0.0 and duty < 1.0) or not axis.is_finite() or axis.length() < 0.000001:
+            error(errors.invalid, "shading needs a mode 0..7, 1..256 stripes, a duty in (0,1) and a nonzero axis")
+        let kept = self.shading
+        self.shading = MeshShading(mode = gpu.Shading((u8)mode), stripes = stripes, duty = duty, planar = planar, stripes_only = stripes_only, axis = try axis.normalized(), curvature = kept.curvature,
+                                   curvature_range = kept.curvature_range, band_low = kept.band_low, band_high = kept.band_high, draft = kept.draft)
 
     ## The curvature map (shading mode 6): which value (0 mean, 1 Gaussian,
-    ## 2 k1, 3 k2, 4 the larger |k|) and the value it spans (0: automatic,
-    ## the 98th percentile of the mesh's values).
-    pub func set_curvature(kind: i64, range: f64 = 0.0) -> !:
-        if kind < 0 or kind > 4 or not (range >= 0.0 and range < 1.0e12):
-            error(errors.invalid, "curvature needs a value kind 0..4 and a finite range, 0 for automatic")
+    ## 2 k1, 3 k2, 4 the larger |k|), the value it spans (0: automatic, the
+    ## 98th percentile of the mesh's values), and its radius band: where the
+    ## smallest radius of curvature is under `band_low` the map draws
+    ## magenta, over `band_high` grey (0: no limit).
+    pub func set_curvature(kind: i64, range: f64 = 0.0, band_low: f64 = 0.0, band_high: f64 = 0.0) -> !:
+        if kind < 0 or kind > 4 or not (range >= 0.0 and range < 1.0e12) or not (band_low >= 0.0 and band_low < 1.0e12) or not (band_high >= 0.0 and band_high < 1.0e12):
+            error(errors.invalid, "curvature needs a value kind 0..4, a finite range (0 automatic) and a finite radius band (0 off)")
         self.shading.curvature = kind
         self.shading.curvature_range = range
+        self.shading.band_low = band_low
+        self.shading.band_high = band_high
+
+    ## Draft shading (mode 7): the draft angle asked for, in degrees (0 to
+    ## 89), against set_shading's axis as the pull direction.
+    pub func set_draft(angle: f64) -> !:
+        if not (angle >= 0.0 and angle < 89.0): error(errors.invalid, "a draft angle is 0 to 89 degrees")
+        self.shading.draft = angle
 
     ## Draw every polygon mesh's edges `width` logical pixels wide (0: none),
     ## from the same GPU arrays as its surfaces; `surfaces` false leaves only
