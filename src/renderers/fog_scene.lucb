@@ -15,7 +15,7 @@ import memory
 from luce_std import math
 import errors
 from luce_geocore.geocore import Vector3
-from cameras.perspective import PerspectiveCamera, Projection
+from cameras.camera import Camera, Projection
 from core.material import Color, check_color
 from renderers.fog_volume import FogVolume, corner_of
 from renderers.fog_groups import FogPass, StackedAtlas, fog_passes, stack_holds, stack_atlases
@@ -54,7 +54,7 @@ pub struct FogScene:
     ## colored `key` (intensity folded in) and a sky light of `ambient`. A
     ## volume's first draw sends its atlas. A standalone frame (no device)
     ## draws nothing.
-    pub func draw(volumes: const interop.Reference[FogVolume][], camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget],
+    pub func draw(volumes: const interop.Reference[FogVolume][], camera: interop.Reference[Camera], target: interop.View[gpu.RenderTarget],
                   key: Color = Color(0.85, 0.85, 0.85), ambient: f64 = 0.35) -> !:
         try check_color(key)
         if not (ambient >= 0.0 and ambient <= 100.0): error(errors.invalid, "ambient light must be in 0..100")
@@ -251,20 +251,19 @@ pub let fog_scene_type: interop.Type[FogScene] = interop.Type[FogScene]("FogScen
 ## hull of their corners; the whole view when one reaches behind the near
 ## plane), written into `out` (`outline_vertices` at most); how many.
 func cover(projection: Projection, drawn: FogVolume*[], group: const usize[], out: gpu.Vertex[]) -> usize:
-    let forward = projection.backward.multiply_scalar(-1.0)
     var xs: f64[32]
     var ys: f64[32]
     var count: usize = 0
     for index in group:
         let box = drawn[index].texel_data().box
         for corner in 0..<(usize)8:
-            let relative = box.transform_point(corner_of(corner)).subtract(projection.position)
-            let depth = relative.dot(forward)
-            if depth <= projection.near:
+            let point = box.transform_point(corner_of(corner))
+            if projection.depth(point) <= projection.near:
                 let whole: f64[8] = [-1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0]
                 return fan(whole[..<8], 4, out)
-            xs[count] = relative.dot(projection.right) * projection.focal / projection.aspect / depth
-            ys[count] = relative.dot(projection.up) * projection.focal / depth
+            let at = projection.clip(point)
+            xs[count] = at[0] / at[3]
+            ys[count] = at[1] / at[3]
             count += 1
     # Andrew's monotone chain: sort by x then y, lower then upper hull.
     var order: usize[32]
@@ -311,8 +310,10 @@ func fan(points: const f64[], count: usize, out: gpu.Vertex[]) -> usize:
 ## over `group`, in a view at `view` (x, y, width, height in frame pixels).
 func uniforms_of(projection: Projection, group: const usize[], key: Color, ambient: f64, view: f64[4]) -> f32[32]:
     let forward = projection.backward.multiply_scalar(-1.0)
-    let right = projection.right.multiply_scalar(projection.aspect / projection.focal)
-    let up = projection.up.multiply_scalar(1.0 / projection.focal)
+    # Offsets per unit of x and y: at view depth 1, or across the film.
+    let reach = projection.ortho if projection.orthographic() else 1.0 / projection.focal
+    let right = projection.right.multiply_scalar(projection.aspect * reach)
+    let up = projection.up.multiply_scalar(reach)
     let eye = projection.position
     var drawings: f32[4] = [0.0, 0.0, 0.0, 0.0]
     for at in 0..<group.length: drawings[at] = (f32)group[at]
@@ -323,7 +324,7 @@ func uniforms_of(projection: Projection, group: const usize[], key: Color, ambie
             (f32)key.red, (f32)key.green, (f32)key.blue, (f32)ambient,
             drawings[0], drawings[1], drawings[2], drawings[3],
             (f32)view[0], (f32)view[1], (f32)view[2], (f32)view[3],
-            0.0, 0.0, 0.0, 0.0]
+            1.0 if projection.orthographic() else 0.0, 0.0, 0.0, 0.0]
 
 ## Write `volume`'s numbers (shaders/fog.frag's `number`) into `out`, 8 rgba
 ## texels: the world-to-box rows, its texel counts and atlas columns, its

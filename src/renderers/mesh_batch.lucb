@@ -7,7 +7,7 @@ from luce_gpu import gpu
 import memory
 from luce_geocore.geocore import Mesh, Matrix4, Vector3
 from core.material import Color
-from cameras.perspective import Projection
+from cameras.camera import Projection
 from renderers.projection import projection_matrix
 from renderers.gpu_arrays import GpuArrays, ArrayKey
 from luce_geocore.core.growing import Growing
@@ -155,7 +155,7 @@ pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh:
         line[gpu.mesh_tint + 2] = (f32)wire_color.blue
         line[gpu.mesh_mode] = (f32)(u8)gpu.Shading.unlit
         line[gpu.mesh_line] = (f32)wire_width
-        line[gpu.mesh_line + 3] = 0.000001
+        line[gpu.mesh_line + 3] = (f32)projection.line_bias(0.000001)
         try gpu.draw_mesh(target, &wires, (usize)(try mesh.edge_count()) * 6, line, gpu.MeshKind.wires)
 
 ## Face ids of `mesh` from `base` + 1, into an rgba8_linear target (picking).
@@ -222,9 +222,12 @@ func parameters(mesh: const Mesh*, world: Matrix4, projection: Projection, light
         block[gpu.mesh_light_color + light * 4] = (f32)color.red
         block[gpu.mesh_light_color + light * 4 + 1] = (f32)color.green
         block[gpu.mesh_light_color + light * 4 + 2] = (f32)color.blue
-    block[gpu.mesh_eye] = (f32)projection.position.x
-    block[gpu.mesh_eye + 1] = (f32)projection.position.y
-    block[gpu.mesh_eye + 2] = (f32)projection.position.z
+    # The shaders look from the eye; an orthographic view looks along one
+    # direction everywhere, as from an eye that far back.
+    let eye = projection.position.add(projection.backward.multiply_scalar(projection.far * 10000.0)) if projection.orthographic() else projection.position
+    block[gpu.mesh_eye] = (f32)eye.x
+    block[gpu.mesh_eye + 1] = (f32)eye.y
+    block[gpu.mesh_eye + 2] = (f32)eye.z
     block[gpu.mesh_mode] = (f32)(u8)shading.mode
     block[gpu.mesh_mode + 1] = -1.0
     block[gpu.mesh_mode + 2] = -1.0

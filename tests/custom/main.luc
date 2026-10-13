@@ -1,4 +1,4 @@
-from luce_3d.graphics import Geometry, Material, Vertex, Bounds, Vector3, Color, Mesh, Scene, Renderer, PerspectiveCamera
+from luce_3d.graphics import Geometry, Material, Vertex, Bounds, Vector3, Color, Mesh, Scene, Renderer, Camera
 from luce_gpu.gpu import Frame
 from luce_gpu import gpu
 from luce_window import window
@@ -11,7 +11,7 @@ class Triangle: Geometry:
     var invalid_index: bool = false
     var renderer: Renderer? = none
     var scene: Scene? = none
-    var camera: PerspectiveCamera? = none
+    var camera: Camera? = none
     var target: gpu.RenderTarget? = none
     var reenter: bool = false
     var close_renderer: bool = false
@@ -64,7 +64,7 @@ pub func main(arguments: list[str]) -> int!:
     let mesh = Mesh(triangle, Blue())
     let scene = Scene()
     scene.add(mesh)
-    let camera = PerspectiveCamera()
+    let camera = Camera()
     let renderer = Renderer()
     let frame = Frame(window.Size(100.0, 100.0, 100.0, 100.0, 1.0))
     let target = frame.target()

@@ -2,7 +2,7 @@
 ## screen cell. Visibility comes from the depth buffer, not a ray per point.
 from luce_gpu import gpu
 from luce_std import math
-from cameras.perspective import Projection
+from cameras.camera import Projection
 from luce_geocore.core.growing import Growing
 from renderers.edit_screen import Screen
 
@@ -73,12 +73,15 @@ pub struct Markers:
                 self.nearest.items[slot] = (i64)id
 
     func quad(screen: const Screen*, id: usize, radius: f64, p: Projection, width: f64, height: f64, color: gpu.Color) -> !:
-        let w = (f64)screen.depths.items[id]
+        let depth = (f64)screen.depths.items[id]
+        # Clip space: w is the depth in perspective, 1 in orthographic.
+        let w = 1.0 if p.orthographic() else depth
         let x = ((f64)screen.xs.items[id] / (width * 0.5) - 1.0) * w
         let y = (1.0 - (f64)screen.ys.items[id] / (height * 0.5)) * w
         # Pull the marker toward the eye by twice its own world size so the
         # surface it sits on does not clip it.
-        let z = p.far * (w - p.near) / (p.far - p.near) - 4.0 * radius * p.far * p.near / (p.focal * height * (p.far - p.near))
+        let pull = 2.0 * radius * p.pixel(depth, height)
+        let z = (depth - pull - p.near) / (p.far - p.near) if p.orthographic() else p.far * (w - p.near) / (p.far - p.near) - 4.0 * radius * p.far * p.near / (p.focal * height * (p.far - p.near))
         let rx = radius * 2.0 / width * w
         let ry = radius * 2.0 / height * w
         let corners: f64[12] = [-rx, -ry, rx, -ry, rx, ry, -rx, -ry, rx, ry, -rx, ry]

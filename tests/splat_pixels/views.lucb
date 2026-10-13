@@ -5,7 +5,7 @@ from luce_gpu import gpu
 import interop
 import memory
 from luce_3d import graphics as three
-from luce_3d.graphics import GaussianSplats, SplatScene, PerspectiveCamera, WireRenderer, Vector3
+from luce_3d.graphics import GaussianSplats, SplatScene, Camera, WireRenderer, Vector3
 
 ## An opaque axis-aligned quad facing the camera: x0..x1 by y0..y1 at depth z.
 pub struct Wall:
@@ -18,7 +18,7 @@ pub struct Wall:
 
 pub struct View:
     var texture: gpu.Texture
-    pub let camera: interop.Reference[PerspectiveCamera]
+    pub let camera: interop.Reference[Camera]
     pub let width: u32
     pub let height: u32
     ## The last read: four f64 (linear RGBA) per pixel.
@@ -27,8 +27,8 @@ pub struct View:
 
     pub func init(device: gpu.Device, width: u32, height: u32, read: bool = true, far: f64 = 100.0) -> !:
         self.texture = try gpu.Texture.create(device, width, height, gpu.Format.rgba16_float)
-        self.camera = try interop.Reference[PerspectiveCamera].adopt(new PerspectiveCamera(40.0, (f64)width / (f64)height, 0.1, far) in memory.heap,
-                                                                     three.perspective_camera_type, memory.heap)
+        self.camera = try interop.Reference[Camera].adopt(new Camera(40.0, (f64)width / (f64)height, 0.1, far) in memory.heap,
+                                                                     three.camera_type, memory.heap)
         self.width = width
         self.height = height
         let pixels = (usize)(width * height)

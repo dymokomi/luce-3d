@@ -16,7 +16,7 @@ from luce_std import math
 import errors
 from luce_geocore.geocore import Vector3, Matrix4, GeometrySet, Bounds, SplatOccluders
 from luce_geocore.kernel import Selection, selection_bits, OccludingCloud, add_occluding_cloud
-from cameras.perspective import PerspectiveCamera, Projection
+from cameras.camera import Camera, Projection
 from renderers.splat_data import SplatData, splat_data, splat_key, cloud_count
 from renderers.splat_view import SplatView, SplatTimes, CloudInput, signature_words, open_view, close_view
 from renderers.splat_shaders import splat_frag_words, splat_frag_msl, splat_frag_fast_math
@@ -31,6 +31,7 @@ let flag_lod: u32 = 32
 let flag_antialiased: u32 = 64
 ## Faded (drawn as context around what is edited): grey and see-through.
 let flag_faded: u32 = 128
+let flag_orthographic: u32 = 256
 
 ## How a cloud draws.
 pub enum SplatMode as u8:
@@ -204,7 +205,7 @@ pub struct GaussianSplats:
 
     ## Draw it alone over what `target` holds, through `camera`. A standalone
     ## frame (no device) draws nothing.
-    pub func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget]) -> !:
+    pub func draw(camera: interop.Reference[Camera], target: interop.View[gpu.RenderTarget]) -> !:
         let native = try target.get()
         var device = gpu.device_of(native) catch failure:
             if failure.code != gpu.unavailable: error(failure.code, failure.message)
@@ -254,8 +255,10 @@ pub struct GaussianSplats:
         let buffers = self.buffers else trap("splats not uploaded")
         let eye = projection.position.subtract(self.data.origin)
         let forward = projection.backward.multiply_scalar(-1.0)
-        let fx = projection.focal / projection.aspect * width * 0.5
-        let fy = projection.focal * height * 0.5
+        # Focal lengths in pixels; in orthographic, pixels per unit.
+        let lens = projection.scale(1.0)
+        let fx = lens / projection.aspect * width * 0.5
+        let fy = lens * height * 0.5
         let centers = look.mode == SplatMode.centers or not self.data.splats
         var flags: u32 = 0
         if self.data.srgb: flags = flags | flag_srgb
@@ -266,6 +269,7 @@ pub struct GaussianSplats:
         if self.has_lod(): flags = flags | flag_lod
         if self.data.antialiased: flags = flags | flag_antialiased
         if self.faded: flags = flags | flag_faded
+        if projection.orthographic(): flags = flags | flag_orthographic
         let used = (look.sh_degree + 1) * (look.sh_degree + 1) - 1
         let rotation = self.data.rotation
         let uniforms: f32[32] = [(f32)eye.x, (f32)eye.y, (f32)eye.z, (f32)projection.near,
@@ -323,7 +327,7 @@ pub func check_look(look: SplatLook) -> !:
 ## Draw `clouds` sorted together in `view` with `look`: upload what is new,
 ## sort when the clouds or the camera changed, then draw. `target` is on
 ## `device`, `width` by `height` pixels, `scale` pixels a point.
-pub func draw_clouds(view: SplatView*, clouds: GaussianSplats*[], look: SplatLook, camera: interop.Reference[PerspectiveCamera], target: const gpu.RenderTarget*,
+pub func draw_clouds(view: SplatView*, clouds: GaussianSplats*[], look: SplatLook, camera: interop.Reference[Camera], target: const gpu.RenderTarget*,
                      device: gpu.Device, width: f64, height: f64, scale: f64) -> !:
     if not view.on(device): error(errors.invalid, "splats draw on the device their view was opened on")
     var total: i64 = 0

@@ -10,7 +10,7 @@ import ownership
 import errors
 from luce_geocore.geocore import Vector3, Mesh, Selection
 from luce_geocore.kernel import selection_bits, trailing_zeros, selection_weights
-from cameras.perspective import PerspectiveCamera, Projection
+from cameras.camera import Camera, Projection
 from renderers.wire import WireRenderer
 from renderers.projection import projection_matrix
 from renderers.retained import RetainedBatch
@@ -180,7 +180,7 @@ pub struct EditOverlay:
     ## everything in that color, so a selection behind or inside a surface
     ## (a pick mesh the viewport does not draw, such as SDF proxies) still
     ## shows; the visible parts then draw in `accent` over it.
-    pub func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget],
+    pub func draw(camera: interop.Reference[Camera], target: interop.View[gpu.RenderTarget],
                   wire: gpu.Color, accent: gpu.Color, point: gpu.Color, wires: bool = true, hidden: gpu.Color? = none) -> !:
         let current = self.mesh else return
         let mesh = try current.get()
@@ -245,7 +245,7 @@ pub struct EditOverlay:
     ## The point (mode 0) or edge (mode 1) nearest the cursor on the visible
     ## face under it, within 11 pixels, or -1. `face` is that face when the
     ## caller knows it (a GPU pick; -1 for none); otherwise one BVH ray.
-    pub func pick(camera: interop.Reference[PerspectiveCamera], x: f64, y: f64, width: f64, height: f64, face: i64 = -2) -> i64!:
+    pub func pick(camera: interop.Reference[Camera], x: f64, y: f64, width: f64, height: f64, face: i64 = -2) -> i64!:
         let current = self.mesh else return -1
         if self.mode == 2 or width <= 0.0 or height <= 0.0: return -1
         let projection = try camera.value().projection(math.max(1.0, width) / math.max(1.0, height))
@@ -259,7 +259,7 @@ pub struct EditOverlay:
             if (try mesh.face_point(hit, at)) == found: return (try mesh.face_offset(hit)) + at
         return -1
 
-    func draw_wires(mesh: const Mesh*, camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color) -> !:
+    func draw_wires(mesh: const Mesh*, camera: interop.Reference[Camera], target: interop.View[gpu.RenderTarget], color: gpu.Color) -> !:
         let native = try target.get()
         var device = gpu.device_of(native) catch failure:
             if failure.code != gpu.unavailable: error(failure.code, failure.message)
@@ -277,8 +277,8 @@ pub struct EditOverlay:
                     vertices[edge] = gpu.Vertex(x = (f32)a.x, y = (f32)a.y, z = (f32)a.z, red = (f32)b.x, green = (f32)b.y, blue = (f32)b.z)
                 try self.wires.upload(device, vertices, true)
             let size = try native.size()
-            let matrix = projection_matrix(try camera.value().projection(size.width / size.height))
-            try self.wires.draw(native, matrix, color, 1.0)
+            let projection = try camera.value().projection(size.width / size.height)
+            try self.wires.draw(native, projection_matrix(projection), color, 1.0, bias = projection.line_bias(0.000001))
             return
         # Deviceless frames (tests, recording) expand wires on the CPU into the
         # frame's vertex budget; a wireframe that cannot fit is left out.

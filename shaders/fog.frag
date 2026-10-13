@@ -28,7 +28,8 @@
 // The pass draws the outline of its boxes on screen. A pixel's place across the
 // view (x and y in -1..1, y up) gives its ray: forward + x * right + y * up,
 // scaled so the ray parameter is the view depth (what the depth buffer holds, as
-// clip z / w).
+// clip z / w). An orthographic view (lens.x) instead starts each ray at the eye
+// plus x * right + y * up and runs it along forward; its depth buffer is linear.
 #version 450
 layout(location = 0) in vec4 vertex_color;
 layout(location = 0) out vec4 fragment_color;
@@ -40,6 +41,7 @@ layout(push_constant) uniform Params {
     vec4 key;       // the key light's color times intensity; w the ambient (sky) intensity
     vec4 drawings;  // the table rows of this pass's drawings (first `right.w` of them)
     vec4 view;      // the view's corner in the frame and its size, in pixels
+    vec4 lens;      // x > 0.5: orthographic
 } params;
 layout(set = 0, binding = 1) uniform sampler2D atlas;
 layout(set = 0, binding = 2) uniform sampler2D table;
@@ -64,9 +66,9 @@ struct Drawing {
     int strip;     // the table row of its emission strip
 };
 
-// Drawing `index` of the table as the ray eye + ray * depth meets it, its
+// Drawing `index` of the table as the ray origin + ray * depth meets it, its
 // stretch clipped to near..scene.
-Drawing meet(float index, vec3 ray, float near, float scene) {
+Drawing meet(float index, vec3 origin, vec3 ray, float near, float scene) {
     Drawing g;
     int row = noise_rows + 2 * int(index);
     vec4 m0 = texelFetch(table, ivec2(0, row), 0);
@@ -78,8 +80,7 @@ Drawing meet(float index, vec3 ray, float near, float scene) {
     g.glow = texelFetch(table, ivec2(6, row), 0);
     g.bound = texelFetch(table, ivec2(7, row), 0);
     g.strip = row + 1;
-    vec3 eye = params.eye.xyz;
-    g.origin = vec3(dot(m0.xyz, eye) + m0.w, dot(m1.xyz, eye) + m1.w, dot(m2.xyz, eye) + m2.w);
+    g.origin = vec3(dot(m0.xyz, origin) + m0.w, dot(m1.xyz, origin) + m1.w, dot(m2.xyz, origin) + m2.w);
     g.direction = vec3(dot(m0.xyz, ray), dot(m1.xyz, ray), dot(m2.xyz, ray));
     // Slabs: where each coordinate crosses 0 and 1 (a zero component is inside
     // for every depth or none).
@@ -303,20 +304,23 @@ vec4 march_one(Drawing g, float first, float last, float span) {
 void main() {
     vec2 across = (gl_FragCoord.xy - params.view.xy) / params.view.zw;
     vec2 at = vec2(across.x * 2.0 - 1.0, 1.0 - across.y * 2.0);
-    vec3 ray = params.forward.xyz + at.x * params.right.xyz + at.y * params.up.xyz;
+    bool ortho = params.lens.x > 0.5;
+    vec3 film = at.x * params.right.xyz + at.y * params.up.xyz;
+    vec3 origin = ortho ? params.eye.xyz + film : params.eye.xyz;
+    vec3 ray = ortho ? params.forward.xyz : params.forward.xyz + film;
     float span = length(ray);   // world length per unit of view depth
     // The scene's view depth at this pixel, from the depth buffer's clip z / w.
     float near = params.eye.w;
     float far = params.forward.w;
     float stored = texelFetch(scene_depth, ivec2(gl_FragCoord.xy), 0).r;
-    float scene = stored >= 1.0 ? far : far * near / (far - stored * (far - near));
+    float scene = stored >= 1.0 ? far : (ortho ? near + stored * (far - near) : far * near / (far - stored * (far - near)));
     vec4 color;
 #if GROUP
     members = int(params.right.w);
-    d0 = meet(params.drawings.x, ray, near, scene);
-    d1 = meet(params.drawings.y, ray, near, scene);
-    d2 = meet(params.drawings.z, ray, near, scene);
-    d3 = meet(params.drawings.w, ray, near, scene);
+    d0 = meet(params.drawings.x, origin, ray, near, scene);
+    d1 = meet(params.drawings.y, origin, ray, near, scene);
+    d2 = meet(params.drawings.z, origin, ray, near, scene);
+    d3 = meet(params.drawings.w, origin, ray, near, scene);
     float first = min(d0.enter, d1.enter);
     float last = max(d0.enter < never ? d0.leave : 0.0, d1.enter < never ? d1.leave : 0.0);
     if (members > 2 && d2.enter < never) {
@@ -332,7 +336,7 @@ void main() {
     }
     color = march_group(first, last, span);
 #else
-    Drawing g0 = meet(params.drawings.x, ray, near, scene);
+    Drawing g0 = meet(params.drawings.x, origin, ray, near, scene);
     if (g0.enter >= g0.leave) {
         discard;
     }

@@ -6,7 +6,7 @@ import memory
 from luce_window import window
 import native
 from luce_3d import graphics as three
-from luce_3d.graphics import Scene, Mesh, BufferGeometry, Geometry, Material, Object3D, Vertex, Vector3, Color, MeshBasicMaterial, PerspectiveCamera, Renderer
+from luce_3d.graphics import Scene, Mesh, BufferGeometry, Geometry, Material, Object3D, Vertex, Vector3, Color, MeshBasicMaterial, Camera, Renderer
 
 func rendered(result: interop.Outcome[unit]) -> !:
     defer result.release()
@@ -21,7 +21,7 @@ func object_mesh(shape: interop.Reference[BufferGeometry], color: Color) -> inte
     defer appearance.release()
     return try interop.Reference[Mesh].adopt(new Mesh(geometry, appearance) in memory.heap, three.mesh_type, memory.heap)
 
-func frame(scene: interop.Interface[Object3D], camera: interop.Reference[PerspectiveCamera],
+func frame(scene: interop.Interface[Object3D], camera: interop.Reference[Camera],
            renderer: interop.Reference[Renderer], host: window.Window, surface: gpu.Surface, blue: bool) -> !:
     while let event = try host.poll():
         _ = event
@@ -65,7 +65,7 @@ pub func main(arguments: str[]) -> i32!:
     try blue.value().set_position(Vector3(0.0, 0.0, 1.0))
     try scene.value().add(blue_object)
     try scene.value().add(red_object)
-    let camera = try interop.Reference[PerspectiveCamera].adopt(new PerspectiveCamera(50.0, 1.0, 1.0, 100.0) in memory.heap, three.perspective_camera_type, memory.heap)
+    let camera = try interop.Reference[Camera].adopt(new Camera(50.0, 1.0, 1.0, 100.0) in memory.heap, three.camera_type, memory.heap)
     defer camera.release()
     let renderer = try interop.Reference[Renderer].adopt(new Renderer() in memory.heap, three.renderer_type, memory.heap)
     defer renderer.release()

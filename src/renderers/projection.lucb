@@ -1,10 +1,21 @@
-## Column-major world-to-clip matrix shared by surface and wire GPU batches.
-from cameras.perspective import Projection
+## Column-major world-to-clip matrix shared by surface and wire GPU batches:
+## perspective or orthographic as the projection is (Projection.clip maps a
+## point the same way on the CPU).
+from cameras.camera import Projection
 
 pub func projection_matrix(p: Projection) -> f32[16]:
+    let w = p.backward.multiply_scalar(-1.0)
+    if p.ortho > 0.0:
+        let r = p.right.multiply_scalar(1.0 / (p.ortho * p.aspect))
+        let u = p.up.multiply_scalar(1.0 / p.ortho)
+        let z = w.multiply_scalar(1.0 / (p.far - p.near))
+        return [(f32)r.x, (f32)u.x, (f32)z.x, 0.0,
+                (f32)r.y, (f32)u.y, (f32)z.y, 0.0,
+                (f32)r.z, (f32)u.z, (f32)z.z, 0.0,
+                (f32)-r.dot(p.position), (f32)-u.dot(p.position),
+                (f32)(-z.dot(p.position) - p.near / (p.far - p.near)), 1.0]
     let r = p.right.multiply_scalar(p.focal / p.aspect)
     let u = p.up.multiply_scalar(p.focal)
-    let w = p.backward.multiply_scalar(-1.0)
     let z = w.multiply_scalar(p.far / (p.far - p.near))
     return [(f32)r.x, (f32)u.x, (f32)z.x, (f32)w.x,
             (f32)r.y, (f32)u.y, (f32)z.y, (f32)w.y,

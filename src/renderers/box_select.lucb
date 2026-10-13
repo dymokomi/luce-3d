@@ -12,7 +12,7 @@ from luce_std import math
 import errors
 from luce_geocore.geocore import Vector3, Matrix4, Mesh, Selection
 from luce_geocore.kernel import BitsBuilder, GroupReport, Domain, adopt_selection, selection_bits
-from cameras.perspective import PerspectiveCamera, Projection
+from cameras.camera import Camera, Projection
 from renderers.edit_screen import project
 
 ## A screen rectangle in logical pixels, y down.
@@ -95,7 +95,7 @@ pub struct BoxSelect:
     ## taken from (2). With `visible_only`, only what view rays reach
     ## (Renderer.select_box asks the GPU instead, once a frame drew `mesh`);
     ## with `wholly`, only edges and faces wholly inside the box.
-    pub static func select(mesh: interop.Reference[Mesh], camera: interop.Reference[PerspectiveCamera], current: interop.Reference[Selection],
+    pub static func select(mesh: interop.Reference[Mesh], camera: interop.Reference[Camera], current: interop.Reference[Selection],
                            x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64, operation: i64, visible_only: bool = true, wholly: bool = false) -> interop.Reference[Selection]!:
         let projection = try camera.value().projection(math.max(1.0, width) / math.max(1.0, height))
         return try box_selection(try mesh.get(), Matrix4(), projection, ScreenBox.between(x0, y0, x1, y1), width, height, try current.get(), operation, visible_only, none, wholly)
@@ -104,7 +104,7 @@ pub struct BoxSelect:
     ## (x0, y0) to (x1, y1) through the depth: one of its faces meets it,
     ## or for a mesh of points alone one of its points is inside. An object
     ## pick by box: its bounds answer first when they can.
-    pub static func touches(mesh: interop.Reference[Mesh], camera: interop.Reference[PerspectiveCamera], x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64) -> bool!:
+    pub static func touches(mesh: interop.Reference[Mesh], camera: interop.Reference[Camera], x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64) -> bool!:
         let geometry = try mesh.get()
         let p = try camera.value().projection(math.max(1.0, width) / math.max(1.0, height))
         let box = ScreenBox.between(x0, y0, x1, y1)
@@ -314,18 +314,17 @@ struct BoxView:
         let p = self.p
         let x = (self.box.left + self.box.right) * 0.5
         let y = (self.box.top + self.box.bottom) * 0.5
-        let direction = p.right.multiply_scalar((x / self.width * 2.0 - 1.0) * p.aspect / p.focal).add(p.up.multiply_scalar((1.0 - y / self.height * 2.0) / p.focal)).subtract(p.backward)
-        return try self.first_face(p.position.add(direction)) == face
+        return try self.first_face(p.ray_origin(x, y, self.width, self.height).add(p.ray_direction(x, y, self.width, self.height))) == face
 
     ## The face the view ray toward world point `point` meets first (-1: none).
     func first_face(point: Vector3) -> i64!:
-        let eye = self.inverse.transform_point(self.p.position)
+        let eye = self.inverse.transform_point(self.p.eye_for(point))
         return try self.mesh.ray_face(eye, try self.inverse.transform_point(point).subtract(eye).normalized())
 
     ## Whether the view ray to world point `point` meets nothing of the
     ## mesh before it.
     func reaches(point: Vector3) -> bool!:
-        let eye = self.inverse.transform_point(self.p.position)
+        let eye = self.inverse.transform_point(self.p.eye_for(point))
         let offset = self.inverse.transform_point(point).subtract(eye)
         let distance = offset.length()
         if distance < 1.0e-12: return true

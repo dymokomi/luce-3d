@@ -5,8 +5,8 @@
 layout(push_constant) uniform Params {
     vec4 eye_near;     // eye x, y, z; near plane distance
     vec4 right_far;    // camera right; far plane distance
-    vec4 up_fx;        // camera up; focal length in pixels along x
-    vec4 forward_fy;   // view direction; focal length in pixels along y
+    vec4 up_fx;        // camera up; focal length in pixels along x (orthographic: pixels per unit)
+    vec4 forward_fy;   // view direction; focal length in pixels along y (orthographic: pixels per unit)
     vec4 view;         // target width and height in pixels; first index (bits); LOD footprint in pixels (0: off)
     uvec4 counts;      // splats (the gather kernels: the whole index space); SH items stored per splat; SH items evaluated; flags
     vec4 look;         // alpha cull; splat scale; largest quad half axis in pixels; dot radius in pixels
@@ -22,6 +22,7 @@ const uint flag_marks = 16u;   // selection marks are stored: marked splats are 
 const uint flag_antialiased = 64u; // trained with Mip-Splatting's 2D filter: compensate opacity for the low-pass
 const uint flag_lod = 32u;     // merged levels (runs of 4, 16, 64, 256 splats) follow the splats
 const uint flag_faded = 128u;  // drawn as context: colors greyed, opacity lowered
+const uint flag_orthographic = 256u; // an orthographic view: fx and fy are pixels per unit, rays run along forward
 
 // Workgroups of 256 splats in a 2D grid: the splat this invocation handles.
 uint splat_index() {

@@ -8,7 +8,7 @@ import memory
 from luce_geocore import geocore
 from luce_geocore.geocore import Matrix4
 from luce_geocore.core.growing import Growing
-from cameras.perspective import Projection
+from cameras.camera import Projection
 from renderers.gpu_arrays import GpuArrays
 from renderers.mesh_batch import draw_polygon_ids
 

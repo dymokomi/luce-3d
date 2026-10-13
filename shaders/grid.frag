@@ -5,6 +5,9 @@
 // apart on screen, so finer levels fade in as the camera nears and out with distance and
 // at grazing angles, never thick enough to alias or moiré. The plane fades with distance
 // and toward the horizon. The two axis lines through the origin keep the vertex color.
+// The plane faces one world axis (lens.y: 0 x, 1 y, 2 z), at the height `forward.w`
+// along it. An orthographic view (lens.x) starts each pixel's ray on its film
+// (eye + x * right + y * up) and runs it along forward.
 // Drawn depth-tested without writing depth, as the overlay lines are (line.frag).
 #version 450
 layout(location = 0) in vec4 vertex_color;
@@ -12,12 +15,22 @@ layout(location = 0) out vec4 fragment_color;
 layout(push_constant) uniform Params {
     vec4 view;    // the target's placement and extent, physical pixels
     vec4 eye;     // the camera's position; w: the distance the grid has faded out by
-    vec4 right;   // the camera's right scaled by aspect / focal; w: the finest step
-    vec4 up;      // the camera's up scaled by 1 / focal; w: line width, physical pixels
+    vec4 right;   // the camera's right per unit of x in -1..1 (at depth 1 in perspective); w: the finest step
+    vec4 up;      // the camera's up per unit of y in -1..1 (likewise); w: line width, physical pixels
     vec4 forward; // the camera's forward; w: the plane's height
     vec4 major;   // the color of lines far apart on screen (alpha: opacity)
     vec4 minor;   // the color of lines close together
+    vec4 lens;    // x > 0.5: orthographic; y: the axis the plane faces
 } p;
+
+// `v`'s two coordinates across the plane, and the one along its axis.
+vec2 across(vec3 v, int axis) {
+    return axis == 0 ? v.zy : (axis == 1 ? v.xz : v.xy);
+}
+
+float along(vec3 v, int axis) {
+    return axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
+}
 
 // How much of a line of spacing `spacing` covers this pixel, along each axis, and how
 // visible the level is from its on-screen spacing (pixels between lines).
@@ -31,11 +44,15 @@ vec2 coverage(vec2 at, vec2 footprint, float spacing, out vec2 apart) {
 void main() {
     vec2 uv = (gl_FragCoord.xy - p.view.xy) / p.view.zw;
     vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-    vec3 ray = p.forward.xyz + p.right.xyz * ndc.x + p.up.xyz * ndc.y;
-    float t = (p.forward.w - p.eye.y) / ray.y;
+    bool ortho = p.lens.x > 0.5;
+    int facing = int(p.lens.y + 0.5);
+    vec3 film = p.right.xyz * ndc.x + p.up.xyz * ndc.y;
+    vec3 origin = ortho ? p.eye.xyz + film : p.eye.xyz;
+    vec3 ray = ortho ? p.forward.xyz : p.forward.xyz + film;
+    float t = (p.forward.w - along(origin, facing)) / along(ray, facing);
     if (!(t > 0.0)) discard;
-    vec3 hit = p.eye.xyz + ray * t;
-    vec2 at = hit.xz;
+    vec3 hit = origin + ray * t;
+    vec2 at = across(hit, facing);
     // World units a pixel covers along x and z; the larger one picks the levels.
     vec2 footprint = fwidth(at);
     float widest = max(footprint.x, footprint.y);
@@ -72,9 +89,9 @@ void main() {
     }
     // Fade with distance from the eye along the plane, and toward the horizon,
     // where the plane is seen edge on.
-    float distance = length(hit.xz - p.eye.xz);
+    float distance = length(at - across(origin, facing));
     float far_fade = 1.0 - smoothstep(0.25 * p.eye.w, p.eye.w, distance);
-    float edge_on = abs(ray.y) / length(ray);
+    float edge_on = abs(along(ray, facing)) / length(ray);
     float horizon = smoothstep(0.0, 0.08, edge_on);
     alpha *= far_fade * horizon;
     if (alpha <= 0.002) discard;

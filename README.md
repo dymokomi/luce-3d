@@ -8,7 +8,7 @@ hands the renderer a render target. All platform resources belong to the
 standard library.
 
 ```luce
-from luce_3d.graphics import Scene, Mesh, SphereGeometry, MeshLambertMaterial, Color, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
+from luce_3d.graphics import Scene, Mesh, SphereGeometry, MeshLambertMaterial, Color, Camera, AmbientLight, DirectionalLight, Renderer
 from luce_gpu.gpu import Frame
 from luce_window import window
 
@@ -20,7 +20,7 @@ pub func main(arguments: list[str]) -> int!:
     scene.add(AmbientLight(intensity = 0.25))
     scene.add(DirectionalLight(intensity = 0.8))
     let frame = Frame(window.Size(320.0, 240.0, 320.0, 240.0, 1.0))
-    Renderer().render(scene, PerspectiveCamera(), frame.target())
+    Renderer().render(scene, Camera(), frame.target())
     frame.close()
     return 0
 ```

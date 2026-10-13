@@ -5,7 +5,7 @@ import memory
 from luce_std import math
 import errors
 from luce_geocore.geocore import Vector3, Bounds
-from cameras.perspective import PerspectiveCamera
+from cameras.camera import Camera
 from renderers.wire import WireRenderer
 from renderers.projection import projection_matrix
 from renderers.retained import RetainedBatch
@@ -36,7 +36,7 @@ pub struct WireBatch:
     ## Draw the lines, depth tested. With `writes_depth` off they leave the depth
     ## buffer alone (the ground grid: splats and fog drawn later cover it) and
     ## are built each frame instead of retained.
-    pub func draw(camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color, width: f64 = 1.0, writes_depth: bool = true) -> !:
+    pub func draw(camera: interop.Reference[Camera], target: interop.View[gpu.RenderTarget], color: gpu.Color, width: f64 = 1.0, writes_depth: bool = true) -> !:
         if not writes_depth:
             try WireRenderer.lines(self.points, camera, target, color, width, writes_depth = false)
             return
@@ -55,8 +55,8 @@ pub struct WireBatch:
                     vertices[at] = gpu.Vertex(x = (f32)a.x, y = (f32)a.y, z = (f32)a.z, red = (f32)b.x, green = (f32)b.y, blue = (f32)b.z)
                 try self.retained.upload(device, vertices, true)
             let size = try native.size()
-            let matrix = projection_matrix(try camera.value().projection(size.width / size.height))
-            try self.retained.draw(native, matrix, color, width)
+            let projection = try camera.value().projection(size.width / size.height)
+            try self.retained.draw(native, projection_matrix(projection), color, width, bias = projection.line_bias(0.000001))
             return
         try WireRenderer.lines(self.points, camera, target, color, width)
 

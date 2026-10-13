@@ -4,7 +4,7 @@
 from luce_gpu import gpu
 from luce_geocore.geocore import Mesh, Matrix4
 from luce_geocore.kernel import subdivided_display, mesh_dispose
-from cameras.perspective import PerspectiveCamera
+from cameras.camera import Camera
 from core.material import Color
 from renderers.gpu_arrays import GpuArrays
 from renderers.mesh_batch import draw_polygon, MeshShading, FrameLighting
@@ -50,7 +50,7 @@ pub struct Silhouette:
     ## Meshes are already in world space, just like viewport picking meshes.
     ## A full-resolution mask with a logical-pixel stroke stays sharp on Retina.
     pub func draw(meshes: const interop.Reference[Mesh][], clouds: const interop.Reference[GaussianSplats][], volumes: const interop.Reference[FogVolume][],
-                  camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], color: gpu.Color,
+                  camera: interop.Reference[Camera], target: interop.View[gpu.RenderTarget], color: gpu.Color,
                   key: i64, look: SplatLook = SplatLook(), width: f64 = 3.0) -> !:
         if not (width > 0.0 and width <= 4.0): error(errors.invalid, "outline width must be in (0, 4]")
         if meshes.length + clouds.length + volumes.length == 0: return
@@ -81,7 +81,7 @@ pub struct Silhouette:
                       projection.right.x, projection.right.y, projection.right.z,
                       projection.up.x, projection.up.y, projection.up.z,
                       projection.backward.x, projection.backward.y, projection.backward.z,
-                      projection.focal, projection.aspect, projection.near, projection.far]:
+                      projection.focal, projection.aspect, projection.near, projection.far, projection.ortho]:
             var bits = value
             signature = (signature ^ memory.read[u64](&bits)) *% 0x100000001B3
         if not self.valid or signature != self.key:

@@ -8,7 +8,7 @@
 from luce_gpu import gpu
 import interop
 import errors
-from cameras.perspective import PerspectiveCamera
+from cameras.camera import Camera
 from renderers.gaussian_splats import GaussianSplats, SplatLook, draw_clouds, check_look
 from renderers.splat_view import SplatView, SplatTimes, open_view, close_view
 import memory
@@ -33,7 +33,7 @@ pub struct SplatScene:
     ## together. An unchanged view with the same clouds sorts nothing. A
     ## standalone frame (no device) draws nothing. `point_scale` overrides
     ## the target scale for offscreen passes; zero uses the target's scale.
-    pub func draw(clouds: const interop.Reference[GaussianSplats][], camera: interop.Reference[PerspectiveCamera], target: interop.View[gpu.RenderTarget], point_scale: f64 = 0.0) -> !:
+    pub func draw(clouds: const interop.Reference[GaussianSplats][], camera: interop.Reference[Camera], target: interop.View[gpu.RenderTarget], point_scale: f64 = 0.0) -> !:
         if clouds.length == 0: return
         let native = try target.get()
         var device = gpu.device_of(native) catch failure:

@@ -130,9 +130,9 @@ pub let ambient_type = ambient.ambient_type
 import lights.directional
 pub type DirectionalLight = directional.DirectionalLight
 pub let directional_type = directional.directional_type
-import cameras.perspective
-pub type PerspectiveCamera = perspective.PerspectiveCamera
-pub let perspective_camera_type = perspective.perspective_camera_type
+import cameras.camera
+pub type Camera = camera.Camera
+pub let camera_type = camera.camera_type
 
 import renderers.renderer
 pub type Renderer = renderer.Renderer

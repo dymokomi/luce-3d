@@ -107,7 +107,8 @@ vec3 splat_color(uint i, vec3 center, bool harmonics_on) {
     vec3 encoded = vec3(unpackHalf2x16(stored.x), unpackHalf2x16(stored.y).x);
     uint used = min(p.counts.y, p.counts.z);
     if (harmonics_on && used >= 3u) {
-        vec3 d = center - p.eye_near.xyz;
+        // An orthographic view looks along its forward from everywhere.
+        vec3 d = (p.counts.w & flag_orthographic) != 0u ? p.forward_fy.xyz : center - p.eye_near.xyz;
         float len = length(d);
         if (len > 0.0) {
             d /= len;
@@ -142,7 +143,8 @@ bool below_lod(uint s) {
     if (tz <= p.eye_near.w) return false;
     uint base = s * 6u;
     float widest = max(covariances[base], max(covariances[base + 3u], covariances[base + 5u]));
-    return 3.0 * p.look.y * sqrt(max(widest, 0.0)) * p.forward_fy.w < p.view.w * tz;
+    float scaled = (p.counts.w & flag_orthographic) != 0u ? 1.0 : tz;
+    return 3.0 * p.look.y * sqrt(max(widest, 0.0)) * p.forward_fy.w < p.view.w * scaled;
 }
 
 // A merged splat's summed member opacity at its center at `s` pixels per
@@ -204,9 +206,12 @@ void main() {
             float fx = p.up_fx.w;
             float fy = p.forward_fy.w;
             vec2 half_size = 0.5 * p.view.xy;
+            // Perspective divides by the depth; orthographic does not (w = 1).
+            bool ortho = (p.counts.w & flag_orthographic) != 0u;
+            float wz = ortho ? 1.0 : tz;
             // EWA's clamps of x/z and y/z: 1.3 tan(fov/2).
             vec2 limit = 1.3 * half_size / vec2(fx, fy);
-            vec2 at = vec2(fx * tx / tz, fy * ty / tz);
+            vec2 at = vec2(fx * tx / wz, fy * ty / wz);
             bool splats = (p.counts.w & flag_splats) != 0u && (p.counts.w & flag_centers) == 0u;
             float opacity = 1.0;
             vec2 h1 = vec2(p.look.w, 0.0);
@@ -217,7 +222,7 @@ void main() {
                 // A merged splat carries its members' summed opacity at its
                 // center, over 1 where they overlap; splat.frag composites
                 // them as 1 - exp(-z g).
-                if (merged) opacity = merged_opacity(source, c.w, fy / tz);
+                if (merged) opacity = merged_opacity(source, c.w, fy / wz);
                 shown = opacity >= p.look.x;
                 if (shown) {
                     uint base = source * 6u;
@@ -227,9 +232,10 @@ void main() {
                                       covariances[base + 2u], covariances[base + 4u], covariances[base + 5u]) * s2;
                     float txc = clamp(tx / tz, -limit.x, limit.x) * tz;
                     float tyc = clamp(ty / tz, -limit.y, limit.y) * tz;
-                    // T = J W, its rows in world terms.
-                    vec3 t0 = (fx / tz) * p.right_far.xyz - (fx * txc / (tz * tz)) * p.forward_fy.xyz;
-                    vec3 t1 = (fy / tz) * p.up_fx.xyz - (fy * tyc / (tz * tz)) * p.forward_fy.xyz;
+                    // T = J W, its rows in world terms; orthographic's J is
+                    // the constant scale.
+                    vec3 t0 = ortho ? fx * p.right_far.xyz : (fx / tz) * p.right_far.xyz - (fx * txc / (tz * tz)) * p.forward_fy.xyz;
+                    vec3 t1 = ortho ? fy * p.up_fx.xyz : (fy / tz) * p.up_fx.xyz - (fy * tyc / (tz * tz)) * p.forward_fy.xyz;
                     vec3 s_t0 = sigma * t0;
                     vec3 s_t1 = sigma * t1;
                     float a = dot(t0, s_t0) + 0.3;
@@ -266,9 +272,9 @@ void main() {
                     color = mix(color, vec3(dot(color, vec3(0.2126, 0.7152, 0.0722))), 0.85);
                     shown_opacity = opacity * 0.3;
                 }
-                vec2 to_clip = tz / half_size;
+                vec2 to_clip = wz / half_size;
                 uint slot = first + i;
-                records[slot * 3u] = vec4(at * to_clip, far * (tz - near) / (far - near), tz);
+                records[slot * 3u] = vec4(at * to_clip, (ortho ? 1.0 : far) * (tz - near) / (far - near), wz);
                 records[slot * 3u + 1u] = vec4(h1 * to_clip, h2 * to_clip);
                 // A dot says so with an opacity of 2 (splat.frag draws it opaque and round).
                 // A merged splat's record says so with its opacity negated.

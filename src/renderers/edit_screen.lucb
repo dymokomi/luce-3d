@@ -2,7 +2,7 @@
 ## point markers, and single points for picking.
 from luce_std import math
 from luce_geocore.geocore import Vector3, Mesh
-from cameras.perspective import Projection
+from cameras.camera import Projection
 from luce_geocore.core.growing import Growing
 
 ## Picking radius in logical pixels.
@@ -14,15 +14,15 @@ pub struct Screen:
     pub var xs: Growing[f32]
     pub var ys: Growing[f32]
     pub var depths: Growing[f32]
-    var key: f64[20]
+    var key: f64[21]
     pub var version: u64 = 0
 
     pub func init():
         self.xs = Growing[f32]()
         self.ys = Growing[f32]()
         self.depths = Growing[f32]()
-        var key: f64[20]
-        for at in 0..<(usize)20: key[at] = math.nan
+        var key: f64[21]
+        for at in 0..<(usize)21: key[at] = math.nan
         self.key = key
         self.version = 0
 
@@ -30,22 +30,20 @@ pub struct Screen:
         self.key[0] = math.nan
 
     pub func update(mesh: const Mesh*, p: Projection, width: f64, height: f64) -> !:
-        let key: f64[20] = [p.position.x, p.position.y, p.position.z, p.right.x, p.right.y, p.right.z, p.up.x, p.up.y, p.up.z,
-                            p.backward.x, p.backward.y, p.backward.z, p.focal, p.aspect, p.near, p.far, width, height, (f64)mesh.point_count(), 0.0]
+        let key: f64[21] = [p.position.x, p.position.y, p.position.z, p.right.x, p.right.y, p.right.z, p.up.x, p.up.y, p.up.z,
+                            p.backward.x, p.backward.y, p.backward.z, p.focal, p.aspect, p.near, p.far, p.ortho, width, height, (f64)mesh.point_count(), 0.0]
         var same = true
-        for at in 0..<(usize)20: same = same and key[at] == self.key[at]
+        for at in 0..<(usize)21: same = same and key[at] == self.key[at]
         if same: return
         let count = (usize)mesh.point_count()
         try self.xs.fill(count, 0.0)
         try self.ys.fill(count, 0.0)
         try self.depths.fill(count, -1.0)
         for id in 0..<count:
-            let offset = (try mesh.point((i64)id)).subtract(p.position)
-            let depth = -offset.dot(p.backward)
-            let d = math.max(p.near, depth)
-            self.xs.items[id] = (f32)((offset.dot(p.right) * p.focal / p.aspect / d + 1.0) * width * 0.5)
-            self.ys.items[id] = (f32)((1.0 - offset.dot(p.up) * p.focal / d) * height * 0.5)
-            self.depths.items[id] = (f32)depth if depth > p.near else -1.0
+            let at = p.screen(try mesh.point((i64)id), width, height)
+            self.xs.items[id] = (f32)at.x
+            self.ys.items[id] = (f32)at.y
+            self.depths.items[id] = (f32)at.z if at.z > p.near else -1.0
         self.key = key
         self.version += 1
 
@@ -57,18 +55,13 @@ pub struct Screen:
 ## Logical-pixel position and view depth of one point; depth <= near means
 ## the point is behind the camera.
 pub func project(point: Vector3, p: Projection, width: f64, height: f64) -> Vector3:
-    let offset = point.subtract(p.position)
-    let depth = -offset.dot(p.backward)
-    let d = math.max(p.near, depth)
-    return Vector3((offset.dot(p.right) * p.focal / p.aspect / d + 1.0) * width * 0.5, (1.0 - offset.dot(p.up) * p.focal / d) * height * 0.5, depth)
+    return p.screen(point, width, height)
 
 ## The face under the cursor: `known` when the caller has it (a GPU pick),
 ## else one BVH ray.
 pub func face_under(mesh: const Mesh*, p: Projection, x: f64, y: f64, width: f64, height: f64, known: i64 = -2) -> i64!:
     if known >= -1: return known
-    let direction = p.right.multiply_scalar((x / width * 2.0 - 1.0) * p.aspect / p.focal).add(
-        p.up.multiply_scalar((1.0 - y / height * 2.0) / p.focal)).subtract(p.backward)
-    return try mesh.ray_face(p.position, try direction.normalized())
+    return try mesh.ray_face(p.ray_origin(x, y, width, height), try p.ray_direction(x, y, width, height).normalized())
 
 ## Pick the point or edge of the face under the cursor nearest to it on
 ## screen, within `reach` pixels. The face comes from one BVH ray, so it is
@@ -133,11 +126,15 @@ func cad_edge_at(mesh: const Mesh*, p: Projection, x: f64, y: f64, width: f64, h
         let t = math.clamp(((x - start.x) * dx + (y - start.y) * dy) / math.max(1e-12, dx * dx + dy * dy), 0.0, 1.0)
         let distance = math.hypot(x - start.x - t * dx, y - start.y - t * dy)
         if distance >= best: continue
-        # Perspective-correct point on the actual segment.
-        let fraction = (t / end.z) / ((1.0 - t) / start.z + t / end.z)
-        let offset = a.add(b.subtract(a).multiply_scalar(fraction)).subtract(p.position)
+        # The point on the actual segment (perspective-correct), and whether
+        # the surface hides it from the view ray through it.
+        let fraction = t if p.orthographic() else (t / end.z) / ((1.0 - t) / start.z + t / end.z)
+        let point = a.add(b.subtract(a).multiply_scalar(fraction))
+        let on = p.screen(point, width, height)
+        let origin = p.ray_origin(on.x, on.y, width, height)
+        let offset = point.subtract(origin)
         let depth = offset.length()
-        let hit = try mesh.ray_distance(p.position, try offset.normalized())
+        let hit = try mesh.ray_distance(origin, try offset.normalized())
         if hit >= 0.0 and hit < depth - math.max(1e-5, depth * 1e-5): continue
         found = edge
         best = distance

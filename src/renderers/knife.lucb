@@ -9,7 +9,7 @@ import memory
 import errors
 from luce_geocore.geocore import Vector3, Mesh, Selection
 from luce_geocore.kernel import BitsBuilder, GroupReport, Domain, adopt_selection
-from cameras.perspective import PerspectiveCamera, Projection
+from cameras.camera import Camera, Projection
 from renderers.edit_screen import project
 
 ## A cutting plane: a point on it and its unit normal.
@@ -22,13 +22,17 @@ pub struct Knife:
 
     ## The plane through the eye containing the line from (x0, y0) to (x1, y1)
     ## of a `width` by `height` view.
-    pub static func plane(camera: interop.Reference[PerspectiveCamera], x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64) -> KnifePlane!:
+    pub static func plane(camera: interop.Reference[Camera], x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64) -> KnifePlane!:
         if width <= 0.0 or height <= 0.0: error(errors.invalid, "the view has no size")
         let p = try camera.value().projection(width / height)
-        let normal = ray(p, x0, y0, width, height).cross(ray(p, x1, y1, width, height))
+        # The plane holds both view rays: through the eye in perspective,
+        # along the view through both film points in orthographic.
+        let start = p.ray_origin(x0, y0, width, height)
+        let across = p.ray_origin(x1, y1, width, height).add(p.ray_direction(x1, y1, width, height)).subtract(start)
+        let normal = p.ray_direction(x0, y0, width, height).cross(across)
         let length = normal.length()
         if length < 0.000000001: error(errors.invalid, "the knife stroke is too short")
-        return KnifePlane(p.position, normal.multiply_scalar(1.0 / length))
+        return KnifePlane(start, normal.multiply_scalar(1.0 / length))
 
     ## The end of a stroke from (x0, y0) toward (x1, y1) with its angle
     ## snapped to the nearest 15 degrees (its length kept), as x and y.
@@ -42,7 +46,7 @@ pub struct Knife:
 
     ## The faces of `mesh` the screen line from (x0, y0) to (x1, y1) passes
     ## over (in front of the camera), whatever hides them.
-    pub static func faces_under(mesh: interop.Reference[Mesh], camera: interop.Reference[PerspectiveCamera], x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64) -> interop.Reference[Selection]!:
+    pub static func faces_under(mesh: interop.Reference[Mesh], camera: interop.Reference[Camera], x0: f64, y0: f64, x1: f64, y1: f64, width: f64, height: f64) -> interop.Reference[Selection]!:
         let geometry = try mesh.get()
         let p = try camera.value().projection(math.max(1.0, width) / math.max(1.0, height))
         let points = geometry.point_span()
@@ -72,10 +76,6 @@ pub struct Knife:
             # Crossed by the line, or holding it whole (winding round its middle).
             if visible and (crossed or math.abs(winding) > math.pi): bits.set(face)
         return try adopt_selection(bits.finish(), faces, Domain.face, (u64)geometry.topology_hash(), GroupReport())
-
-## The view ray through (x, y).
-func ray(p: Projection, x: f64, y: f64, width: f64, height: f64) -> Vector3:
-    return p.right.multiply_scalar((x / width * 2.0 - 1.0) * p.aspect / p.focal).add(p.up.multiply_scalar((1.0 - y / height * 2.0) / p.focal)).subtract(p.backward)
 
 ## Whether segments (a, b) and (c, d) of the plane cross.
 func segments_cross(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64, dx: f64, dy: f64) -> bool:

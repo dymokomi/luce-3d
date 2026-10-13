@@ -1,5 +1,5 @@
 from luce_geocore import geocore
-from luce_3d.graphics import Knife, BoxSelect, EditOverlay, SurfaceHits, Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, PerspectiveCamera, AmbientLight, DirectionalLight, Renderer
+from luce_3d.graphics import Knife, BoxSelect, EditOverlay, SurfaceHits, Scene, Group, Mesh, SphereGeometry, MeshLambertMaterial, Color, Vector3, Camera, AmbientLight, DirectionalLight, Renderer
 from luce_gpu.gpu import Frame
 from luce_gpu import gpu
 from luce_window import window
@@ -18,7 +18,7 @@ pub func main(arguments: list[str]) -> int!:
     scene.add(group)
     scene.add(AmbientLight(intensity = 0.2))
     scene.add(DirectionalLight(intensity = 0.8))
-    let camera = PerspectiveCamera(50.0, 1.0, 0.1, 100.0)
+    let camera = Camera(50.0, 1.0, 0.1, 100.0)
     let renderer = Renderer()
     let frame = Frame(window.Size(200.0, 160.0, 200.0, 160.0, 1.0))
     let target = frame.target()
@@ -40,7 +40,7 @@ pub func main(arguments: list[str]) -> int!:
     print("ok Luce scene objects and region rendering")
     return 0
 
-func screen(camera: PerspectiveCamera, point: Vector3) -> list[float]!:
+func screen(camera: Camera, point: Vector3) -> list[float]!:
     let p = camera.projection(200.0 / 160.0)
     let offset = point.subtract(p.position)
     let depth = -offset.dot(p.backward)
@@ -50,7 +50,7 @@ func screen(camera: PerspectiveCamera, point: Vector3) -> list[float]!:
 ## screen projection, confirming the nearest candidate with one ray.
 func edit_overlays(target: gpu.RenderTarget) -> unit!:
     let cube = geocore.Mesh.cube(2.0)
-    let camera = PerspectiveCamera(50.0, 1.0, 0.1, 100.0)
+    let camera = Camera(50.0, 1.0, 0.1, 100.0)
     camera.set_position(Vector3(3.0, 4.0, 5.0))
     camera.look_at(Vector3(0.0, 1.0, 0.0))
     let overlay = EditOverlay()
@@ -137,7 +137,7 @@ func edit_overlays(target: gpu.RenderTarget) -> unit!:
 ## when any face meets it.
 func box_selection() -> unit!:
     let cube = geocore.Mesh.cube(2.0)
-    let camera = PerspectiveCamera(50.0, 1.0, 0.1, 100.0)
+    let camera = Camera(50.0, 1.0, 0.1, 100.0)
     camera.set_position(Vector3(3.0, 4.0, 5.0))
     camera.look_at(Vector3(0.0, 1.0, 0.0))
     # The whole view: from here 7 corners, 9 edges and 3 faces show.
@@ -202,7 +202,7 @@ func static_reuse(target: gpu.RenderTarget) -> unit!:
     let second = Mesh.of(geocore.Mesh.cube(1.0), MeshLambertMaterial(Color(0.9, 0.5, 0.1)))
     scene.add(first)
     scene.add(DirectionalLight(intensity = 0.8))
-    let camera = PerspectiveCamera(50.0, 1.0, 0.1, 100.0)
+    let camera = Camera(50.0, 1.0, 0.1, 100.0)
     camera.set_position(Vector3(3.0, 4.0, 5.0))
     camera.look_at(Vector3(0.0, 1.0, 0.0))
     renderer.render(scene, camera, target)
@@ -236,7 +236,7 @@ func cad_edges() -> unit!:
     let hidden: list[float] = []
     for edge in 0..<cube.edge_count(): hidden.append(-1.0)
     let interiors = cube.with_attribute("cad_edge", 4, 1, hidden, true)
-    let camera = PerspectiveCamera(50.0, 1.0, 0.1, 100.0)
+    let camera = Camera(50.0, 1.0, 0.1, 100.0)
     camera.set_position(Vector3(3.0, 4.0, 5.0))
     camera.look_at(Vector3(0.0, 1.0, 0.0))
     overlay.update(interiors, 1, [], -1)

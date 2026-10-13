@@ -7,7 +7,7 @@ import memory
 import time
 from luce_3d import graphics as three
 from luce_geocore import geocore
-from luce_3d.graphics import Vector3, Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer
+from luce_3d.graphics import Vector3, Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, Camera, Renderer
 from fixtures import since
 
 pub struct Viewport:
@@ -15,7 +15,7 @@ pub struct Viewport:
     var texture: gpu.Texture
     let scene: interop.Reference[Scene]
     let root: interop.Interface[Object3D]
-    let camera: interop.Reference[PerspectiveCamera]
+    let camera: interop.Reference[Camera]
     let renderer: interop.Reference[Renderer]
     var shown: interop.Reference[Mesh]?
     var shown_object: interop.Interface[Object3D]?
@@ -37,7 +37,7 @@ pub struct Viewport:
         let sun_object = sun.as_interface[Object3D](sun.value())
         defer sun_object.release()
         try scene.value().add(sun_object)
-        let camera = try interop.Reference[PerspectiveCamera].adopt(new PerspectiveCamera(45.0, 1.0, 0.05, 100.0) in memory.heap, three.perspective_camera_type, memory.heap)
+        let camera = try interop.Reference[Camera].adopt(new Camera(45.0, 1.0, 0.05, 100.0) in memory.heap, three.camera_type, memory.heap)
         try camera.value().set_position(Vector3(0.0, 1.2, 1.2))
         self.device = device
         self.texture = texture

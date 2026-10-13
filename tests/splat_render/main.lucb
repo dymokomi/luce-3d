@@ -12,7 +12,7 @@ from luce_std import math
 from luce_gpu import gpu
 from luce_render import render
 from luce_3d import graphics as three
-from luce_3d.graphics import GaussianSplats, PerspectiveCamera
+from luce_3d.graphics import GaussianSplats, Camera
 from luce_geocore.geocore import Vector3, GeometrySet
 from luce_geocore.kernel import Attribute, AttributeStore, Domain, DataType, Float3, empty_set, adopt_set, dispose_set, points_component, cloud_assembled
 from luce_geocore.core.shared import Column
@@ -120,8 +120,8 @@ func draw(state: u64*) -> f64:
 func viewport(device: gpu.Device, cloud: interop.Reference[GeometrySet], pixels: f32[]) -> !:
     var texture = try gpu.Texture.create(device, width, height, gpu.Format.rgba16_float)
     defer texture.destroy()
-    let camera = try interop.Reference[PerspectiveCamera].adopt(new PerspectiveCamera(fov, (f64)width / (f64)height, 0.1, 100.0) in memory.heap,
-                                                                three.perspective_camera_type, memory.heap)
+    let camera = try interop.Reference[Camera].adopt(new Camera(fov, (f64)width / (f64)height, 0.1, 100.0) in memory.heap,
+                                                                three.camera_type, memory.heap)
     defer camera.release()
     try camera.value().set_position(Vector3(0.0, 0.0, 4.0))
     try camera.value().look_at(Vector3())

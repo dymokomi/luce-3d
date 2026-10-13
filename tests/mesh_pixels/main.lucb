@@ -11,7 +11,7 @@ import memory
 from luce_3d import graphics as three
 from luce_geocore import geocore
 from luce_geocore.geocore import MeshNormals, MeshPrimitives, AttributeKernels, Vector3, Verbs, Subdivision
-from luce_3d.graphics import Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, PerspectiveCamera, Renderer, Color, WireRenderer, MeshGeometry, GroundGrid
+from luce_3d.graphics import Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, Camera, Renderer, Color, WireRenderer, MeshGeometry, GroundGrid
 
 let width: u32 = 160
 let height: u32 = 120
@@ -21,7 +21,7 @@ struct View:
     var texture: gpu.Texture
     let scene: interop.Reference[Scene]
     let root: interop.Interface[Object3D]
-    let camera: interop.Reference[PerspectiveCamera]
+    let camera: interop.Reference[Camera]
     let renderer: interop.Reference[Renderer]
     var shown: interop.Reference[Mesh]?
     var shown_object: interop.Interface[Object3D]?
@@ -40,7 +40,7 @@ struct View:
         let sun_object = sun.as_interface[Object3D](sun.value())
         defer sun_object.release()
         try scene.value().add(sun_object)
-        let camera = try interop.Reference[PerspectiveCamera].adopt(new PerspectiveCamera(40.0, 1.0, 0.1, 100.0) in memory.heap, three.perspective_camera_type, memory.heap)
+        let camera = try interop.Reference[Camera].adopt(new Camera(40.0, 1.0, 0.1, 100.0) in memory.heap, three.camera_type, memory.heap)
         try camera.value().set_position(Vector3(2.0, 3.0, 4.0))
         try camera.value().look_at(Vector3(0.0, 0.5, 0.0))
         self.device = try device.share()
