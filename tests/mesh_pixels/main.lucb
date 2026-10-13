@@ -1,5 +1,6 @@
 ## Offscreen pixels of the polygon-mesh path (GPU arrays, shader lighting)
-## and the ground grid (hidden behind meshes, fading with distance):
+## and the ground grid (hidden behind meshes, fading with distance), and
+## wires over faces seen square on orthographically:
 ## it matches the per-vertex path in lit and flat modes, uploads only the
 ## positions after a Move, and its zebra stripes scale with their count, break
 ## at a crease (separate normals per face) and flow across a smooth seam.
@@ -246,6 +247,84 @@ func ground_grid(view: View*, cube: interop.Reference[geocore.Mesh], image: u8[]
     let behind = grid_pixels(image)
     if not (alone > 300 and green > 20 and behind * 10 < alone * 9 and far > 0 and faded * 2 < far):
         print(f"ground grid: {alone} red pixels, {green} green, {behind} behind a cube, the far half's red {far}, faded sooner {faded}")
+        assert(false)
+
+## The ground grid behind a cube that stands above the ground, seen from
+## above in perspective with the editor's clip planes (near a hundredth of
+## the distance, far twenty times it): the grid lies wholly behind the cube,
+## so not one of the cube's pixels changes when the grid is drawn.
+func grid_behind_raised(view: View*, cube: interop.Reference[geocore.Mesh], image: u8[], alone: u8[]) -> !:
+    # The cube stands on the ground; raised, its underside is 1.5 above it.
+    let raised = try cube.value().transformed(Vector3(0.0, 1.5, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer raised.release()
+    let camera = view.camera.value()
+    let target = Vector3(0.0, 2.25, 0.0)
+    let eye = Vector3(2.0, 4.0, 4.0)
+    let distance = eye.subtract(target).length()
+    try camera.set_projection(40.0, distance * 0.01, math.max(500.0, distance * 20.0))
+    try camera.set_position(eye)
+    try camera.look_at(target)
+    try view.show(raised, false)
+    try view.draw(alone)
+    try view.draw_grid(image, distance * 18.0)
+    var covered: usize = 0
+    var changed: usize = 0
+    for at in 0..<(usize)(width * height):
+        let lit = alone[at * 4] > 20 or alone[at * 4 + 1] > 20
+        if not lit: continue
+        covered += 1
+        if image[at * 4] != alone[at * 4] or image[at * 4 + 1] != alone[at * 4 + 1] or image[at * 4 + 2] != alone[at * 4 + 2]: changed += 1
+    try camera.set_projection(40.0, 0.1, 100.0)
+    if not (covered > 500 and changed == 0):
+        print(f"grid behind a raised cube: {changed} of its {covered} pixels changed")
+        assert(false)
+
+## Wires on faces seen square on through an orthographic camera, its eye far
+## back and its depth range long, as the editor's orthographic views stand:
+## the faces' depth slope is zero, so only the lines' own depth bias (the
+## same share of the depth range as in perspective) lifts them over the
+## face, and it does: the cube's edges (green) and a line drawn across its
+## front face (red) show whole.
+func square_on_wires(view: View*, cube: interop.Reference[geocore.Mesh], image: u8[]) -> !:
+    let camera = view.camera.value()
+    let half = 1.2
+    let reach = half * 400.0
+    try camera.set_projection(40.0, reach * 0.0001, reach * 2.0)
+    try camera.set_orthographic(half)
+    try camera.set_position(Vector3(0.0, 0.75, reach))
+    try camera.look_at(Vector3(0.0, 0.75, 0.0))
+    try view.show(cube, false)
+    let renderer = view.renderer.value()
+    try renderer.set_edges(1.0, Color(0.0, 1.0, 0.0))
+    try renderer.set_wire_overlay(1.0)
+    let recording = try view.texture.frame()
+    let drawn = try recording.value().target()
+    let result = renderer.render(view.root, view.camera, drawn, true)
+    try result.get()
+    result.release()
+    let across: Vector3[2] = [Vector3(-0.6, 0.75, 0.75), Vector3(0.6, 0.75, 0.75)]
+    try WireRenderer.lines(across, view.camera, drawn, gpu.Color(1.0, 0.0, 0.0), 2.0)
+    drawn.release()
+    _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0))
+    recording.release()
+    try view.texture.read(image)
+    try renderer.set_edges(0.0, Color(0.0, 0.0, 0.0))
+    try renderer.set_wire_overlay(0.0)
+    try camera.set_orthographic(0.0)
+    try camera.set_projection(40.0, 0.1, 100.0)
+    try camera.set_position(Vector3(2.0, 3.0, 4.0))
+    try camera.look_at(Vector3(0.0, 0.5, 0.0))
+    # The front face (the cube stands on the ground) spans rows 23 to 97
+    # and columns 43 to 117 (the view is 2.4 tall).
+    var green: usize = 0
+    var red: usize = 0
+    for at in 0..<(usize)(width * height):
+        let r = image[at * 4]
+        let g = image[at * 4 + 1]
+        if g > 200 and r < 60: green += 1
+        if r > 200 and g < 60: red += 1
+    if not (green > 250 and red > 100):
+        print(f"square-on wires: {green} edge pixels, {red} line pixels")
         assert(false)
 
 ## The red of the image's upper half, where the plane is farthest.
@@ -515,7 +594,9 @@ pub func main(arguments: str[]) -> i32!:
     try picking(&view, cube, image)
     try occlusion(&view, cube, image)
     try ground_grid(&view, cube, image)
+    try grid_behind_raised(&view, cube, image, legacy_image)
+    try square_on_wires(&view, cube, image)
     try two_sided(&view, cube, legacy_image, image)
     try subdivided(&view, cube, image, legacy_image)
-    print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded; inside-out meshes light on the eye's side; curvature maps and their radius band; draft against a pull direction; GPU face picking and selection tint")
+    print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded; the grid hides behind a raised cube; wires on faces seen square on orthographically show; inside-out meshes light on the eye's side; curvature maps and their radius band; draft against a pull direction; GPU face picking and selection tint")
     return 0

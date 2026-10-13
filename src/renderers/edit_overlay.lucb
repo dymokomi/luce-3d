@@ -278,7 +278,7 @@ pub struct EditOverlay:
                 try self.wires.upload(device, vertices, true)
             let size = try native.size()
             let projection = try camera.value().projection(size.width / size.height)
-            try self.wires.draw(native, projection_matrix(projection), color, 1.0, bias = projection.line_bias(0.000001))
+            try self.wires.draw(native, projection_matrix(projection), color, 1.0)
             return
         # Deviceless frames (tests, recording) expand wires on the CPU into the
         # frame's vertex budget; a wireframe that cannot fit is left out.

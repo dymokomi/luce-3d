@@ -71,22 +71,16 @@ pub struct Projection:
         if self.ortho > 0.0: return 2.0 * self.ortho / math.max(1.0, height)
         return 2.0 * math.max(depth, self.near) / (self.focal * math.max(1.0, height))
 
-    ## The depth `bias` a line drawn over a surface takes here (a share of
-    ## the depth range, at the near plane in perspective): in orthographic,
-    ## twenty times as much, as measured, for lines on surfaces seen square
-    ## on to clear them.
-    pub func line_bias(bias: f64) -> f64:
-        return bias * 20.0 if self.ortho > 0.0 else bias
-
     ## `point` in clip space ([x, y, z, w], depth 0..1 between the near and
     ## far planes), as projection_matrix maps it; `bias` pulls it toward the
-    ## eye by that share of its depth range (line_bias's in orthographic).
+    ## eye by that share of the depth range, in perspective and
+    ## orthographic alike (a line drawn over a surface).
     pub func clip(point: Vector3, bias: f64 = 0.0) -> f64[4]:
         let relative = point.subtract(self.position)
         let depth = -relative.dot(self.backward)
         if self.ortho > 0.0:
             return [relative.dot(self.right) / (self.ortho * self.aspect), relative.dot(self.up) / self.ortho,
-                    (depth - self.near) / (self.far - self.near) - self.line_bias(bias), 1.0]
+                    (depth - self.near) / (self.far - self.near) - bias, 1.0]
         return [relative.dot(self.right) * self.focal / self.aspect, relative.dot(self.up) * self.focal,
                 self.far * (depth - self.near) / (self.far - self.near) - bias * depth, depth]
 

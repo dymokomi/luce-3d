@@ -56,7 +56,7 @@ pub struct WireBatch:
                 try self.retained.upload(device, vertices, true)
             let size = try native.size()
             let projection = try camera.value().projection(size.width / size.height)
-            try self.retained.draw(native, projection_matrix(projection), color, width, bias = projection.line_bias(0.000001))
+            try self.retained.draw(native, projection_matrix(projection), color, width)
             return
         try WireRenderer.lines(self.points, camera, target, color, width)
 
