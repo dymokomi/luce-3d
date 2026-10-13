@@ -10,7 +10,7 @@ from luce_geocore.geocore import Matrix4
 from luce_geocore.core.growing import Growing
 from cameras.camera import Projection
 from renderers.gpu_arrays import GpuArrays
-from renderers.mesh_batch import draw_polygon_ids
+from renderers.mesh_batch import draw_polygon_ids, FaceHighlight
 
 pub struct FacePicker:
     var texture: gpu.Texture
@@ -30,9 +30,9 @@ pub struct FacePicker:
     ## `width` x `height` view) under (x, y), or -1. `key` names everything the
     ## id image depends on; an equal key reuses the last one.
     pub func face(arrays: GpuArrays*, device: gpu.Device, mesh: const geocore.Mesh*, world: Matrix4, projection: Projection,
-                  key: u64, x: f64, y: f64, width: u32, height: u32) -> i64!:
+                  key: u64, x: f64, y: f64, width: u32, height: u32, hidden: const FaceHighlight*? = none) -> i64!:
         if width == 0 or height == 0 or not (x >= 0.0 and y >= 0.0 and x < (f64)width and y < (f64)height): return -1
-        try self.prepare(arrays, device, mesh, world, projection, key, width, height)
+        try self.prepare(arrays, device, mesh, world, projection, key, width, height, hidden)
         let at = ((usize)y * (usize)width + (usize)x) * 4
         let bytes = self.pixels.items
         let id = (u32)bytes[at] | ((u32)bytes[at + 1] << 8) | ((u32)bytes[at + 2] << 16) | ((u32)bytes[at + 3] << 24)
@@ -41,13 +41,14 @@ pub struct FacePicker:
     ## The id image of `mesh` (as `face` draws it), for reading many pixels:
     ## a box selection's visible faces.
     pub func image(arrays: GpuArrays*, device: gpu.Device, mesh: const geocore.Mesh*, world: Matrix4, projection: Projection,
-                   key: u64, width: u32, height: u32) -> const u8[]!:
-        try self.prepare(arrays, device, mesh, world, projection, key, width, height)
+                   key: u64, width: u32, height: u32, hidden: const FaceHighlight*? = none) -> const u8[]!:
+        try self.prepare(arrays, device, mesh, world, projection, key, width, height, hidden)
         return self.pixels.items[..<self.pixels.count]
 
-    ## Draw the id pass and read it back, unless the last one had `key`.
+    ## Draw the id pass (without the `hidden` faces) and read it back,
+    ## unless the last one had `key`.
     func prepare(arrays: GpuArrays*, device: gpu.Device, mesh: const geocore.Mesh*, world: Matrix4, projection: Projection,
-                 key: u64, width: u32, height: u32) -> !:
+                 key: u64, width: u32, height: u32, hidden: const FaceHighlight*?) -> !:
         if key == self.key and width == self.width and height == self.height: return
         self.key = 0
         if width != self.width or height != self.height:
@@ -59,7 +60,7 @@ pub struct FacePicker:
         defer recording.release()
         let target = try recording.value().target()
         defer target.release()
-        try draw_polygon_ids(arrays, try target.get(), mesh, world, projection, 0)
+        try draw_polygon_ids(arrays, try target.get(), mesh, world, projection, 0, hidden)
         _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))
         try self.pixels.fill((usize)(width * height * 4), 0)
         try self.texture.read(self.pixels.items[..<self.pixels.count])

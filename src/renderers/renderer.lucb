@@ -88,6 +88,10 @@ pub struct Renderer:
     var highlight: FaceHighlight
     ## The cage highlight mapped onto a subdivided mesh's display faces.
     var display_highlight: FaceHighlight
+    ## Faces hidden from drawing and picking (an editor's Hide), and the
+    ## same mapped onto a subdivided mesh's display faces.
+    var hidden: FaceHighlight
+    var display_hidden: FaceHighlight
     var placements: Growing[Placement]
 
     ## Objects whose prepared data survived a scene change (tests, profiling).
@@ -163,8 +167,13 @@ pub struct Renderer:
         return try self.pick_mesh(geometry, world, projection, x, y, width, height)
 
     func pick_mesh(geometry: const geocore.Mesh*, world: Matrix4, projection: Projection, x: f64, y: f64, width: f64, height: f64) -> i64!:
-        let key = ids_key(geometry, world, projection, width, height)
-        return try self.picker.face(&self.arrays, self.arrays.device_handle(), geometry, world, projection, key, x, y, (u32)width, (u32)height)
+        let hidden = self.hidden_of(geometry)
+        let key = ids_key(geometry, world, projection, width, height) ^ hidden.key
+        return try self.picker.face(&self.arrays, self.arrays.device_handle(), geometry, world, projection, key, x, y, (u32)width, (u32)height, hidden)
+
+    ## The hidden faces for `geometry`: the cage's, or their display faces.
+    func hidden_of(geometry: const geocore.Mesh*) -> const FaceHighlight*:
+        return &self.display_hidden if self.display_hidden.topology == geometry.corners_id() else &self.hidden
 
     ## `current` (on points, edges or faces of `mesh`) changed by what the
     ## screen box from (x0, y0) to (x1, y1) of a `width` x `height` view
@@ -190,10 +199,12 @@ pub struct Renderer:
         let device = self.arrays.device_handle()
         if let display = try subdivided_display(geometry):
             defer mesh_dispose(display)
-            let pixels = try self.picker.image(&self.arrays, device, display, world, projection, ids_key(display, world, projection, width, height), (u32)width, (u32)height)
+            let shown = self.hidden_of(display)
+            let pixels = try self.picker.image(&self.arrays, device, display, world, projection, ids_key(display, world, projection, width, height) ^ shown.key, (u32)width, (u32)height, shown)
             let ids = IdImage(pixels, (u32)width, (u32)height, try cage_faces(display))
             return try box_selection(geometry, world, projection, box, width, height, chosen, operation, true, ids, wholly)
-        let pixels = try self.picker.image(&self.arrays, device, geometry, world, projection, ids_key(geometry, world, projection, width, height), (u32)width, (u32)height)
+        let shown = self.hidden_of(geometry)
+        let pixels = try self.picker.image(&self.arrays, device, geometry, world, projection, ids_key(geometry, world, projection, width, height) ^ shown.key, (u32)width, (u32)height, shown)
         var own_faces: u32[]
         return try box_selection(geometry, world, projection, box, width, height, chosen, operation, true, IdImage(pixels, (u32)width, (u32)height, own_faces), wholly)
 
@@ -219,6 +230,27 @@ pub struct Renderer:
         let geometry = try mesh.get()
         let bits = selection_bits(chosen)
         try self.highlight.set_words(geometry.corners_id(), (usize)geometry.face_count(), bits.words, chosen.key(), color, weight)
+
+    ## Leave out the faces of face `selection` (luce-geocore) of `mesh`
+    ## when drawing and picking it, and edges all of whose faces they are;
+    ## none (or another component type) shows every face again.
+    pub func set_hidden_faces(mesh: interop.Reference[geocore.Mesh], selection: interop.Reference[Selection]?) -> !:
+        if selection == none:
+            self.clear_hidden_faces()
+            return
+        let chosen = selection else return
+        let picked = try chosen.get()
+        if picked.domain() != 2 or picked.count() == 0:
+            self.clear_hidden_faces()
+            return
+        let geometry = try mesh.get()
+        let bits = selection_bits(picked)
+        try self.hidden.set_words(geometry.corners_id(), (usize)geometry.face_count(), bits.words, picked.key(), Color(0.0, 0.0, 0.0), 0.0)
+
+    pub func clear_hidden_faces():
+        self.hidden.words.clear()
+        self.hidden.key = 0
+        self.hidden.topology = 0
 
     pub func clear_face_selection():
         self.highlight.words.clear()
@@ -262,6 +294,8 @@ pub struct Renderer:
         self.picker = FacePicker()
         self.highlight = FaceHighlight()
         self.display_highlight = FaceHighlight()
+        self.hidden = FaceHighlight()
+        self.display_hidden = FaceHighlight()
         self.placements = Growing[Placement]()
         self.count = 0
         var empty: gpu.Vertex[]
@@ -355,14 +389,16 @@ pub struct Renderer:
             defer mesh_dispose(display)
             if self.highlight.topology == cage.corners_id(): try display_highlight(&self.highlight, display, &self.display_highlight)
             else: self.display_highlight.words.clear()
+            if self.hidden.topology == cage.corners_id(): try display_highlight(&self.hidden, display, &self.display_hidden)
+            else: self.display_hidden.words.clear()
             try draw_polygon(&self.arrays, target, display, item.world, projection, lighting, tint, appearance.is_lit(), &shading,
-                             bias, self.surfaces, 0.0, self.edge_color, &self.display_highlight, appearance.fade())
+                             bias, self.surfaces, 0.0, self.edge_color, &self.display_highlight, appearance.fade(), &self.display_hidden)
             if self.edge_width > 0.0:
                 try draw_polygon(&self.arrays, target, cage, item.world, projection, lighting, tint, appearance.is_lit(), &shading,
-                                 0.0, false, self.edge_width, self.edge_color, none, appearance.fade())
+                                 0.0, false, self.edge_width, self.edge_color, none, appearance.fade(), &self.hidden)
             return
         try draw_polygon(&self.arrays, target, cage, item.world, projection, lighting, tint, appearance.is_lit(), &shading,
-                         bias, self.surfaces, self.edge_width, self.edge_color, &self.highlight, appearance.fade())
+                         bias, self.surfaces, self.edge_width, self.edge_color, &self.highlight, appearance.fade(), &self.hidden)
 
     ## Ambient lights summed, and the first four directional lights.
     func frame_lighting() -> FrameLighting:
@@ -575,6 +611,8 @@ pub struct Renderer:
         self.picker.close()
         self.highlight.close()
         self.display_highlight.close()
+        self.hidden.close()
+        self.display_hidden.close()
         self.placements.close()
         self.arrays.close()
         if self.vertices.length > 0:

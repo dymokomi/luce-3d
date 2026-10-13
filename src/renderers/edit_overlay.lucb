@@ -33,6 +33,13 @@ pub struct EditOverlay:
     var accent: Growing[Vector3]
     var faces: Growing[Vector3]
     var hover: Growing[Vector3]
+    ## What a gesture would take (the loop a double-click selects), drawn
+    ## over the model, and the selection it was built from.
+    var preview: Growing[Vector3]
+    var preview_key: u64
+    ## Points every face of which is hidden (an editor's Hide): no marker.
+    var hidden_points: Growing[u32]
+    var hidden_key: u64
     var selected: Growing[bool]
     # Point-to-edge adjacency (CSR), built once per mesh for point selections.
     var edge_starts: Growing[u32]
@@ -65,6 +72,10 @@ pub struct EditOverlay:
         self.accent = Growing[Vector3]()
         self.faces = Growing[Vector3]()
         self.hover = Growing[Vector3]()
+        self.preview = Growing[Vector3]()
+        self.preview_key = 0
+        self.hidden_points = Growing[u32]()
+        self.hidden_key = 0
         self.selected = Growing[bool]()
         self.edge_starts = Growing[u32]()
         self.point_edges = Growing[u32]()
@@ -131,6 +142,67 @@ pub struct EditOverlay:
         try self.update(mesh, mode, self.listed.view(), hovered)
         try self.weigh(mesh, selection)
 
+    ## Show what a gesture would take: an edge selection's edges, a face
+    ## selection's outlines, as lines over the model; none clears it. The
+    ## lines are made again only when the selection object changes.
+    pub func set_preview(mesh: interop.Reference[Mesh], selection: interop.Reference[Selection]?) -> !:
+        var key: u64 = 0
+        if let chosen = selection: key = (try chosen.get()).key() ^ (u64)(try mesh.get()).corners_id()
+        if key == self.preview_key: return
+        self.preview_key = key
+        self.preview.clear()
+        let chosen = selection else return
+        let geometry = try mesh.get()
+        let picked = try chosen.get()
+        let bits = selection_bits(picked)
+        if picked.domain() != 2 and picked.domain() != 4: return
+        if (usize)(try geometry.domain_count(picked.domain())) != bits.count: return
+        for word in 0..<bits.words.length:
+            var pending = bits.words[word]
+            while pending != 0:
+                let id = (i64)(word * 64 + (usize)trailing_zeros(pending))
+                pending = pending & (pending - 1)
+                if picked.domain() == 4:
+                    try self.preview.push(try geometry.point(try geometry.edge_point(id, 0)))
+                    try self.preview.push(try geometry.point(try geometry.edge_point(id, 1)))
+                    continue
+                let size = try geometry.face_size(id)
+                for at in 0..<size:
+                    try self.preview.push(try geometry.point(try geometry.face_point(id, at)))
+                    try self.preview.push(try geometry.point(try geometry.face_point(id, (at + 1) % size)))
+
+    ## Hide the point markers of points whose faces are all in face
+    ## `selection` of `mesh` (the renderer leaves those faces out); none
+    ## shows every marker again.
+    pub func set_hidden(mesh: interop.Reference[Mesh], selection: interop.Reference[Selection]?) -> !:
+        var key: u64 = 0
+        if let chosen = selection: key = (try chosen.get()).key() ^ (u64)(try mesh.get()).corners_id()
+        if key == self.hidden_key: return
+        self.hidden_key = key
+        self.hidden_points.clear()
+        self.markers.invalidate()
+        let chosen = selection else return
+        let picked = try chosen.get()
+        if picked.domain() != 2: return
+        let geometry = try mesh.get()
+        let bits = selection_bits(picked)
+        if (usize)geometry.face_count() != bits.count: return
+        let around = try geometry.point_face_span()
+        for point in 0..<(usize)geometry.point_count():
+            let first = (usize)around.0[point]
+            let end = (usize)around.0[point + 1]
+            if first == end: continue
+            var all = true
+            for at in first..<end:
+                if not bits.get((usize)around.1[at]):
+                    all = false
+                    break
+            if all: try self.hidden_points.push((u32)point)
+
+    ## Segments the gesture preview draws (tests).
+    pub func preview_segments() -> i64:
+        return (i64)self.preview.count // 2
+
     ## Show a soft selection's reach: points within `radius` of the selection
     ## are tinted by their weight (`falloff` 0 linear, 1 quadratic, 2 cubic,
     ## 3 smooth; `symmetry` 0 none, 1..3 mirrors across X, Y, Z), as
@@ -181,7 +253,7 @@ pub struct EditOverlay:
     ## (a pick mesh the viewport does not draw, such as SDF proxies) still
     ## shows; the visible parts then draw in `accent` over it.
     pub func draw(camera: interop.Reference[Camera], target: interop.View[gpu.RenderTarget],
-                  wire: gpu.Color, accent: gpu.Color, point: gpu.Color, wires: bool = true, hidden: gpu.Color? = none) -> !:
+                  wire: gpu.Color, accent: gpu.Color, point: gpu.Color, wires: bool = true, hidden: gpu.Color? = none, preview: gpu.Color? = none) -> !:
         let current = self.mesh else return
         let mesh = try current.get()
         let native = try target.get()
@@ -194,12 +266,16 @@ pub struct EditOverlay:
             try WireRenderer.triangles(self.faces.view(), camera, target, accent)
         if self.accent.count > 0:
             try WireRenderer.lines(self.accent.view(), camera, target, accent, 2.5)
+        if self.preview.count > 0:
+            try WireRenderer.lines(self.preview.view(), camera, target, preview else point, 2.5)
         if self.hover.count > 0:
             try WireRenderer.lines(self.hover.view(), camera, target, accent, 3.0 if self.mode == 2 else 2.5)
         # Point markers in point mode; in the others only the soft reach.
         if self.mode == 0 or self.weights.count > 0:
             let projection = try camera.value().projection(size.width / size.height)
             try self.screen.update(mesh, projection, size.width, size.height)
+            for gone in self.hidden_points.view():
+                if (usize)gone < self.screen.depths.count: self.screen.depths.items[(usize)gone] = 0.0
             try self.markers.draw(native, &self.screen, self.selected.view(), self.weights.view(), self.mode == 0,
                                   self.hovered if self.mode == 0 else -1, projection, size.width, size.height, point, accent)
 
@@ -403,6 +479,8 @@ pub struct EditOverlay:
         self.accent.close()
         self.faces.close()
         self.hover.close()
+        self.preview.close()
+        self.hidden_points.close()
         self.selected.close()
         self.edge_starts.close()
         self.listed.close()
