@@ -542,6 +542,11 @@ pub struct EditOverlay:
     pub func hover_segments() -> i64:
         return (i64)self.hover.segments()
 
+    ## Whole projections of the points so far (the markers' and the
+    ## pointer's): a drag reprojects only the moved ones (tests).
+    pub func projections() -> i64:
+        return (i64)self.screen.whole_version
+
     ## Selection rebuilds so far: hover, camera and point moves must not add
     ## any.
     pub func selection_builds() -> i64:

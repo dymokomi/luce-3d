@@ -23,6 +23,15 @@ pub struct Markers:
     ## Each cell's nearest point per class (selected, soft, the rest), -1
     ## for none.
     var nearest: Growing[i64]
+    ## The same over the points a drag leaves in place: every point but
+    ## `still_first..<still_end` (the moved range), as of the screen's whole
+    ## projection `still_version`; a drag's frame merges its moved points
+    ## into a copy instead of passing over every point.
+    var still: Growing[i64]
+    var still_version: u64 = 0
+    var still_first: usize = 0
+    var still_end: usize = 0
+    var still_valid: bool = false
     ## The squares: six vertices each, in normalized device coordinates.
     var vertices: Growing[gpu.Vertex]
     var version: u64 = 0
@@ -37,6 +46,11 @@ pub struct Markers:
 
     pub func init():
         self.nearest = Growing[i64]()
+        self.still = Growing[i64]()
+        self.still_version = 0
+        self.still_first = 0
+        self.still_end = 0
+        self.still_valid = false
         self.vertices = Growing[gpu.Vertex]()
         self.version = 0
         self.valid = false
@@ -50,6 +64,7 @@ pub struct Markers:
 
     pub func invalidate():
         self.valid = false
+        self.still_valid = false
 
     ## Forget the GPU copies (another device).
     pub func drop():
@@ -92,25 +107,27 @@ pub struct Markers:
             self.vertices.count = count
             try draw_screen(target, self.hover_shape.buffer, self.hover_tints.buffer, self.order.buffer, 6)
 
-    ## The squares of every class, from one pass over the points.
+    ## The squares of every class: the nearest points per cell of the
+    ## points that stayed put (one pass over them per whole projection),
+    ## with the moved ones merged in each frame.
     func lay_out(screen: const Screen*, selected: const bool[], weights: const f32[], ordinary_too: bool, p: Projection, width: f64, height: f64,
                  ordinary: gpu.Color, accent: gpu.Color) -> !:
         self.vertices.clear()
         let columns = (usize)math.ceil(width / cell)
         let rows = (usize)math.ceil(height / cell)
-        try self.nearest.fill(columns * rows * 3, -1)
-        for id in 0..<screen.depths.count:
-            let depth = screen.depths.items[id]
-            if depth <= 0.0: continue
-            let round = class_of(selected, weights, id)
-            if round == 2 and not ordinary_too: continue
-            let x = (f64)screen.xs.items[id]
-            let y = (f64)screen.ys.items[id]
-            if x < 0.0 or y < 0.0 or x >= width or y >= height: continue
-            let slot = ((usize)(y / cell) * columns + (usize)(x / cell)) * 3 + round
-            let other = self.nearest.items[slot]
-            if other < 0 or screen.depths.items[(usize)other] > depth:
-                self.nearest.items[slot] = (i64)id
+        let cells = columns * rows * 3
+        let within = screen.moved_first == screen.moved_end or (screen.moved_first >= self.still_first and screen.moved_end <= self.still_end)
+        let fits = self.still_valid and self.still_version == screen.whole_version and self.still.count == cells and within
+        if not fits:
+            self.still_first = screen.moved_first
+            self.still_end = screen.moved_end
+            try self.still.fill(cells, -1)
+            self.nearest_of(screen, selected, weights, ordinary_too, 0, self.still_first, columns, width, height, &self.still)
+            self.nearest_of(screen, selected, weights, ordinary_too, self.still_end, screen.depths.count, columns, width, height, &self.still)
+            self.still_version = screen.whole_version
+            self.still_valid = true
+        try self.nearest.assign(self.still.view())
+        self.nearest_of(screen, selected, weights, ordinary_too, self.still_first, self.still_end, columns, width, height, &self.nearest)
         # Selected markers first: at equal depth the first one drawn wins.
         for round in 0..<(usize)3:
             for at in 0..<columns * rows:
@@ -120,6 +137,22 @@ pub struct Markers:
                 if round == 1: color = ramp((f64)weights[(usize)id], accent)
                 elif round == 2: color = ordinary
                 try self.quad(screen, (usize)id, 3.0, p, width, height, color)
+
+    ## Points `first..<end` into `cells`, the nearest of each class per cell.
+    func nearest_of(screen: const Screen*, selected: const bool[], weights: const f32[], ordinary_too: bool, first: usize, end: usize, columns: usize,
+                    width: f64, height: f64, cells: Growing[i64]*):
+        for id in first..<end:
+            let depth = screen.depths.items[id]
+            if depth <= 0.0: continue
+            let round = class_of(selected, weights, id)
+            if round == 2 and not ordinary_too: continue
+            let x = (f64)screen.xs.items[id]
+            let y = (f64)screen.ys.items[id]
+            if x < 0.0 or y < 0.0 or x >= width or y >= height: continue
+            let slot = ((usize)(y / cell) * columns + (usize)(x / cell)) * 3 + round
+            let other = cells.items[slot]
+            if other < 0 or screen.depths.items[(usize)other] > depth:
+                cells.items[slot] = (i64)id
 
     ## Pack `vertices`' positions and colors into `shape` and `tints`.
     func upload(device: gpu.Device, vertices: const gpu.Vertex[], shape: Storage*, tints: Storage*) -> !:
@@ -171,6 +204,7 @@ pub struct Markers:
     pub func close():
         self.vertices.close()
         self.nearest.close()
+        self.still.close()
         self.drop()
 
 ## A point's marker class: 0 selected (or weighing 1), 1 reached by the soft

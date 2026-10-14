@@ -21,7 +21,7 @@ func view_key(p: Projection, width: f64, height: f64) -> f64[19]:
 
 func same_key(a: const f64[19]*, b: const f64[19]*) -> bool:
     for at in 0..<(usize)19:
-        if a[at] != b[at]: return false
+        if (*a)[at] != (*b)[at]: return false
     return true
 
 func unset_key() -> f64[19]:
@@ -93,6 +93,11 @@ pub struct Screen:
     ## The positions projected (their change id); 0 for none.
     var points: u64
     pub var version: u64 = 0
+    ## Bumped by each whole projection; and the points projected again
+    ## since (a drag's moved range), `moved_first..<moved_end`.
+    pub var whole_version: u64 = 0
+    pub var moved_first: usize = 0
+    pub var moved_end: usize = 0
     ## The points binned by cell for the pointer's search (a point cloud),
     ## as of projection `binned`.
     var cells: Cells
@@ -105,6 +110,9 @@ pub struct Screen:
         self.key = unset_key()
         self.points = 0
         self.version = 0
+        self.whole_version = 0
+        self.moved_first = 0
+        self.moved_end = 0
         self.cells = Cells()
         self.binned = 0
 
@@ -126,10 +134,19 @@ pub struct Screen:
             let changed = mesh.points_changed()
             first = changed.0
             end = changed.1
+            if self.moved_first == self.moved_end:
+                self.moved_first = first
+                self.moved_end = end
+            elif first < end:
+                self.moved_first = first if first < self.moved_first else self.moved_first
+                self.moved_end = end if end > self.moved_end else self.moved_end
         else:
             try self.xs.fill(count, 0.0)
             try self.ys.fill(count, 0.0)
             try self.depths.fill(count, -1.0)
+            self.whole_version += 1
+            self.moved_first = 0
+            self.moved_end = 0
         let points = mesh.point_span()
         let origin = mesh.position_origin()
         for id in first..<end:

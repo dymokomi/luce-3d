@@ -584,6 +584,7 @@ func steady_caches(view: View*, sphere: interop.Reference[geocore.Mesh], image: 
     defer current.release()
     var builds: i64 = -1
     var arrays: i64 = -1
+    var projections: i64 = -1
     for round in 0..<200:
         let next = try current.value().moved_points([130, 131, 132], Vector3(0.0, 0.001, 0.0))
         current.release()
@@ -602,9 +603,11 @@ func steady_caches(view: View*, sphere: interop.Reference[geocore.Mesh], image: 
         if round == 1:
             builds = overlay.value().selection_builds()
             arrays = renderer.array_count()
+            projections = overlay.value().projections()
         if round > 1:
             assert(overlay.value().selection_builds() == builds)
             assert(renderer.array_count() <= arrays)
+            assert(overlay.value().projections() == projections)
 
 pub func main(arguments: str[]) -> i32!:
     # Metal's validation, read when the device is made
