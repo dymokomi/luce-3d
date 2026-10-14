@@ -1,8 +1,12 @@
 ## Selection contours around rendered coverage, including holes, disjoint
 ## pieces, splats and fog. No triangulation or bounding-box edges are shown.
-## The opacity mask is retained until its content key or camera changes.
+## The opacity mask is retained until its content key or camera changes, and
+## the contour filter runs only over the screen box the selection covers
+## (grown by the stroke), not the whole view.
 from luce_gpu import gpu
-from luce_geocore.geocore import Mesh, Matrix4
+from luce_geocore.geocore import Mesh, Matrix4, Vector3, Bounds
+from luce_geocore.core.growing import Growing
+from cameras.camera import Projection
 from luce_geocore.kernel import subdivided_display, mesh_dispose
 from cameras.camera import Camera
 from core.material import Color
@@ -31,6 +35,9 @@ pub struct Silhouette:
     var key: u64 = 0
     var valid: bool = false
     var builds: i64 = 0
+    ## The logical-pixel box the selection covers in the mask, grown by the
+    ## stroke (x, y, width, height).
+    var area: gpu.Rect = gpu.Rect(0.0, 0.0, 0.0, 0.0)
 
     pub func init():
         self.device = gpu.Device()
@@ -45,6 +52,7 @@ pub struct Silhouette:
         self.key = 0
         self.valid = false
         self.builds = 0
+        self.area = gpu.Rect(0.0, 0.0, 0.0, 0.0)
 
     ## `key` changes with the selected objects, geometry or display settings.
     ## Meshes are already in world space, just like viewport picking meshes.
@@ -107,6 +115,7 @@ pub struct Silhouette:
             self.key = signature
             self.valid = true
             self.builds += 1
+            self.area = try covered(meshes, clouds, volumes, projection, size.width, size.height, width + 2.0)
         let format = try native.pixel_format()
         var slot: usize = 0
         if let held = format: slot = (usize)(u8)held + 1
@@ -116,7 +125,8 @@ pub struct Silhouette:
         let placement = try native.placement()
         let uniforms: f32[8] = [(f32)(placement.x * scale), (f32)(placement.y * scale), (f32)size.pixel_width, (f32)size.pixel_height,
                                  (f32)(scale / (f64)columns), (f32)(scale / (f64)rows), (f32)width, 0.12]
-        try gpu.shade(native, pipeline, gpu.Rect(0.0, 0.0, size.width, size.height), u8[]((u8*)&uniforms[0], 32), [self.texture], color = color)
+        if self.area.width <= 0.0 or self.area.height <= 0.0: return
+        try gpu.shade(native, pipeline, self.area, u8[]((u8*)&uniforms[0], 32), [self.texture], color = color)
 
     pub func mask_builds() -> i64:
         return self.builds
@@ -138,3 +148,34 @@ pub struct Silhouette:
         self.valid = false
 
 pub let silhouette_type: interop.Type[Silhouette] = interop.Type[Silhouette]("Silhouette", Silhouette.close, closeable = true, main_thread = true)
+
+## The box on a `width` by `height` view that the bounds of `meshes`,
+## `clouds` and `volumes` cover, grown by `margin` and kept inside the view;
+## the whole view when a box reaches behind the eye, or for splats (whose
+## Gaussians reach past their centers' box by their own size).
+func covered(meshes: const interop.Reference[Mesh][], clouds: const interop.Reference[GaussianSplats][], volumes: const interop.Reference[FogVolume][],
+             projection: Projection, width: f64, height: f64, margin: f64) -> gpu.Rect!:
+    var low_x = width
+    var low_y = height
+    var high_x = 0.0
+    var high_y = 0.0
+    var boxes = Growing[Bounds]()
+    defer boxes.close()
+    for mesh in meshes: try boxes.push((try mesh.get()).bounds())
+    if clouds.length > 0: return gpu.Rect(0.0, 0.0, width, height)
+    for volume in volumes: try boxes.push((try volume.get()).bounds())
+    for box in boxes.view():
+        for corner in 0..<8:
+            let point = Vector3(box.maximum.x if corner & 1 != 0 else box.minimum.x, box.maximum.y if corner & 2 != 0 else box.minimum.y, box.maximum.z if corner & 4 != 0 else box.minimum.z)
+            let on = projection.screen(point, width, height)
+            if on.z <= projection.near: return gpu.Rect(0.0, 0.0, width, height)
+            low_x = math.min(low_x, on.x)
+            low_y = math.min(low_y, on.y)
+            high_x = math.max(high_x, on.x)
+            high_y = math.max(high_y, on.y)
+    let x0 = math.max(0.0, math.floor(low_x - margin))
+    let y0 = math.max(0.0, math.floor(low_y - margin))
+    let x1 = math.min(width, math.ceil(high_x + margin))
+    let y1 = math.min(height, math.ceil(high_y + margin))
+    if x1 <= x0 or y1 <= y0: return gpu.Rect(0.0, 0.0, 0.0, 0.0)
+    return gpu.Rect(x0, y0, x1 - x0, y1 - y0)
