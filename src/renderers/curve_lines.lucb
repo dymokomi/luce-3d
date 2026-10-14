@@ -126,4 +126,8 @@ pub struct CurveLines:
         var points = Growing[Vector3]()
         defer points.close()
         try append_curve_segments(try geometry.get(), matrix, &points if not hull else none, &points if hull else none)
-        return try interop.Reference[WireBatch].adopt(try new WireBatch(points.view()) in memory.heap, wire_batch_type, memory.heap)
+        # The batch takes the endpoints over: no copy.
+        let batch = try new WireBatch[1] --- in memory.heap
+        batch[0] = try WireBatch.adopting(points.items, points.count)
+        points = Growing[Vector3]()
+        return try interop.Reference[WireBatch].adopt(batch.data, wire_batch_type, memory.heap)
