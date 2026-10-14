@@ -11,6 +11,7 @@ from luce_geocore.kernel import subdivided_display, mesh_dispose
 from cameras.camera import Camera
 from core.material import Color
 from renderers.gpu_arrays import GpuArrays
+from renderers.renderer import Renderer, renderer_arrays
 from renderers.mesh_batch import draw_polygon, MeshShading, FrameLighting
 from renderers.splat_scene import SplatScene
 from renderers.gaussian_splats import GaussianSplats, SplatLook
@@ -57,9 +58,11 @@ pub struct Silhouette:
     ## `key` changes with the selected objects, geometry or display settings.
     ## Meshes are already in world space, just like viewport picking meshes.
     ## A full-resolution mask with a logical-pixel stroke stays sharp on Retina.
+    ## `renderer`, the view's, lends the GPU copies of the meshes it drew this
+    ## frame, so the mask sends none of them again.
     pub func draw(meshes: const interop.Reference[Mesh][], clouds: const interop.Reference[GaussianSplats][], volumes: const interop.Reference[FogVolume][],
                   camera: interop.Reference[Camera], target: interop.View[gpu.RenderTarget], color: gpu.Color,
-                  key: i64, look: SplatLook = SplatLook(), width: f64 = 3.0) -> !:
+                  key: i64, look: SplatLook = SplatLook(), width: f64 = 3.0, renderer: interop.Reference[Renderer]? = none) -> !:
         if not (width > 0.0 and width <= 4.0): error(errors.invalid, "outline width must be in (0, 4]")
         if meshes.length + clouds.length + volumes.length == 0: return
         let native = try target.get()
@@ -97,7 +100,15 @@ pub struct Silhouette:
             defer recording.release()
             let mask = try recording.value().target()
             defer mask.release()
-            try self.arrays.begin(device)
+            var arrays = &self.arrays
+            var lent = false
+            if let view = renderer:
+                let shared = renderer_arrays(view.value())
+                var held = shared.device_handle()
+                if shared.has_device() and held.same(&device):
+                    arrays = shared
+                    lent = true
+            if not lent: try self.arrays.begin(device)
             let shading = MeshShading(mode = gpu.Shading.unlit)
             let lighting = FrameLighting()
             for reference in meshes:
@@ -106,12 +117,12 @@ pub struct Silhouette:
                 defer:
                     if let mesh = display: mesh_dispose(mesh)
                 let mesh = display else cage
-                try draw_polygon(&self.arrays, try mask.get(), mesh, Matrix4(), projection, &lighting, Color(1.0, 1.0, 1.0), false, &shading, 0.0, true, 0.0, Color())
+                try draw_polygon(arrays, try mask.get(), mesh, Matrix4(), projection, &lighting, Color(1.0, 1.0, 1.0), false, &shading, 0.0, true, 0.0, Color())
             try self.splats.set_look(look)
             try self.splats.draw(clouds, camera, mask, point_scale = scale)
             try self.fog.draw(volumes, camera, mask)
             _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))
-            self.arrays.trim()
+            if not lent: self.arrays.trim()
             self.key = signature
             self.valid = true
             self.builds += 1

@@ -718,6 +718,12 @@ pub struct Renderer:
             if let material = item.material:
                 material.trace(visit, context)
 
+## `renderer`'s GPU copies of its meshes' arrays, for passes over the same
+## meshes in its frame (selection silhouettes) that would otherwise send
+## them again.
+pub func renderer_arrays(renderer: Renderer*) -> GpuArrays*:
+    return &renderer.arrays
+
 pub let renderer_type: interop.Type[Renderer] = interop.Type[Renderer]("Renderer", Renderer.close, Renderer.trace, closeable = true, main_thread = true)
 
 func release_geometry(value: interop.Interface[Geometry]?):

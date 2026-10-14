@@ -94,10 +94,19 @@ pub func build_lod(arrays: LodArrays*, count: usize, low: Vector3, high: Vector3
                          to_frames = frames if arrays.frames.length > 0 else no_halves(), to_harmonics = harmonics if arrays.harmonics.length > 0 else no_halves(),
                          count = count)
     try parallel_ranges(count, 16384, (void*)&work, permute_range)
+    # Every source splat's weight and linear color, once for all levels and
+    # passes (each level merges from the original splats).
+    let weights = try new f64[count] --- in memory.heap
+    defer free(weights) in memory.heap
+    let linear = try new f32[count * 3] --- in memory.heap
+    defer free(linear) in memory.heap
+    var weighing = Merging(centers = centers, covariances = covariances, colors = colors, first = 0, size = 0, count = count, into = 0,
+                           space = arrays.space, weights = weights, linear = linear)
+    try parallel_ranges(count, 16384, (void*)&weighing, weigh_range)
     # Each level from the reordered splats, finest first.
     for level in 0..<lod_levels:
         var merging = Merging(centers = centers, covariances = covariances, colors = colors, first = 0, size = run_size(level), count = count,
-                              into = level_start(count, level), space = arrays.space)
+                              into = level_start(count, level), space = arrays.space, weights = weights, linear = linear)
         try parallel_ranges(level_count(count, level), 256, (void*)&merging, merge_range)
     free(arrays.centers) in memory.heap
     free(arrays.covariances) in memory.heap
@@ -242,6 +251,22 @@ struct Merging:
     let count: usize
     let into: usize
     let space: ColorSpace
+    ## The source splats' weights and linear colors, made once (weigh_range).
+    let weights: f64[]
+    let linear: f32[]
+
+func weigh_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (Merging*)context
+    for i in first..<end:
+        let opacity = (f64)work.centers[i * 4 + 3]
+        var weight = 0.0
+        if opacity > 0.0:
+            var sigma: f64[6]
+            for k in 0..<(usize)6: sigma[k] = (f64)work.covariances[i * 6 + k]
+            weight = opacity * mean_extent(sigma)
+        work.weights[i] = weight
+        for k in 0..<(usize)3: work.linear[i * 3 + k] = (f32)to_linear((f64)work.colors[i * 4 + k], work.space)
 
 func merge_range(context: void*, first: usize, end: usize, worker: usize):
     _ = worker
@@ -329,20 +354,16 @@ func gaussian_fits(work: const Merging*, start: usize, stop: usize, mean: Vector
 ## How much farther than its members a fitting merged Gaussian may reach.
 let overreach: f64 = 2.5
 
-## Packed splat i's DC color decoded to linear light.
+## Packed splat i's DC color decoded to linear light (made once).
 func linear_color(work: const Merging*, i: usize) -> Vector3:
-    return Vector3(to_linear((f64)work.colors[i * 4], work.space), to_linear((f64)work.colors[i * 4 + 1], work.space), to_linear((f64)work.colors[i * 4 + 2], work.space))
+    return Vector3((f64)work.linear[i * 3], (f64)work.linear[i * 3 + 1], (f64)work.linear[i * 3 + 2])
 
 func center_of(work: const Merging*, i: usize) -> Vector3:
     return Vector3((f64)work.centers[i * 4], (f64)work.centers[i * 4 + 1], (f64)work.centers[i * 4 + 2])
 
-## A splat's weight: its opacity times its mean squared extent.
+## A splat's weight: its opacity times its mean squared extent (made once).
 func splat_weight(work: const Merging*, i: usize) -> f64:
-    let opacity = (f64)work.centers[i * 4 + 3]
-    if not (opacity > 0.0): return 0.0
-    var sigma: f64[6]
-    for k in 0..<(usize)6: sigma[k] = (f64)work.covariances[i * 6 + k]
-    return opacity * mean_extent(sigma)
+    return work.weights[i]
 
 ## (det Σ)^⅓ of a packed covariance (xx, xy, xz, yy, yz, zz): its mean
 ## squared standard deviation; a flat or degenerate one falls back to a
