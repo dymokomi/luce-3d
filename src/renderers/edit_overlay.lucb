@@ -8,8 +8,8 @@ from luce_std import math
 import memory
 import ownership
 import errors
-from luce_geocore.geocore import Vector3, Mesh, Selection
-from luce_geocore.kernel import selection_bits, trailing_zeros, selection_weights
+from luce_geocore.geocore import Vector3, Mesh, Selection, Domain
+from luce_geocore.kernel import Attribute, selection_bits, trailing_zeros, selection_weights
 from cameras.camera import Camera, Projection
 from renderers.wire import WireRenderer
 from renderers.projection import projection_matrix
@@ -18,6 +18,22 @@ from renderers.edit_markers import Markers
 from renderers.edit_screen import Screen
 import renderers.edit_screen as screens
 from luce_geocore.core.growing import Growing, same_ids
+
+## The depth bias that draws a line on a surface 0.2% of the way to the
+## eye: in perspective a fixed bias would reach the square of the distance
+## further, so it is set for the distance of the mesh's middle.
+func line_bias(projection: Projection, mesh: const Mesh*) -> f64:
+    let box = mesh.bounds()
+    let depth = math.max(projection.near, projection.depth(box.minimum.add(box.maximum).multiply_scalar(0.5)))
+    if projection.orthographic(): return 0.002 * depth / math.max(projection.far - projection.near, 0.000001)
+    return 0.002 * projection.near / depth
+
+## The edges whose mark `entry` is above 0, as lines into `lines`.
+func marked_lines(mesh: const Mesh*, entry: const Attribute*, edges: i64, lines: Growing[Vector3]*) -> !:
+    for edge in 0..<edges:
+        if entry.number((usize)edge, 0) <= 0.0: continue
+        try lines.push(try mesh.point(try mesh.edge_point(edge, 0)))
+        try lines.push(try mesh.point(try mesh.edge_point(edge, 1)))
 
 ## Component modes: 0 points, 1 edges, 2 faces, 3 vertices (corners).
 pub struct EditOverlay:
@@ -37,6 +53,11 @@ pub struct EditOverlay:
     ## over the model, and the selection it was built from.
     var preview: Growing[Vector3]
     var preview_key: u64
+    ## Edges marked as UV seams and hard (luce-geocore's `seam` and `sharp`
+    ## edge marks, above 0), as lines; built once per mesh when drawn.
+    var seams: Growing[Vector3]
+    var sharps: Growing[Vector3]
+    var marks_built: bool
     ## Points every face of which is hidden (an editor's Hide): no marker.
     var hidden_points: Growing[u32]
     var hidden_key: u64
@@ -74,6 +95,9 @@ pub struct EditOverlay:
         self.hover = Growing[Vector3]()
         self.preview = Growing[Vector3]()
         self.preview_key = 0
+        self.seams = Growing[Vector3]()
+        self.sharps = Growing[Vector3]()
+        self.marks_built = false
         self.hidden_points = Growing[u32]()
         self.hidden_key = 0
         self.selected = Growing[bool]()
@@ -110,6 +134,9 @@ pub struct EditOverlay:
             self.wire_points.clear()
             self.edge_starts.clear()
             self.point_edges.clear()
+            self.seams.clear()
+            self.sharps.clear()
+            self.marks_built = false
             self.screen.invalidate()
         let changed = changed_mesh or mode != self.mode or not same_ids(&self.selection, selection)
         if changed:
@@ -251,9 +278,13 @@ pub struct EditOverlay:
     ## `hidden`, when given, first draws the selection's lines over
     ## everything in that color, so a selection behind or inside a surface
     ## (a pick mesh the viewport does not draw, such as SDF proxies) still
-    ## shows; the visible parts then draw in `accent` over it.
+    ## shows; the visible parts then draw in `accent` over it. `seam` and
+    ## `sharp`, when given, draw the edges marked as seams and hard (Blender's
+    ## red and cyan), a little wider than the wireframe and under the
+    ## selection, which draws over them.
     pub func draw(camera: interop.Reference[Camera], target: interop.View[gpu.RenderTarget],
-                  wire: gpu.Color, accent: gpu.Color, point: gpu.Color, wires: bool = true, hidden: gpu.Color? = none, preview: gpu.Color? = none) -> !:
+                  wire: gpu.Color, accent: gpu.Color, point: gpu.Color, wires: bool = true, hidden: gpu.Color? = none, preview: gpu.Color? = none,
+                  seam: gpu.Color? = none, sharp: gpu.Color? = none) -> !:
         let current = self.mesh else return
         let mesh = try current.get()
         let native = try target.get()
@@ -264,8 +295,19 @@ pub struct EditOverlay:
             if self.accent.count > 0: try WireRenderer.lines(self.accent.view(), camera, target, dim, 1.5, 0.000001, false)
         if self.faces.count > 0:
             try WireRenderer.triangles(self.faces.view(), camera, target, accent)
+        # The selection's lines and the marks stand a little toward the eye,
+        # so the surface does not break them up; the marks write no depth,
+        # so the selection's lines along the same edges draw over them
+        # instead of fighting them.
+        let bias = line_bias(try camera.value().projection(size.width / size.height), mesh)
+        if seam != none or sharp != none:
+            if not self.marks_built: try self.build_marks(mesh)
+            if let color = sharp:
+                if self.sharps.count > 0: try WireRenderer.lines(self.sharps.view(), camera, target, color, 2.0, bias, writes_depth = false)
+            if let color = seam:
+                if self.seams.count > 0: try WireRenderer.lines(self.seams.view(), camera, target, color, 2.0, bias, writes_depth = false)
         if self.accent.count > 0:
-            try WireRenderer.lines(self.accent.view(), camera, target, accent, 2.5)
+            try WireRenderer.lines(self.accent.view(), camera, target, accent, 2.5, bias)
         if self.preview.count > 0:
             try WireRenderer.lines(self.preview.view(), camera, target, preview else point, 2.5)
         if self.hover.count > 0:
@@ -303,6 +345,33 @@ pub struct EditOverlay:
                 count += 1.0
         if count == 0.0: return geometry.bounds().minimum.add(geometry.bounds().maximum).multiply_scalar(0.5)
         return sum.multiply_scalar(1.0 / count)
+
+    ## The lines of the edges marked `seam` and `sharp` (above 0): a pass
+    ## over the edges only when the mesh has either mark.
+    func build_marks(mesh: const Mesh*) -> !:
+        self.marks_built = true
+        self.seams.clear()
+        self.sharps.clear()
+        let seam = mesh.attribute_on("seam", Domain.edge)
+        let sharp = mesh.attribute_on("sharp", Domain.edge)
+        if seam < 0 and sharp < 0: return
+        let edges = try mesh.edge_count()
+        if seam >= 0: try marked_lines(mesh, try mesh.attribute_entry(seam), edges, &self.seams)
+        if sharp >= 0: try marked_lines(mesh, try mesh.attribute_entry(sharp), edges, &self.sharps)
+
+    ## Edges drawn as seams and as hard, for tests: built as the next draw
+    ## would build them.
+    pub func seam_segments() -> i64!:
+        try self.marks_ready()
+        return (i64)self.seams.count // 2
+
+    pub func hard_segments() -> i64!:
+        try self.marks_ready()
+        return (i64)self.sharps.count // 2
+
+    func marks_ready() -> !:
+        let current = self.mesh else return
+        if not self.marks_built: try self.build_marks(try current.get())
 
     ## Selection batch sizes, for tests and diagnostics.
     pub func accent_segments() -> i64:
@@ -480,6 +549,8 @@ pub struct EditOverlay:
         self.faces.close()
         self.hover.close()
         self.preview.close()
+        self.seams.close()
+        self.sharps.close()
         self.hidden_points.close()
         self.selected.close()
         self.edge_starts.close()
