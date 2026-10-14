@@ -12,7 +12,7 @@ import memory
 from luce_3d import graphics as three
 from luce_geocore import geocore
 from luce_geocore.geocore import MeshNormals, MeshPrimitives, AttributeKernels, Vector3, Verbs, Subdivision
-from luce_3d.graphics import Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, Camera, Renderer, Color, WireRenderer, MeshGeometry, GroundGrid
+from luce_3d.graphics import Scene, Mesh, Geometry, Material, Object3D, MeshLambertMaterial, AmbientLight, DirectionalLight, Camera, Renderer, Color, WireRenderer, MeshGeometry, GroundGrid, EditOverlay
 
 let width: u32 = 160
 let height: u32 = 120
@@ -549,6 +549,63 @@ func draft_map(view: View*, image: u8[]) -> !:
     assert(image[at] > 150 and image[at + 1] < 100 and image[at + 2] < 100)
     try view.renderer.value().set_shading(0)
 
+## Interaction keeps one GPU copy per array: a new face selection or hidden
+## set rewrites the copies of the last one, a long run of point moves patches
+## the positions in place, and the Edit overlay remakes none of its layers
+## when only points moved (they draw over the GPU positions).
+func steady_caches(view: View*, sphere: interop.Reference[geocore.Mesh], image: u8[]) -> !:
+    try view.show(sphere, false)
+    let renderer = view.renderer.value()
+    try renderer.set_face_selection(sphere, [0], Color(1.0, 0.0, 0.0), 1.0)
+    let first = try geocore.Selection.of(sphere, "0-3", 2)
+    try renderer.set_hidden_faces(sphere, first)
+    first.release()
+    try view.draw(image)
+    # Copies earlier tests left age out meanwhile: none may be added.
+    let held = renderer.array_count()
+    let picks: str[4] = ["0-3", "5", "7-9", "11 40"]
+    let faces = sphere.value().face_count()
+    for round in 0..<100:
+        try renderer.set_face_selection(sphere, [(i64)round % faces, ((i64)round * 7 + 3) % faces], Color(1.0, 0.0, 0.0), 1.0)
+        let hidden = try geocore.Selection.of(sphere, picks[(usize)round % 4], 2)
+        try renderer.set_hidden_faces(sphere, hidden)
+        hidden.release()
+        try view.draw(image)
+        assert(renderer.array_count() <= held)
+    renderer.clear_hidden_faces()
+    var none_faces: i64[]
+    try renderer.set_face_selection(sphere, none_faces)
+    try view.draw(image)
+    # A drag: each move edits the last one's points; the overlay shows a
+    # point selection over them.
+    let overlay = try interop.Reference[EditOverlay].adopt(new EditOverlay() in memory.heap, three.edit_overlay_type, memory.heap)
+    defer overlay.release()
+    var current = sphere.clone()
+    defer current.release()
+    var builds: i64 = -1
+    var arrays: i64 = -1
+    for round in 0..<200:
+        let next = try current.value().moved_points([130, 131, 132], Vector3(0.0, 0.001, 0.0))
+        current.release()
+        current = next
+        try view.show(current, false)
+        let recording = try view.texture.frame()
+        defer recording.release()
+        let target = try recording.value().target()
+        defer target.release()
+        let result = renderer.render(view.root, view.camera, target, true)
+        defer result.release()
+        try result.get()
+        try overlay.value().update(current, 0, [130, 131, 132, 140], -1)
+        try overlay.value().draw(view.camera, target, gpu.Color(0.3, 0.3, 0.3), gpu.Color(1.0, 0.5, 0.0), gpu.Color(1.0, 1.0, 1.0))
+        _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0))
+        if round == 1:
+            builds = overlay.value().selection_builds()
+            arrays = renderer.array_count()
+        if round > 1:
+            assert(overlay.value().selection_builds() == builds)
+            assert(renderer.array_count() <= arrays)
+
 pub func main(arguments: str[]) -> i32!:
     # Metal's validation, read when the device is made
     try os.set_env("MTL_DEBUG_LAYER", "1")
@@ -598,5 +655,6 @@ pub func main(arguments: str[]) -> i32!:
     try square_on_wires(&view, cube, image)
     try two_sided(&view, cube, legacy_image, image)
     try subdivided(&view, cube, image, legacy_image)
-    print("ok mesh pixels: GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded; the grid hides behind a raised cube; wires on faces seen square on orthographically show; inside-out meshes light on the eye's side; curvature maps and their radius band; draft against a pull direction; GPU face picking and selection tint")
+    try steady_caches(&view, colored, image)
+    print("ok mesh pixels: steady GPU copies over 100 selection and hide changes and a 200-move drag; GPU arrays match the per-vertex path; Move uploads positions and normals; zebra stripes scale, break at creases and flow; lines drawn after meshes are occluded; the grid hides behind a raised cube; wires on faces seen square on orthographically show; inside-out meshes light on the eye's side; curvature maps and their radius band; draft against a pull direction; GPU face picking and selection tint")
     return 0

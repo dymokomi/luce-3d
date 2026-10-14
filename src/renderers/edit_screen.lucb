@@ -1,12 +1,87 @@
-## Screen projection for Edit overlays: every point once per camera, for the
-## point markers, and single points for picking.
+## Screen projection for Edit overlays: every point once per camera (again
+## for only the moved ones during a drag), for the point markers and the
+## pointer's search; the CAD boundary segments binned by screen cell once per
+## camera, so a hover tests the few near the pointer; and single points.
 from luce_std import math
 from luce_geocore.geocore import Vector3, Mesh
+from luce_geocore.kernel import Attribute
 from cameras.camera import Projection
 from luce_geocore.core.growing import Growing
 
 ## Picking radius in logical pixels.
 let reach: f64 = 11.0
+## The side of a search cell in logical pixels: over twice the reach, so
+## the pointer's neighbourhood meets at most four cells.
+let cell: f64 = 32.0
+
+## What a projection depends on: the camera and the view's size.
+func view_key(p: Projection, width: f64, height: f64) -> f64[19]:
+    return [p.position.x, p.position.y, p.position.z, p.right.x, p.right.y, p.right.z, p.up.x, p.up.y, p.up.z,
+            p.backward.x, p.backward.y, p.backward.z, p.focal, p.aspect, p.near, p.far, p.ortho, width, height]
+
+func same_key(a: const f64[19]*, b: const f64[19]*) -> bool:
+    for at in 0..<(usize)19:
+        if a[at] != b[at]: return false
+    return true
+
+func unset_key() -> f64[19]:
+    var key: f64[19]
+    for at in 0..<(usize)19: key[at] = math.nan
+    return key
+
+## Screen cells binning ids: `starts` (one per cell, and the end) into
+## `members`. Filled in two rounds over the same items: `count` each, then
+## `settle`, then `place` each in the same order, then `finish`.
+pub struct Cells:
+    var starts: Growing[u32]
+    var members: Growing[u32]
+    var columns: usize
+    var rows: usize
+
+    pub func init():
+        self.starts = Growing[u32]()
+        self.members = Growing[u32]()
+        self.columns = 0
+        self.rows = 0
+
+    func size(width: f64, height: f64) -> !:
+        self.columns = (usize)math.max(1.0, math.ceil(width / cell))
+        self.rows = (usize)math.max(1.0, math.ceil(height / cell))
+        try self.starts.fill(self.columns * self.rows + 1, 0)
+
+    ## Cells overlapping x0..x1, y0..y1 (clamped to the view): first and
+    ## last column, first and last row.
+    func span(x0: f64, y0: f64, x1: f64, y1: f64) -> (usize, usize, usize, usize):
+        let c0 = (usize)math.clamp(math.floor(x0 / cell), 0.0, (f64)(self.columns - 1))
+        let c1 = (usize)math.clamp(math.floor(x1 / cell), 0.0, (f64)(self.columns - 1))
+        let r0 = (usize)math.clamp(math.floor(y0 / cell), 0.0, (f64)(self.rows - 1))
+        let r1 = (usize)math.clamp(math.floor(y1 / cell), 0.0, (f64)(self.rows - 1))
+        return (c0, c1, r0, r1)
+
+    func count(slot: usize):
+        self.starts.items[slot + 1] += 1
+
+    func settle() -> !:
+        let cells = self.columns * self.rows
+        for at in 0..<cells: self.starts.items[at + 1] += self.starts.items[at]
+        try self.members.fill((usize)self.starts.items[cells], 0)
+
+    ## Placing advances each cell's start to its end ...
+    func place(slot: usize, id: usize):
+        self.members.items[(usize)self.starts.items[slot]] = (u32)id
+        self.starts.items[slot] += 1
+
+    ## ... so the starts move back one cell.
+    func finish():
+        var at = self.columns * self.rows
+        while at > 0:
+            self.starts.items[at] = self.starts.items[at - 1]
+            at -= 1
+        self.starts.items[0] = 0
+
+    pub func close():
+        self.starts.close()
+        self.members.close()
 
 ## Logical-pixel positions and view depths of every point for one camera.
 ## A depth of -1 marks a point behind the near plane.
@@ -14,43 +89,153 @@ pub struct Screen:
     pub var xs: Growing[f32]
     pub var ys: Growing[f32]
     pub var depths: Growing[f32]
-    var key: f64[21]
+    var key: f64[19]
+    ## The positions projected (their change id); 0 for none.
+    var points: u64
     pub var version: u64 = 0
+    ## The points binned by cell for the pointer's search (a point cloud),
+    ## as of projection `binned`.
+    var cells: Cells
+    var binned: u64
 
     pub func init():
         self.xs = Growing[f32]()
         self.ys = Growing[f32]()
         self.depths = Growing[f32]()
-        var key: f64[21]
-        for at in 0..<(usize)21: key[at] = math.nan
-        self.key = key
+        self.key = unset_key()
+        self.points = 0
         self.version = 0
+        self.cells = Cells()
+        self.binned = 0
 
     pub func invalidate():
-        self.key[0] = math.nan
+        self.key = unset_key()
+        self.points = 0
 
+    ## Project `mesh`'s points for `p`: all of them when the camera or the
+    ## mesh changed, only the moved range when the positions are an edit of
+    ## the ones projected (a drag).
     pub func update(mesh: const Mesh*, p: Projection, width: f64, height: f64) -> !:
-        let key: f64[21] = [p.position.x, p.position.y, p.position.z, p.right.x, p.right.y, p.right.z, p.up.x, p.up.y, p.up.z,
-                            p.backward.x, p.backward.y, p.backward.z, p.focal, p.aspect, p.near, p.far, p.ortho, width, height, (f64)mesh.point_count(), 0.0]
-        var same = true
-        for at in 0..<(usize)21: same = same and key[at] == self.key[at]
-        if same: return
+        let key = view_key(p, width, height)
         let count = (usize)mesh.point_count()
-        try self.xs.fill(count, 0.0)
-        try self.ys.fill(count, 0.0)
-        try self.depths.fill(count, -1.0)
-        for id in 0..<count:
-            let at = p.screen(try mesh.point((i64)id), width, height)
+        let same_view = same_key(&key, &self.key) and self.xs.count == count
+        if same_view and mesh.points_id() == self.points: return
+        var first: usize = 0
+        var end = count
+        if same_view and self.points != 0 and mesh.points_parent() == self.points:
+            let changed = mesh.points_changed()
+            first = changed.0
+            end = changed.1
+        else:
+            try self.xs.fill(count, 0.0)
+            try self.ys.fill(count, 0.0)
+            try self.depths.fill(count, -1.0)
+        let points = mesh.point_span()
+        let origin = mesh.position_origin()
+        for id in first..<end:
+            let at = p.screen(points[id].vector().add(origin), width, height)
             self.xs.items[id] = (f32)at.x
             self.ys.items[id] = (f32)at.y
             self.depths.items[id] = (f32)at.z if at.z > p.near else -1.0
         self.key = key
+        self.points = mesh.points_id()
         self.version += 1
+
+    ## The point in front of the camera nearest (x, y) within `reach`, or
+    ## -1: a search of the cells around the pointer, binned once per
+    ## projection.
+    pub func nearest(x: f64, y: f64, width: f64, height: f64) -> i64!:
+        if self.binned != self.version:
+            try self.cells.size(width, height)
+            for round in 0..<(usize)2:
+                for id in 0..<self.depths.count:
+                    let slot = self.slot(id, width, height) else continue
+                    if round == 0: self.cells.count(slot)
+                    else: self.cells.place(slot, id)
+                if round == 0: try self.cells.settle()
+            self.cells.finish()
+            self.binned = self.version
+        var nearest: i64 = -1
+        var closest = reach
+        let around = self.cells.span(x - reach, y - reach, x + reach, y + reach)
+        for row in around.2..<around.3 + 1:
+            for column in around.0..<around.1 + 1:
+                let slot = row * self.cells.columns + column
+                for at in self.cells.starts.items[slot]..<self.cells.starts.items[slot + 1]:
+                    let id = (usize)self.cells.members.items[(usize)at]
+                    let distance = math.hypot((f64)self.xs.items[id] - x, (f64)self.ys.items[id] - y)
+                    if distance < closest:
+                        closest = distance
+                        nearest = (i64)id
+        return nearest
+
+    ## The cell of point `id`, or none behind the camera or off the view.
+    func slot(id: usize, width: f64, height: f64) -> usize?:
+        if self.depths.items[id] <= 0.0: return none
+        let x = (f64)self.xs.items[id]
+        let y = (f64)self.ys.items[id]
+        if not (x >= -reach and y >= -reach and x < width + reach and y < height + reach): return none
+        let at = self.cells.span(x, y, x, y)
+        return at.2 * self.cells.columns + at.0
 
     pub func close():
         self.xs.close()
         self.ys.close()
         self.depths.close()
+        self.cells.close()
+
+## A CAD mesh's boundary segments (edges with a `cad_edge` id) binned by
+## the screen cells they cross, once per camera and mesh.
+pub struct Segments:
+    var key: f64[19]
+    var points: u64
+    var topology: u64
+    var cells: Cells
+
+    pub func init():
+        self.key = unset_key()
+        self.points = 0
+        self.topology = 0
+        self.cells = Cells()
+
+    func update(mesh: const Mesh*, owners: const Attribute*, p: Projection, width: f64, height: f64) -> !:
+        let key = view_key(p, width, height)
+        if same_key(&key, &self.key) and mesh.points_id() == self.points and mesh.corners_id() == self.topology: return
+        try self.cells.size(width, height)
+        let edges = try mesh.edge_span()
+        let count = edges.length // 2
+        for round in 0..<(usize)2:
+            for edge in 0..<count:
+                let span = self.extent(mesh, owners, edges, edge, p, width, height) else continue
+                for row in span.2..<span.3 + 1:
+                    for column in span.0..<span.1 + 1:
+                        let slot = row * self.cells.columns + column
+                        if round == 0: self.cells.count(slot)
+                        else: self.cells.place(slot, edge)
+            if round == 0: try self.cells.settle()
+        self.cells.finish()
+        self.key = key
+        self.points = mesh.points_id()
+        self.topology = mesh.corners_id()
+
+    ## The cells a tagged segment in front of the camera covers on screen,
+    ## grown by the reach, or none.
+    func extent(mesh: const Mesh*, owners: const Attribute*, edges: const i32[], edge: usize, p: Projection, width: f64, height: f64) -> (usize, usize, usize, usize)?:
+        if owners.number(edge, 0) < 0.0: return none
+        let points = mesh.point_span()
+        let origin = mesh.position_origin()
+        let start = p.screen(points[(usize)edges[edge * 2]].vector().add(origin), width, height)
+        let end = p.screen(points[(usize)edges[edge * 2 + 1]].vector().add(origin), width, height)
+        if start.z <= p.near or end.z <= p.near: return none
+        let x0 = math.min(start.x, end.x) - reach
+        let x1 = math.max(start.x, end.x) + reach
+        let y0 = math.min(start.y, end.y) - reach
+        let y1 = math.max(start.y, end.y) + reach
+        if x1 < 0.0 or y1 < 0.0 or x0 >= width or y0 >= height: return none
+        return self.cells.span(x0, y0, x1, y1)
+
+    pub func close():
+        self.cells.close()
 
 ## Logical-pixel position and view depth of one point; depth <= near means
 ## the point is behind the camera.
@@ -63,28 +248,20 @@ pub func face_under(mesh: const Mesh*, p: Projection, x: f64, y: f64, width: f64
     if known >= -1: return known
     return try mesh.ray_face(p.ray_origin(x, y, width, height), try p.ray_direction(x, y, width, height).normalized())
 
-## Pick the point or edge of the face under the cursor nearest to it on
-## screen, within `reach` pixels. The face comes from one BVH ray, so it is
-## the visible one; the nearest edge to a point inside a visible polygon is
-## one of its own edges. -1 when the cursor is off the mesh or too far.
-## A mesh without faces (a point cloud, such as CAD control vertices) has
-## nothing to hide its points: the nearest point on screen, in front of the
-## camera, within `reach`.
-pub func pick(mesh: const Mesh*, edges: bool, p: Projection, x: f64, y: f64, width: f64, height: f64, known: i64 = -2) -> i64!:
+## Pick the point or edge of `face` (the face under the cursor) nearest to
+## it on screen, within `reach` pixels; -1 when the cursor is off the mesh
+## or too far. The face is the visible one, and the nearest edge to a point
+## inside a visible polygon is one of its own edges. A mesh without faces
+## (a point cloud, such as CAD control vertices) has nothing to hide its
+## points: the nearest point on screen in front of the camera, from the
+## points `screen` projected. CAD boundaries search `segments`.
+pub func pick(mesh: const Mesh*, edges: bool, p: Projection, x: f64, y: f64, width: f64, height: f64, face: i64, screen: Screen*, segments: Segments*) -> i64!:
     if mesh.face_count() == 0:
         if edges: return -1
-        var nearest: i64 = -1
-        var closest = reach
-        for point in 0..<mesh.point_count():
-            let here = project(try mesh.point(point), p, width, height)
-            let distance = math.hypot(here.x - x, here.y - y)
-            if here.z > p.near and distance < closest:
-                closest = distance
-                nearest = point
-        return nearest
+        try screen.update(mesh, p, width, height)
+        return try screen.nearest(x, y, width, height)
     if edges and mesh.find_attribute("cad_edge", 4) >= 0:
-        return try cad_edge_at(mesh, p, x, y, width, height)
-    let face = try face_under(mesh, p, x, y, width, height, known)
+        return try cad_edge_at(mesh, p, x, y, width, height, segments)
     if face < 0 or face >= mesh.face_count(): return -1
     let size = try mesh.face_size(face)
     var found: i64 = -1
@@ -108,34 +285,44 @@ pub func pick(mesh: const Mesh*, edges: bool, p: Projection, x: f64, y: f64, wid
         previous = here
     return found
 
-## CAD boundaries may span many tessellation polygons. Search their tagged
-## segments, ignoring interior mesh edges, and test visibility at the edge.
-func cad_edge_at(mesh: const Mesh*, p: Projection, x: f64, y: f64, width: f64, height: f64) -> i64!:
+## CAD boundaries may span many tessellation polygons: search the tagged
+## segments in the cells around the pointer, ignoring interior mesh edges,
+## and test visibility at the edge.
+func cad_edge_at(mesh: const Mesh*, p: Projection, x: f64, y: f64, width: f64, height: f64, segments: Segments*) -> i64!:
     let owners = try mesh.attribute_entry(mesh.find_attribute("cad_edge", 4))
+    try segments.update(mesh, owners, p, width, height)
+    let edges = try mesh.edge_span()
+    let points = mesh.point_span()
+    let origin = mesh.position_origin()
     var found: i64 = -1
     var best = reach
-    for edge in 0..<(try mesh.edge_count()):
-        if owners.number((usize)edge, 0) < 0.0: continue
-        let a = try mesh.point(try mesh.edge_point(edge, 0))
-        let b = try mesh.point(try mesh.edge_point(edge, 1))
-        let start = project(a, p, width, height)
-        let end = project(b, p, width, height)
-        if start.z <= p.near or end.z <= p.near: continue
-        let dx = end.x - start.x
-        let dy = end.y - start.y
-        let t = math.clamp(((x - start.x) * dx + (y - start.y) * dy) / math.max(1e-12, dx * dx + dy * dy), 0.0, 1.0)
-        let distance = math.hypot(x - start.x - t * dx, y - start.y - t * dy)
-        if distance >= best: continue
-        # The point on the actual segment (perspective-correct), and whether
-        # the surface hides it from the view ray through it.
-        let fraction = t if p.orthographic() else (t / end.z) / ((1.0 - t) / start.z + t / end.z)
-        let point = a.add(b.subtract(a).multiply_scalar(fraction))
-        let on = p.screen(point, width, height)
-        let origin = p.ray_origin(on.x, on.y, width, height)
-        let offset = point.subtract(origin)
-        let depth = offset.length()
-        let hit = try mesh.ray_distance(origin, try offset.normalized())
-        if hit >= 0.0 and hit < depth - math.max(1e-5, depth * 1e-5): continue
-        found = edge
-        best = distance
+    let cells = &segments.cells
+    let around = cells.span(x - reach, y - reach, x + reach, y + reach)
+    for row in around.2..<around.3 + 1:
+        for column in around.0..<around.1 + 1:
+            let slot = row * cells.columns + column
+            for member in cells.starts.items[slot]..<cells.starts.items[slot + 1]:
+                let edge = (usize)cells.members.items[(usize)member]
+                if (i64)edge == found: continue
+                let a = points[(usize)edges[edge * 2]].vector().add(origin)
+                let b = points[(usize)edges[edge * 2 + 1]].vector().add(origin)
+                let start = project(a, p, width, height)
+                let end = project(b, p, width, height)
+                let dx = end.x - start.x
+                let dy = end.y - start.y
+                let t = math.clamp(((x - start.x) * dx + (y - start.y) * dy) / math.max(1e-12, dx * dx + dy * dy), 0.0, 1.0)
+                let distance = math.hypot(x - start.x - t * dx, y - start.y - t * dy)
+                if distance >= best: continue
+                # The point on the actual segment (perspective-correct), and
+                # whether the surface hides it from the view ray through it.
+                let fraction = t if p.orthographic() else (t / end.z) / ((1.0 - t) / start.z + t / end.z)
+                let point = a.add(b.subtract(a).multiply_scalar(fraction))
+                let on = p.screen(point, width, height)
+                let ray_from = p.ray_origin(on.x, on.y, width, height)
+                let offset = point.subtract(ray_from)
+                let depth = offset.length()
+                let hit = try mesh.ray_distance(ray_from, try offset.normalized())
+                if hit >= 0.0 and hit < depth - math.max(1e-5, depth * 1e-5): continue
+                found = (i64)edge
+                best = distance
     return found

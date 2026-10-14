@@ -47,7 +47,11 @@ pub func epoch() -> u64:
 pub struct ObjectNode:
     let identifier: u64
     var parent: u64
+    ## The children in `children[..<count]`; the storage grows by doubling
+    ## and keeps its room, so adding a scene's objects one by one copies
+    ## each child a constant number of times on average.
     var children: Child[]
+    var count: usize
     var location: Vector3
     var angles: Vector3
     var scaling: Vector3
@@ -62,6 +66,7 @@ pub struct ObjectNode:
         self.parent = 0
         var empty: Child[]
         self.children = empty
+        self.count = 0
         self.location = Vector3()
         self.angles = Vector3()
         self.scaling = Vector3(1.0, 1.0, 1.0)
@@ -83,13 +88,17 @@ pub struct ObjectNode:
     pub func scale() -> Vector3:
         return self.scaling
 
+    ## Setting what is already set changes nothing, so renderers keep what
+    ## they prepared.
     pub func set_position(position: Vector3) -> !:
         try bounded(position)
+        if position == self.location: return
         self.location = position
         ObjectNode.invalidate()
 
     pub func set_rotation(rotation: Vector3) -> !:
         try bounded(rotation)
+        if rotation == self.angles: return
         self.angles = rotation
         ObjectNode.invalidate()
 
@@ -97,6 +106,7 @@ pub struct ObjectNode:
         try bounded(scale)
         if math.abs(scale.x) < 0.000001 or math.abs(scale.y) < 0.000001 or math.abs(scale.z) < 0.000001:
             error(errors.invalid, "scale magnitudes must be at least 0.000001")
+        if scale == self.scaling: return
         self.scaling = scale
         ObjectNode.invalidate()
 
@@ -107,6 +117,7 @@ pub struct ObjectNode:
         return self.visible
 
     pub func set_visible(visible: bool):
+        if visible == self.visible: return
         self.visible = visible
         ObjectNode.invalidate()
 
@@ -114,10 +125,10 @@ pub struct ObjectNode:
         revision = revision +? 1 else trap("scene revision exhausted")
 
     pub func child_count() -> i64:
-        return (i64)self.children.length
+        return (i64)self.count
 
     pub func child(index: i64) -> interop.Interface[Object3D]!:
-        if index < 0 or (usize)index >= self.children.length:
+        if index < 0 or (usize)index >= self.count:
             error(errors.invalid, "child index is outside this scene object")
         return self.children[(usize)index].object.clone()
 
@@ -131,18 +142,20 @@ pub struct ObjectNode:
         let state = try node.get()
         if state.parent != 0:
             error(errors.busy, "remove an object from its current parent before adding it")
-        if self.children.length >= 1024 or try contains(state, self.identifier, 0):
+        if self.count >= 1024 or try contains(state, self.identifier, 0):
             error(errors.invalid, "scene membership would exceed its limit or create a cycle")
-        let replacement = try new Child[self.children.length + 1] --- in memory.heap
-        for index in 0..<self.children.length:
-            replacement[index] = self.children[index]
-        replacement[self.children.length] = Child(child.clone(), node)
-        let previous = self.children
-        self.children = replacement
+        if self.count == self.children.length:
+            let replacement = try new Child[8 if self.count == 0 else self.count * 2] --- in memory.heap
+            for index in 0..<self.count:
+                replacement[index] = self.children[index]
+            let previous = self.children
+            self.children = replacement
+            if previous.length > 0:
+                free(previous) in memory.heap
+        self.children[self.count] = Child(child.clone(), node)
+        self.count += 1
         state.parent = self.identifier
         ObjectNode.invalidate()
-        if previous.length > 0:
-            free(previous) in memory.heap
 
     pub func remove(child: interop.Interface[Object3D]) -> bool!:
         if self.changing:
@@ -150,22 +163,15 @@ pub struct ObjectNode:
         self.changing = true
         defer self.finish_change()
         var index: usize = 0
-        while index < self.children.length:
+        while index < self.count:
             if self.children[index].object.owner == child.owner:
                 let removed = self.children[index]
-                let previous = self.children
-                var replacement: Child[]
-                if previous.length > 1:
-                    replacement = try new Child[previous.length - 1] --- in memory.heap
-                    var destination: usize = 0
-                    for source in 0..<previous.length:
-                        if source != index:
-                            replacement[destination] = previous[source]
-                            destination += 1
-                self.children = replacement
+                # The later children move down one, keeping their order.
+                for later in index + 1..<self.count:
+                    self.children[later - 1] = self.children[later]
+                self.count -= 1
                 removed.node.value().parent = 0
                 ObjectNode.invalidate()
-                free(previous) in memory.heap
                 removed.object.release()
                 removed.node.release()
                 return true
@@ -178,12 +184,14 @@ pub struct ObjectNode:
         self.changing = true
         defer self.finish_change()
         let previous = self.children
+        let count = self.count
         var empty: Child[]
         self.children = empty
-        for child in previous:
+        self.count = 0
+        for child in previous[..<count]:
             child.node.value().parent = 0
         ObjectNode.invalidate()
-        for child in previous:
+        for child in previous[..<count]:
             child.object.release()
             child.node.release()
         if previous.length > 0:
@@ -196,7 +204,7 @@ pub struct ObjectNode:
         self.clear()
 
     func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
-        for child in self.children:
+        for child in self.children[..<self.count]:
             child.object.trace(visit, context)
             child.node.trace(visit, context)
 
@@ -215,7 +223,7 @@ func contains(node: ObjectNode*, identifier: u64, depth: usize) -> bool!:
         error(errors.limit, "a scene supports at most 64 levels")
     if node.identifier == identifier:
         return true
-    for child in node.children:
+    for child in node.children[..<node.count]:
         if try contains(child.node.value(), identifier, depth + 1):
             return true
     return false

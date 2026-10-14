@@ -93,6 +93,9 @@ pub struct Renderer:
     var hidden: FaceHighlight
     var display_hidden: FaceHighlight
     var placements: Growing[Placement]
+    ## The object identities a frame's traversal met: open addressing, 0
+    ## empty, twice the object limit's slots.
+    var seen: Growing[u64]
 
     ## Objects whose prepared data survived a scene change (tests, profiling).
     pub func reused_count() -> i64:
@@ -172,7 +175,7 @@ pub struct Renderer:
         return try self.picker.face(&self.arrays, self.arrays.device_handle(), geometry, world, projection, key, x, y, (u32)width, (u32)height, hidden)
 
     ## The hidden faces for `geometry`: the cage's, or their display faces.
-    func hidden_of(geometry: const geocore.Mesh*) -> const FaceHighlight*:
+    func hidden_of(geometry: const geocore.Mesh*) -> FaceHighlight*:
         return &self.display_hidden if self.display_hidden.topology == geometry.corners_id() else &self.hidden
 
     ## `current` (on points, edges or faces of `mesh`) changed by what the
@@ -264,6 +267,11 @@ pub struct Renderer:
     pub func uploaded_bytes() -> i64:
         return (i64)self.arrays.uploaded
 
+    ## GPU arrays held now (tests: a drag or a selection change must not
+    ## add any).
+    pub func array_count() -> i64:
+        return (i64)self.arrays.count()
+
     ## Reserve the depth footprint of a coplanar screen-width wire overlay.
     ## Zero disables it. This is draw state; retained geometry stays unchanged.
     pub func set_wire_overlay(width: f64 = 0.0) -> !:
@@ -297,6 +305,7 @@ pub struct Renderer:
         self.hidden = FaceHighlight()
         self.display_hidden = FaceHighlight()
         self.placements = Growing[Placement]()
+        self.seen = Growing[u64]()
         self.count = 0
         var empty: gpu.Vertex[]
         self.vertices = empty
@@ -324,6 +333,8 @@ pub struct Renderer:
         if extent.width <= 0.0 or extent.height <= 0.0:
             return errors.success[unit](())
         let version = object.epoch()
+        self.seen.fill(2048, 0) catch failure:
+            return errors.failure[unit](failure.code, failure.message)
         self.gather(scene, Matrix4(), true, 0, 0) catch failure:
             return errors.failure[unit](failure.code, failure.message)
         if object.epoch() != version:
@@ -429,9 +440,7 @@ pub struct Renderer:
         let state = try node.get()
         if state.parent_id() != parent_id:
             error(errors.invalid, "an object returned an unstable node or belongs to another parent")
-        for item in self.items[..<self.count]:
-            if item.node.value().id() == state.id():
-                error(errors.invalid, "a scene contains duplicate object identities")
+        if not self.met(state.id()): error(errors.invalid, "a scene contains duplicate object identities")
         let world = parent.multiply(state.matrix())
         if not world.is_finite():
             error(errors.invalid, "world transform components overflowed")
@@ -455,6 +464,16 @@ pub struct Renderer:
             defer child.release()
             try self.gather(child, world, shown, depth + 1, state.id())
             index += 1
+
+    ## Note identity `id` as met this frame; false when it was already.
+    func met(id: u64) -> bool:
+        let mask = self.seen.count - 1
+        var slot = (usize)((id *% 0x9E3779B97F4A7C15) >> 21) & mask
+        while self.seen.items[slot] != 0:
+            if self.seen.items[slot] == id: return false
+            slot = (slot + 1) & mask
+        self.seen.items[slot] = id
+        return true
 
     func reserve(count: usize) -> !:
         if count <= self.vertices.length:
@@ -614,6 +633,7 @@ pub struct Renderer:
         self.hidden.close()
         self.display_hidden.close()
         self.placements.close()
+        self.seen.close()
         self.arrays.close()
         if self.vertices.length > 0:
             free(self.vertices) in memory.heap

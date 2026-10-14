@@ -36,7 +36,7 @@ pub struct RadixSort:
     var keys: gpu.Buffer
     var values: gpu.Buffer
     var histogram: gpu.Buffer
-    let capacity: usize
+    var capacity: usize
 
     ## Scratch for `capacity` keys (1..radix_limit) on `device`.
     pub static func create(device: gpu.Device, capacity: usize) -> RadixSort!:
@@ -47,11 +47,22 @@ pub struct RadixSort:
         sort.count_kernel = try gpu.Kernel.create(device, radix_count_comp_words, radix_count_comp_msl, radix_count_comp_group, radix_count_comp_bindings)
         sort.scan_kernel = try gpu.Kernel.create(device, radix_scan_comp_words, radix_scan_comp_msl, radix_scan_comp_group, radix_scan_comp_bindings)
         sort.scatter_kernel = try gpu.Kernel.create(device, radix_scatter_comp_words, radix_scatter_comp_msl, radix_scatter_comp_group, radix_scatter_comp_bindings)
-        sort.keys = try gpu.Buffer.allocate(device, capacity * 4)
-        sort.values = try gpu.Buffer.allocate(device, capacity * 4)
-        let tiles = (capacity + tile_keys - 1) // tile_keys
-        sort.histogram = try gpu.Buffer.allocate(device, tiles * 16 * 4)
+        try sort.resize(device, capacity)
         return sort
+
+    ## Scratch for `capacity` keys from now on; the kernels stay.
+    pub func resize(device: gpu.Device, capacity: usize) -> !:
+        if capacity == 0 or capacity > radix_limit:
+            error(errors.invalid, "a radix sort takes 1 to 2^26 keys")
+        self.keys.destroy()
+        self.values.destroy()
+        self.histogram.destroy()
+        self.capacity = 0
+        self.keys = try gpu.Buffer.allocate(device, capacity * 4)
+        self.values = try gpu.Buffer.allocate(device, capacity * 4)
+        let tiles = (capacity + tile_keys - 1) // tile_keys
+        self.histogram = try gpu.Buffer.allocate(device, tiles * 16 * 4)
+        self.capacity = capacity
 
     ## The most keys it sorts.
     pub func size() -> usize:

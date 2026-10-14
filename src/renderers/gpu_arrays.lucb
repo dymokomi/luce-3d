@@ -2,13 +2,15 @@
 ## made from. Equal ids mean equal contents, so a mesh drawn again, a snapshot,
 ## or a moved mesh sharing its topology finds its buffers here and uploads only
 ## what changed: a Move re-uploads positions (8 MB for 700k points), not the
-## whole mesh. Copies unused for a while are dropped.
+## whole mesh. A new version of an array (an edit, a new selection or hidden
+## set) names the version it replaces, whose buffer is rewritten in place, so
+## interaction keeps one buffer per array instead of one per state. Copies
+## no frame has drawn for a while (an object left the scene) are dropped.
 from luce_gpu import gpu
-import memory
 from luce_geocore.core.growing import Growing
 
-## Frames an unused copy survives, and the bytes over which unused copies
-## go at once.
+## Frames an undrawn copy survives (a hidden object shown again keeps its
+## buffers), and the bytes over which undrawn copies go at once.
 let keep_frames: u64 = 64
 let budget: usize = 1073741824
 
@@ -19,37 +21,42 @@ pub struct ArrayKey:
     pub var tag: u8
     pub var part: u32
 
-## An auto range the curvature map found for a source and value kind.
-struct Range:
-    var key: u64
-    var kind: i64
-    var value: f64
+    ## Where the key's probe starts (its bits mixed so near ids spread).
+    func spread() -> u64:
+        let folded = (self.id ^ ((u64)self.tag << 56) ^ ((u64)self.part << 40)) *% 0x9E3779B97F4A7C15
+        return folded ^ (folded >> 29)
+
+## Curvature value kinds (MeshShading.curvature) whose automatic range a
+## curvature copy keeps.
+let range_kinds: usize = 5
 
 struct Entry:
     var key: ArrayKey
     var buffer: gpu.Buffer
     var bytes: usize
     var used: u64
+    ## A curvature copy's automatic ranges by value kind (0: not measured):
+    ## derived from the same source, they live and go with it.
+    var ranges: f64[5]
 
 pub struct GpuArrays:
     var entries: Growing[Entry]
+    ## Open-addressed index of `entries` by key: an entry's position + 1,
+    ## 0 for an empty slot; at least twice as many slots as entries.
+    var slots: Growing[u32]
     var scratch: Growing[u8]
     var device: gpu.Device
     var frame: u64
-    ## Recent curvature ranges, oldest overwritten.
-    var ranges: Range[8]
-    var next_range: usize
     ## Uploads and bytes so far, for tests and benchmarks.
     pub var uploads: u64
     pub var uploaded: u64
 
     pub func init():
         self.entries = Growing[Entry]()
+        self.slots = Growing[u32]()
         self.scratch = Growing[u8]()
         self.device = gpu.Device()
         self.frame = 0
-        self.ranges = [Range(0, 0, 0.0), Range(0, 0, 0.0), Range(0, 0, 0.0), Range(0, 0, 0.0), Range(0, 0, 0.0), Range(0, 0, 0.0), Range(0, 0, 0.0), Range(0, 0, 0.0)]
-        self.next_range = 0
         self.uploads = 0
         self.uploaded = 0
 
@@ -61,16 +68,6 @@ pub struct GpuArrays:
             self.device = try device.share()
         self.frame += 1
 
-    ## A remembered curvature range of `key` for value `kind`, and a new one.
-    pub func range(key: u64, kind: i64) -> f64?:
-        for entry in self.ranges:
-            if entry.key == key and entry.kind == kind and entry.value > 0.0: return entry.value
-        return none
-
-    pub func remember_range(key: u64, kind: i64, value: f64):
-        self.ranges[self.next_range] = Range(key, kind, value)
-        self.next_range = (self.next_range + 1) % self.ranges.length
-
     ## Whether a frame has named the device the copies live on; and a share
     ## of it (the caller releases it).
     pub func has_device() -> bool:
@@ -81,57 +78,65 @@ pub struct GpuArrays:
 
     ## The copy of `key`, marked used this frame.
     pub func find(key: ArrayKey) -> gpu.Buffer?:
-        for at in 0..<self.entries.count:
-            let entry = &self.entries.items[at]
-            if entry.key == key:
-                entry.used = self.frame
-                return entry.buffer
-        return none
+        let at = self.locate(key) else return none
+        let entry = &self.entries.items[at]
+        entry.used = self.frame
+        return entry.buffer
+
+    ## The automatic curvature range of value `kind` remembered with the
+    ## copy of `key`, or none.
+    pub func range(key: ArrayKey, kind: i64) -> f64?:
+        let at = self.locate(key) else return none
+        if kind < 0 or (usize)kind >= range_kinds: return none
+        let value = self.entries.items[at].ranges[(usize)kind]
+        return value if value > 0.0 else none
+
+    ## Remember `value` as the copy of `key`'s range of value `kind`.
+    pub func remember_range(key: ArrayKey, kind: i64, value: f64):
+        let at = self.locate(key) else return
+        if kind >= 0 and (usize)kind < range_kinds: self.entries.items[at].ranges[(usize)kind] = value
 
     ## Room to pack `bytes` bytes before `store`; reused between arrays.
     pub func staging(bytes: usize) -> u8[]!:
         try self.scratch.reserve(bytes)
         return self.scratch.items[..<bytes]
 
-    ## Upload `data` as the copy of `key`. When the copy of `parent` (the
-    ## array `key`'s was derived from) has the same size and no draw of this
-    ## frame reads it, it is rewritten in place: the device orders the copy
-    ## after earlier frames, which keep the old contents.
     ## Rewrite bytes `offset`.. of the copy of `parent` (same tag and part,
     ## `total` bytes, unused this frame) with `data` and rename it `key`: a
     ## local edit uploads its neighbourhood. None when there is no such copy.
     pub func patch(key: ArrayKey, parent: u64, total: usize, offset: usize, data: const u8[]) -> gpu.Buffer?!:
-        for at in 0..<self.entries.count:
-            let entry = &self.entries.items[at]
-            if entry.key.id == parent and entry.key.tag == key.tag and entry.key.part == key.part and entry.bytes == total and entry.used != self.frame:
-                if data.length > 0: try entry.buffer.upload(offset, data)
-                self.uploads += 1
-                self.uploaded += (u64)data.length
-                entry.key = key
-                entry.used = self.frame
-                return entry.buffer
-        return none
+        let at = self.replaceable(key, parent, total) else return none
+        if data.length > 0: try self.entries.items[at].buffer.upload(offset, data)
+        self.uploads += 1
+        self.uploaded += (u64)data.length
+        self.rename(at, key)
+        return self.entries.items[at].buffer
 
+    ## Upload `data` as the copy of `key`. When the copy of `parent` (the
+    ## version `key`'s replaces) has the same size and no draw of this frame
+    ## reads it, it is rewritten in place: the device orders the copy after
+    ## earlier frames, which keep the old contents.
     pub func store(key: ArrayKey, data: const u8[], parent: u64 = 0) -> gpu.Buffer!:
         self.uploads += 1
         self.uploaded += (u64)data.length
-        if parent != 0:
-            for at in 0..<self.entries.count:
-                let entry = &self.entries.items[at]
-                if entry.key.id == parent and entry.key.tag == key.tag and entry.key.part == key.part and entry.bytes == data.length and entry.used != self.frame:
-                    try entry.buffer.upload(0, data)
-                    entry.key = key
-                    entry.used = self.frame
-                    return entry.buffer
+        if let at = self.replaceable(key, parent, data.length):
+            try self.entries.items[at].buffer.upload(0, data)
+            self.rename(at, key)
+            return self.entries.items[at].buffer
         let buffer = try gpu.Buffer.create(self.device, data)
-        self.entries.push(Entry(key, buffer, data.length, self.frame)) catch failure:
+        self.entries.push(Entry(key, buffer, data.length, self.frame, [0.0, 0.0, 0.0, 0.0, 0.0])) catch failure:
+            var created = buffer
+            created.destroy()
+            error(failure.code, failure.message)
+        self.index(self.entries.count - 1) catch failure:
+            self.entries.count -= 1
             var created = buffer
             created.destroy()
             error(failure.code, failure.message)
         return buffer
 
-    ## Drop copies unused for `keep_frames` frames, or unused this frame when
-    ## the copies exceed the budget.
+    ## Drop copies undrawn for `keep_frames` frames, or undrawn this frame
+    ## when the copies exceed the budget.
     pub func trim():
         var total: usize = 0
         for entry in self.entries.view(): total += entry.bytes
@@ -145,18 +150,89 @@ pub struct GpuArrays:
                 continue
             self.entries.items[kept] = entry
             kept += 1
+        if kept == self.entries.count: return
         self.entries.count = kept
+        self.reindex()
 
-    ## Buffers held and their bytes.
+    ## Buffers held.
     pub func count() -> usize:
         return self.entries.count
 
     pub func clear():
         for at in 0..<self.entries.count: self.entries.items[at].buffer.destroy()
         self.entries.clear()
+        self.reindex()
         self.device.destroy()
 
     pub func close():
         self.clear()
         self.entries.close()
+        self.slots.close()
         self.scratch.close()
+
+    # mark: The index
+
+    ## The entry of the copy of `parent` that `key`'s version may take over:
+    ## same tag, part and size, and not read by a draw of this frame.
+    func replaceable(key: ArrayKey, parent: u64, bytes: usize) -> usize?:
+        if parent == 0 or parent == key.id: return none
+        let at = self.locate(ArrayKey(parent, key.tag, key.part)) else return none
+        let entry = &self.entries.items[at]
+        if entry.bytes != bytes or entry.used == self.frame: return none
+        return at
+
+    ## Entry `at` now holds `key`'s contents: renamed and marked used.
+    func rename(at: usize, key: ArrayKey):
+        self.unindex(self.entries.items[at].key)
+        let entry = &self.entries.items[at]
+        entry.key = key
+        entry.used = self.frame
+        entry.ranges = [0.0, 0.0, 0.0, 0.0, 0.0]
+        # The slot freed above makes room: no growth is needed.
+        self.place(at)
+
+    func locate(key: ArrayKey) -> usize?:
+        if self.slots.count == 0: return none
+        let mask = self.slots.count - 1
+        var slot = (usize)key.spread() & mask
+        while self.slots.items[slot] != 0:
+            let at = (usize)self.slots.items[slot] - 1
+            if self.entries.items[at].key == key: return at
+            slot = (slot + 1) & mask
+        return none
+
+    ## Index entry `at`, doubling the table first when it would pass half full.
+    func index(at: usize) -> !:
+        if self.entries.count * 2 > self.slots.count:
+            try self.slots.fill(64 if self.slots.count == 0 else self.slots.count * 2, 0)
+            for earlier in 0..<self.entries.count: self.place(earlier)
+            return
+        self.place(at)
+
+    func place(at: usize):
+        let mask = self.slots.count - 1
+        var slot = (usize)self.entries.items[at].key.spread() & mask
+        while self.slots.items[slot] != 0: slot = (slot + 1) & mask
+        self.slots.items[slot] = (u32)(at + 1)
+
+    ## Remove `key`'s slot, moving later members of its probe run back so
+    ## lookups need no tombstones.
+    func unindex(key: ArrayKey):
+        let at = self.locate(key) else return
+        let mask = self.slots.count - 1
+        var hole = (usize)key.spread() & mask
+        while (usize)self.slots.items[hole] != at + 1: hole = (hole + 1) & mask
+        var next = (hole + 1) & mask
+        while self.slots.items[next] != 0:
+            let home = (usize)self.entries.items[(usize)self.slots.items[next] - 1].key.spread() & mask
+            # It may fill the hole unless its home lies cyclically in (hole, next].
+            let stays = (home > hole and home <= next) if hole <= next else (home > hole or home <= next)
+            if not stays:
+                self.slots.items[hole] = self.slots.items[next]
+                hole = next
+            next = (next + 1) & mask
+        self.slots.items[hole] = 0
+
+    func reindex():
+        for at in 0..<self.slots.count: self.slots.items[at] = 0
+        for at in 0..<self.entries.count: self.place(at)

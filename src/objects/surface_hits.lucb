@@ -67,9 +67,12 @@ func hit_mesh(mesh: const Mesh*, world: Matrix4, origin: Vector3, direction: Vec
         return
     let local_origin = inverse.transform_point(origin)
     let local_direction = inverse.transform_direction(direction).normalized() catch failure: return
-    let face = try mesh.ray_face(local_origin, local_direction)
+    # One query for the face and its distance (positions are relative to
+    # the mesh's origin there).
+    let hit = (try mesh.query_index()).ray(local_origin.subtract(mesh.position_origin()), local_direction)
+    let face = hit.face
     if face < 0: return
-    let t = try mesh.ray_distance(local_origin, local_direction)
+    let t = hit.distance
     let point = world.transform_point(local_origin.add(local_direction.multiply_scalar(t)))
     let distance = point.subtract(origin).length()
     if best.found and distance >= best.distance: return

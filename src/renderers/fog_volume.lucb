@@ -235,12 +235,15 @@ pub func fog_look_of(set: const GeometrySet*, index: i64) -> FogLook!:
 
 ## Draw `volume` with `look` from now on: the atlas stays; the emission strip
 ## is sent again on the next draw if `look` changes it.
+## A look equal to the one drawn changes nothing: its numbers are not sent.
 pub func restyle_fog(volume: FogVolume*, look: const VolumeLook*):
     let old = volume.styled
-    volume.styled = clamped(look)
-    volume.version += 1
-    if old.emission_low != look.emission_low or old.emission_high != look.emission_high or old.emission_color != volume.styled.emission_color or not same_numbers(old.emission_ramp(), look.emission_ramp()):
-        volume.strip_stale = true
+    let made = clamped(look)
+    let strip = old.emission_low != made.emission_low or old.emission_high != made.emission_high or old.emission_color != made.emission_color or not same_numbers(old.emission_ramp(), made.emission_ramp())
+    let numbers = strip or old.density != made.density or old.smoke != made.smoke or old.shadow != made.shadow or old.emission != made.emission or old.step != made.step
+    volume.styled = made
+    if numbers: volume.version += 1
+    if strip: volume.strip_stale = true
 
 func same_numbers(a: const f64[], b: const f64[]) -> bool:
     if a.length != b.length: return false

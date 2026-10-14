@@ -1,10 +1,10 @@
 ## GPU face picking: the id pass of one mesh (face + 1 per pixel, zero where
 ## nothing is) drawn into an offscreen texture from the mesh's retained GPU
-## arrays and read back once. Later picks over the same mesh, placement and
-## view read the copy, so hovering costs a lookup; a camera move or an edit
-## costs one id pass. No CPU spatial index is needed for picking.
+## arrays. The pass is drawn again only when the mesh, its placement or the
+## view changes; a pick reads back the tile of it around the pointer, so
+## hovering costs a lookup until the pointer leaves the tile, and only a box
+## selection reads the whole image. No CPU spatial index is needed.
 from luce_gpu import gpu
-import memory
 from luce_geocore import geocore
 from luce_geocore.geocore import Matrix4
 from luce_geocore.core.growing import Growing
@@ -12,12 +12,24 @@ from cameras.camera import Projection
 from renderers.gpu_arrays import GpuArrays
 from renderers.mesh_batch import draw_polygon_ids, FaceHighlight
 
+## The side of the square read back around a pick, in pixels.
+let tile: u32 = 128
+
 pub struct FacePicker:
     var texture: gpu.Texture
     var width: u32
     var height: u32
+    ## What the id pass in `texture` shows (0: nothing yet).
     var key: u64
+    ## The pixels read back, of the pass `read`: the whole image when
+    ## `whole`, else the tile at (`left`, `top`), `across` by `down`.
     var pixels: Growing[u8]
+    var read: u64
+    var whole: bool
+    var left: u32
+    var top: u32
+    var across: u32
+    var down: u32
 
     pub func init():
         self.texture = gpu.Texture()
@@ -25,15 +37,40 @@ pub struct FacePicker:
         self.height = 0
         self.key = 0
         self.pixels = Growing[u8]()
+        self.read = 0
+        self.whole = false
+        self.left = 0
+        self.top = 0
+        self.across = 0
+        self.down = 0
 
     ## The face of `mesh` (placed by `world`, seen through `projection` in a
     ## `width` x `height` view) under (x, y), or -1. `key` names everything the
-    ## id image depends on; an equal key reuses the last one.
+    ## id image depends on; an equal key reuses the last pass.
     pub func face(arrays: GpuArrays*, device: gpu.Device, mesh: const geocore.Mesh*, world: Matrix4, projection: Projection,
-                  key: u64, x: f64, y: f64, width: u32, height: u32, hidden: const FaceHighlight*? = none) -> i64!:
+                  key: u64, x: f64, y: f64, width: u32, height: u32, hidden: FaceHighlight*? = none) -> i64!:
         if width == 0 or height == 0 or not (x >= 0.0 and y >= 0.0 and x < (f64)width and y < (f64)height): return -1
         try self.prepare(arrays, device, mesh, world, projection, key, width, height, hidden)
-        let at = ((usize)y * (usize)width + (usize)x) * 4
+        let px = (u32)x
+        let py = (u32)y
+        if self.read != key or key == 0 or (not self.whole and not (px >= self.left and py >= self.top and px < self.left + self.across and py < self.top + self.down)):
+            # The tile around the pointer, kept inside the image.
+            let across = tile if width > tile else width
+            let down = tile if height > tile else height
+            let half_x = across // 2 if px > across // 2 else px
+            let half_y = down // 2 if py > down // 2 else py
+            self.left = (px - half_x) if px - half_x + across <= width else width - across
+            self.top = (py - half_y) if py - half_y + down <= height else height - down
+            self.across = across
+            self.down = down
+            try self.pixels.reserve((usize)across * (usize)down * 4)
+            self.pixels.count = (usize)across * (usize)down * 4
+            try self.texture.read(self.pixels.items[..<self.pixels.count], gpu.Region(self.left, self.top, across, down))
+            self.whole = false
+            self.read = key
+        var at: usize = 0
+        if self.whole: at = ((usize)py * (usize)self.width + (usize)px) * 4
+        else: at = ((usize)(py - self.top) * (usize)self.across + (usize)(px - self.left)) * 4
         let bytes = self.pixels.items
         let id = (u32)bytes[at] | ((u32)bytes[at + 1] << 8) | ((u32)bytes[at + 2] << 16) | ((u32)bytes[at + 3] << 24)
         return (i64)id - 1
@@ -41,16 +78,23 @@ pub struct FacePicker:
     ## The id image of `mesh` (as `face` draws it), for reading many pixels:
     ## a box selection's visible faces.
     pub func image(arrays: GpuArrays*, device: gpu.Device, mesh: const geocore.Mesh*, world: Matrix4, projection: Projection,
-                   key: u64, width: u32, height: u32, hidden: const FaceHighlight*? = none) -> const u8[]!:
+                   key: u64, width: u32, height: u32, hidden: FaceHighlight*? = none) -> const u8[]!:
         try self.prepare(arrays, device, mesh, world, projection, key, width, height, hidden)
+        if self.read != key or key == 0 or not self.whole:
+            try self.pixels.reserve((usize)width * (usize)height * 4)
+            self.pixels.count = (usize)width * (usize)height * 4
+            try self.texture.read(self.pixels.items[..<self.pixels.count])
+            self.whole = true
+            self.read = key
         return self.pixels.items[..<self.pixels.count]
 
-    ## Draw the id pass (without the `hidden` faces) and read it back,
-    ## unless the last one had `key`.
+    ## Draw the id pass (without the `hidden` faces), unless the last one had
+    ## `key`.
     func prepare(arrays: GpuArrays*, device: gpu.Device, mesh: const geocore.Mesh*, world: Matrix4, projection: Projection,
-                 key: u64, width: u32, height: u32, hidden: const FaceHighlight*?) -> !:
+                 key: u64, width: u32, height: u32, hidden: FaceHighlight*?) -> !:
         if key == self.key and width == self.width and height == self.height: return
         self.key = 0
+        self.read = 0
         if width != self.width or height != self.height:
             self.texture.destroy()
             self.texture = try gpu.Texture.create(device, width, height, gpu.Format.rgba8_linear)
@@ -62,11 +106,10 @@ pub struct FacePicker:
         defer target.release()
         try draw_polygon_ids(arrays, try target.get(), mesh, world, projection, 0, hidden)
         _ = try recording.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))
-        try self.pixels.fill((usize)(width * height * 4), 0)
-        try self.texture.read(self.pixels.items[..<self.pixels.count])
         self.key = key
 
     pub func close():
         self.texture.destroy()
         self.pixels.close()
         self.key = 0
+        self.read = 0

@@ -1,0 +1,211 @@
+## The Edit overlay's layers, kept on the GPU. Lines between points of the
+## edited mesh and triangles of its corners hold ids, not positions, and draw
+## over the mesh's GPU positions: a drag that moves points remakes and uploads
+## none of them, and a frame draws them from their retained buffers. Lines
+## with points of their own (a vertex's stroke into its face, a point's cross)
+## keep their positions. A frame without a device expands the layers on the
+## CPU (tests and recording).
+from luce_gpu import gpu
+import interop
+import memory
+from luce_geocore.geocore import Vector3, Mesh
+from luce_geocore.core.growing import Growing
+from cameras.camera import Camera, Projection
+from renderers.wire import WireRenderer
+from renderers.mesh_batch import draw_lines, draw_fill
+
+## A GPU buffer kept across contents: rewritten in place, and grown by
+## doubling only when the contents outgrow it.
+pub struct Storage:
+    pub var buffer: gpu.Buffer
+
+    pub func init():
+        self.buffer = gpu.Buffer()
+
+    pub func put(device: gpu.Device, data: const u8[]) -> gpu.Buffer!:
+        if not self.buffer.is_open() or self.buffer.bytes() < data.length:
+            self.buffer.destroy()
+            var bytes: usize = 256
+            while bytes < data.length: bytes *= 2
+            self.buffer = try gpu.Buffer.allocate(device, bytes)
+        if data.length > 0: try self.buffer.upload(0, data)
+        return self.buffer
+
+    pub func close():
+        self.buffer.destroy()
+
+## Where a frame draws the layers: the target and its device (closed for a
+## frame without one), the camera's projection, and the edited mesh's GPU
+## positions and corner points with the origin they are offsets from.
+pub struct LayerFrame:
+    pub var native: const gpu.RenderTarget*
+    pub var camera: interop.Reference[Camera]
+    pub var target: interop.View[gpu.RenderTarget]
+    pub var device: gpu.Device
+    pub var projection: Projection
+    pub var positions: gpu.Buffer
+    pub var corners: gpu.Buffer
+    pub var origin: Vector3
+
+func as_bytes(values: const u32[]) -> const u8[]:
+    return u8[]((u8*)values.data, values.length * 4)
+
+## Lines between pairs of the mesh's points.
+pub struct PairLines:
+    pub var ids: Growing[u32]
+    var storage: Storage
+    var stale: bool
+
+    pub func init():
+        self.ids = Growing[u32]()
+        self.storage = Storage()
+        self.stale = true
+
+    pub func clear():
+        self.ids.clear()
+        self.stale = true
+
+    pub func add(a: i64, b: i64) -> !:
+        try self.ids.push((u32)a)
+        try self.ids.push((u32)b)
+        self.stale = true
+
+    pub func segments() -> usize:
+        return self.ids.count // 2
+
+    ## Forget the GPU copy (another device): the next draw makes it again.
+    pub func drop():
+        self.storage.close()
+        self.stale = true
+
+    pub func draw(frame: const LayerFrame*, mesh: const Mesh*, color: gpu.Color, width: f64, bias: f64, writes_depth: bool = true) -> !:
+        if self.ids.count == 0: return
+        if not frame.device.is_open():
+            var points = try self.points(mesh)
+            defer points.close()
+            try WireRenderer.lines(points.view(), frame.camera, frame.target, color, width, bias, true, writes_depth)
+            return
+        if self.stale:
+            _ = try self.storage.put(frame.device, as_bytes(self.ids.view()))
+            self.stale = false
+        try draw_lines(frame.native, frame.positions, frame.origin, self.storage.buffer, self.segments(), frame.projection, color, width, bias, writes_depth)
+
+    ## The lines' end points, for a pass the GPU layers cannot draw (over
+    ## everything, or a frame without a device).
+    pub func points(mesh: const Mesh*) -> Growing[Vector3]!:
+        var out = Growing[Vector3]()
+        errdefer out.close()
+        try out.reserve(self.ids.count)
+        for id in self.ids.view(): try out.push(try mesh.point((i64)id))
+        return out
+
+    pub func close():
+        self.ids.close()
+        self.storage.close()
+
+## Triangles of the mesh's corners (three corner ids each).
+pub struct CornerTriangles:
+    pub var ids: Growing[u32]
+    var storage: Storage
+    var stale: bool
+
+    pub func init():
+        self.ids = Growing[u32]()
+        self.storage = Storage()
+        self.stale = true
+
+    pub func clear():
+        self.ids.clear()
+        self.stale = true
+
+    pub func add(corner: u32) -> !:
+        try self.ids.push(corner)
+        self.stale = true
+
+    pub func count() -> usize:
+        return self.ids.count // 3
+
+    pub func drop():
+        self.storage.close()
+        self.stale = true
+
+    pub func draw(frame: const LayerFrame*, mesh: const Mesh*, color: gpu.Color, bias: f64) -> !:
+        if self.ids.count == 0: return
+        if not frame.device.is_open():
+            var points = Growing[Vector3]()
+            defer points.close()
+            try points.reserve(self.ids.count)
+            for corner in self.ids.view(): try points.push(try mesh.point(try mesh.corner_point((i64)corner)))
+            try WireRenderer.triangles(points.view(), frame.camera, frame.target, color)
+            return
+        if self.stale:
+            _ = try self.storage.put(frame.device, as_bytes(self.ids.view()))
+            self.stale = false
+        try draw_fill(frame.native, frame.positions, frame.corners, frame.origin, self.storage.buffer, self.count(), frame.projection, color, bias)
+
+    pub func close():
+        self.ids.close()
+        self.storage.close()
+
+## Lines with end points of their own (world space), made again whenever
+## they move; uploaded once per change.
+pub struct PointLines:
+    pub var points: Growing[Vector3]
+    var positions: Storage
+    var pairs: Storage
+    var origin: Vector3
+    var stale: bool
+
+    pub func init():
+        self.points = Growing[Vector3]()
+        self.positions = Storage()
+        self.pairs = Storage()
+        self.origin = Vector3()
+        self.stale = true
+
+    pub func clear():
+        self.points.clear()
+        self.stale = true
+
+    pub func add(a: Vector3, b: Vector3) -> !:
+        try self.points.push(a)
+        try self.points.push(b)
+        self.stale = true
+
+    pub func segments() -> usize:
+        return self.points.count // 2
+
+    pub func drop():
+        self.positions.close()
+        self.pairs.close()
+        self.stale = true
+
+    pub func draw(frame: const LayerFrame*, color: gpu.Color, width: f64, bias: f64, writes_depth: bool = true) -> !:
+        if self.points.count == 0: return
+        if not frame.device.is_open():
+            try WireRenderer.lines(self.points.view(), frame.camera, frame.target, color, width, bias, true, writes_depth)
+            return
+        if self.stale:
+            # f32 offsets from the first point keep their precision far
+            # from the world origin.
+            self.origin = self.points.items[0]
+            let count = self.points.count
+            let packed = try new f32[count * 3] --- in memory.heap
+            defer free(packed) in memory.heap
+            let order = try new u32[count] --- in memory.heap
+            defer free(order) in memory.heap
+            for at in 0..<count:
+                let offset = self.points.items[at].subtract(self.origin)
+                packed[at * 3] = (f32)offset.x
+                packed[at * 3 + 1] = (f32)offset.y
+                packed[at * 3 + 2] = (f32)offset.z
+                order[at] = (u32)at
+            _ = try self.positions.put(frame.device, u8[]((u8*)packed.data, packed.length * 4))
+            _ = try self.pairs.put(frame.device, as_bytes(order))
+            self.stale = false
+        try draw_lines(frame.native, self.positions.buffer, self.origin, self.pairs.buffer, self.segments(), frame.projection, color, width, bias, writes_depth)
+
+    pub func close():
+        self.points.close()
+        self.positions.close()
+        self.pairs.close()

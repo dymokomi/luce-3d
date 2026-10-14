@@ -1,7 +1,9 @@
-## Edit-mode overlays kept in Base: the full wireframe is one retained GPU batch
-## per mesh, selection geometry is rebuilt only when the selection changes, and
-## point markers only when the camera does. A Luce loop over a CAD mesh's 1.4M
-## edges cost 0.6-2.4 s per frame.
+## Edit-mode overlays kept in Base and on the GPU. Selection, hover, preview,
+## edge marks and Mesh Check layers are lists of the mesh's point or corner
+## ids (overlay_layers.lucb), drawn over the mesh's GPU positions: they are
+## made again only when the topology, the mode or what they show changes,
+## never because points moved, so a drag uploads its moved positions and
+## nothing else. Point markers are laid out once per projection.
 from luce_gpu import gpu
 import interop
 from luce_std import math
@@ -12,10 +14,12 @@ from luce_geocore.geocore import Vector3, Mesh, Selection, Domain
 from luce_geocore.kernel import Attribute, selection_bits, trailing_zeros, selection_weights
 from cameras.camera import Camera, Projection
 from renderers.wire import WireRenderer
-from renderers.projection import projection_matrix
-from renderers.retained import RetainedBatch
 from renderers.edit_markers import Markers
-from renderers.edit_screen import Screen
+from renderers.edit_screen import Screen, Segments
+from renderers.cad_edges import CadEdges
+from renderers.gpu_arrays import GpuArrays
+from renderers.mesh_batch import position_buffer, corner_buffer
+from renderers.overlay_layers import LayerFrame, PairLines, CornerTriangles, PointLines
 import renderers.edit_screen as screens
 from luce_geocore.core.growing import Growing, same_ids
 
@@ -28,22 +32,26 @@ func line_bias(projection: Projection, mesh: const Mesh*) -> f64:
     if projection.orthographic(): return 0.002 * depth / math.max(projection.far - projection.near, 0.000001)
     return 0.002 * projection.near / depth
 
-## The edges whose mark `entry` is above 0, as lines into `lines`.
-func marked_lines(mesh: const Mesh*, entry: const Attribute*, edges: i64, lines: Growing[Vector3]*) -> !:
-    for edge in 0..<edges:
-        if entry.number((usize)edge, 0) <= 0.0: continue
-        try lines.push(try mesh.point(try mesh.edge_point(edge, 0)))
-        try lines.push(try mesh.point(try mesh.edge_point(edge, 1)))
+## The bias of lines and fills that only need to clear their own surface.
+let near_bias = 0.000001
+let fill_bias = 0.0000005
 
-## One layer of the Mesh Check's findings: edges as lines, faces as their
-## outlines and a tint, points as small crosses, in one color.
+## One layer of the Mesh Check's findings: edges and face outlines as lines,
+## faces as a tint, points as small crosses, in one color.
 struct FindingLayer:
-    var lines: Growing[Vector3]
-    var faces: Growing[Vector3]
+    var lines: PairLines
+    var crosses: PointLines
+    var faces: CornerTriangles
     var color: gpu.Color
+
+    func drop():
+        self.lines.drop()
+        self.crosses.drop()
+        self.faces.drop()
 
     func close():
         self.lines.close()
+        self.crosses.close()
         self.faces.close()
 
 ## How wide (logical pixels) the edge marks and the selection's lines draw.
@@ -52,47 +60,75 @@ let selection_width = 2.0
 
 ## The mean edge length of `mesh` (1 without edges).
 func mean_edge(mesh: const Mesh*) -> f64!:
-    let edges = try mesh.edge_count()
-    if edges == 0: return 1.0
+    let edges = try mesh.edge_span()
+    if edges.length == 0: return 1.0
+    let points = mesh.point_span()
     var total = 0.0
-    for edge in 0..<edges: total += (try mesh.point(try mesh.edge_point(edge, 1))).subtract(try mesh.point(try mesh.edge_point(edge, 0))).length()
-    return total / (f64)edges
+    for edge in 0..<edges.length // 2:
+        total += points[(usize)edges[edge * 2 + 1]].vector().subtract(points[(usize)edges[edge * 2]].vector()).length()
+    return total / (f64)(edges.length // 2)
+
+## The triangles of face `face` (grouped by face, size - 2 each), as corner
+## ids into `out`.
+func face_triangles(mesh: const Mesh*, face: i64, out: CornerTriangles*) -> !:
+    let triangles = mesh.triangle_span()
+    let offset = try mesh.face_offset(face)
+    let first = (usize)((offset - face * 2) * 3)
+    let size = try mesh.face_size(face)
+    for at in first..<first + (usize)(size - 2) * 3: try out.add((u32)triangles[at])
+
+## Face `face`'s outline as point pairs into `out`.
+func face_outline(mesh: const Mesh*, face: i64, out: PairLines*) -> !:
+    let size = try mesh.face_size(face)
+    for at in 0..<size:
+        try out.add(try mesh.face_point(face, at), try mesh.face_point(face, (at + 1) % size))
 
 ## Component modes: 0 points, 1 edges, 2 faces, 3 vertices (corners).
 pub struct EditOverlay:
     var mesh: interop.Reference[Mesh]?
+    ## The topology (corners id) and point count the id layers are of, and
+    ## the positions (points id) the point lines were made from.
+    var topology: u64
+    var point_count: i64
+    var points: u64
     var mode: i64
     var selection: Growing[i64]
     var hovered: i64
-    # Wireframe of every edge, uploaded once per mesh; the CPU copy exists only
-    # for targets without a device.
-    var wires: RetainedBatch
-    var wire_points: Growing[Vector3]
-    # Accent edges and face triangles of the current selection.
-    var accent: Growing[Vector3]
-    var faces: Growing[Vector3]
-    var hover: Growing[Vector3]
+    ## The mesh's GPU positions and corner points for the layers, and the
+    ## device the layers' copies live on.
+    var arrays: GpuArrays
+    var device: gpu.Device
+    ## Every edge (only when the overlay draws the wireframe itself).
+    var wires: PairLines
+    var wired: u64
+    ## The selection: its lines, a vertex's strokes into its faces, and
+    ## selected faces' fill.
+    var accent: PairLines
+    var strokes: PointLines
+    var faces: CornerTriangles
+    var hover: PairLines
     ## What a gesture would take (the loop a double-click selects), drawn
     ## over the model, and the selection it was built from.
-    var preview: Growing[Vector3]
+    var preview: PairLines
     var preview_key: u64
     ## Edges marked as UV seams and hard (luce-geocore's `seam` and `sharp`
-    ## edge marks, above 0), as lines; built once per mesh when drawn,
-    ## wider than the selection's lines.
-    var seams: Growing[Vector3]
-    var sharps: Growing[Vector3]
-    var marks_built: bool
+    ## edge marks, above 0); made when the topology or the marks change
+    ## (`marks_key`, 0 for not made), wider than the selection's lines.
+    var seams: PairLines
+    var sharps: PairLines
+    var marks_key: u64
     ## The Mesh Check's findings, layer by layer (luced-3d sets them when
     ## its overlay is on and the mesh changed).
     var findings: Growing[FindingLayer]
     ## Points every face of which is hidden (an editor's Hide): no marker.
     var hidden_points: Growing[u32]
     var hidden_key: u64
+    ## Whether each element of the mode's domain is selected (points in
+    ## mode 0, faces in mode 2): set and cleared one selected id at a time.
     var selected: Growing[bool]
-    # Point-to-edge adjacency (CSR), built once per mesh for point selections.
-    var edge_starts: Growing[u32]
-    var point_edges: Growing[u32]
     var screen: Screen
+    var segments: Segments
+    var groups: CadEdges
     var markers: Markers
     var builds: i64
     ## The selection object last shown (its column id) and its listed ids.
@@ -112,26 +148,32 @@ pub struct EditOverlay:
 
     pub func init():
         self.mesh = none
+        self.topology = 0
+        self.point_count = -1
+        self.points = 0
         self.mode = -1
         self.hovered = -1
         self.selection = Growing[i64]()
-        self.wires = RetainedBatch()
-        self.wire_points = Growing[Vector3]()
-        self.accent = Growing[Vector3]()
-        self.faces = Growing[Vector3]()
-        self.hover = Growing[Vector3]()
-        self.preview = Growing[Vector3]()
+        self.arrays = GpuArrays()
+        self.device = gpu.Device()
+        self.wires = PairLines()
+        self.wired = 0
+        self.accent = PairLines()
+        self.strokes = PointLines()
+        self.faces = CornerTriangles()
+        self.hover = PairLines()
+        self.preview = PairLines()
         self.preview_key = 0
-        self.seams = Growing[Vector3]()
-        self.sharps = Growing[Vector3]()
-        self.marks_built = false
+        self.seams = PairLines()
+        self.sharps = PairLines()
+        self.marks_key = 0
         self.findings = Growing[FindingLayer]()
         self.hidden_points = Growing[u32]()
         self.hidden_key = 0
         self.selected = Growing[bool]()
-        self.edge_starts = Growing[u32]()
-        self.point_edges = Growing[u32]()
         self.screen = Screen()
+        self.segments = Segments()
+        self.groups = CadEdges()
         self.markers = Markers()
         self.builds = 0
         self.shown_key = 0
@@ -143,46 +185,19 @@ pub struct EditOverlay:
         self.weights = Growing[f32]()
         self.weighed = -1
 
-    ## Cheap when nothing changed: an identity compare and one pass over the
-    ## selection list. The mesh is retained, so its address cannot be reused.
+    ## Show `selection` (ids of `mode`'s components) of `mesh` with `hovered`
+    ## lit. Cheap when nothing changed: a compare of the list; a mesh whose
+    ## points moved (a drag) keeps every id layer.
     pub func update(mesh: interop.Reference[Mesh], mode: i64, selection: const i64[], hovered: i64) -> !:
-        if mode < 0 or mode > 3: error(errors.invalid, "edit component mode must be 0, 1, 2 or 3")
-        let geometry = try mesh.get()
-        var changed_mesh = true
-        if let current = self.mesh:
-            changed_mesh = current.value() != geometry
-        if changed_mesh:
-            # The field holds the new mesh before the old one is released:
-            # a last release runs a dispose that can re-enter Luce code, so
-            # nothing reachable may point at the dropped mesh by then.
-            let previous = self.mesh
-            self.mesh = mesh.clone()
-            if let current = previous: current.release()
-            self.wires.close()
-            self.wire_points.clear()
-            self.edge_starts.clear()
-            self.point_edges.clear()
-            self.seams.clear()
-            self.sharps.clear()
-            self.marks_built = false
-            self.screen.invalidate()
-        let changed = changed_mesh or mode != self.mode or not same_ids(&self.selection, selection)
-        if changed:
-            self.mode = mode
-            try self.selection.assign(selection)
-            try self.rebuild_selection(geometry)
-            self.builds += 1
-            self.markers.invalidate()
-        if changed or hovered != self.hovered:
-            self.hovered = hovered
-            try self.rebuild_hover(geometry)
+        try self.adopt(mesh, mode, selection, not same_ids(&self.selection, selection), hovered)
 
     ## Show a luce-geocore selection (none: nothing selected) in `mode`; its
     ## bits are listed only when the selection object changed.
     pub func show(mesh: interop.Reference[Mesh], mode: i64, selection: interop.Reference[Selection]?, hovered: i64) -> !:
         var key: u64 = 0
         if let chosen = selection: key = (try chosen.get()).key()
-        if key != self.shown_key or mode != self.mode:
+        let fresh = key != self.shown_key or mode != self.mode
+        if fresh:
             self.shown_key = key
             self.listed.clear()
             if let chosen = selection:
@@ -194,8 +209,40 @@ pub struct EditOverlay:
                         self.listed.items[self.listed.count] = (i64)(word * 64 + (usize)trailing_zeros(pending))
                         self.listed.count += 1
                         pending = pending & (pending - 1)
-        try self.update(mesh, mode, self.listed.view(), hovered)
+        try self.adopt(mesh, mode, self.listed.view(), fresh, hovered)
         try self.weigh(mesh, selection)
+
+    func adopt(mesh: interop.Reference[Mesh], mode: i64, selection: const i64[], fresh: bool, hovered: i64) -> !:
+        if mode < 0 or mode > 3: error(errors.invalid, "edit component mode must be 0, 1, 2 or 3")
+        let geometry = try mesh.get()
+        var same_mesh = false
+        if let current = self.mesh: same_mesh = current.value() == geometry
+        if not same_mesh:
+            # The field holds the new mesh before the old one is released:
+            # a last release runs a dispose that can re-enter Luce code, so
+            # nothing reachable may point at the dropped mesh by then.
+            let previous = self.mesh
+            self.mesh = mesh.clone()
+            if let current = previous: current.release()
+        let topology = geometry.corners_id() != self.topology or geometry.point_count() != self.point_count
+        let moved = geometry.points_id() != self.points
+        if topology:
+            self.topology = geometry.corners_id()
+            self.point_count = geometry.point_count()
+            self.marks_key = 0
+        let remade = topology or fresh or mode != self.mode
+        if remade:
+            self.mode = mode
+            try self.rebuild_selection(geometry, selection)
+            self.builds += 1
+            self.markers.invalidate()
+        elif moved and self.mode == 3:
+            # Vertex strokes reach into their faces: their ends move.
+            try self.rebuild_strokes(geometry)
+        self.points = geometry.points_id()
+        if remade or hovered != self.hovered:
+            self.hovered = hovered
+            try self.rebuild_hover(geometry)
 
     ## Show what a gesture would take: an edge selection's edges, a face
     ## selection's outlines, as lines over the model; none clears it. The
@@ -217,14 +264,8 @@ pub struct EditOverlay:
             while pending != 0:
                 let id = (i64)(word * 64 + (usize)trailing_zeros(pending))
                 pending = pending & (pending - 1)
-                if picked.domain() == 4:
-                    try self.preview.push(try geometry.point(try geometry.edge_point(id, 0)))
-                    try self.preview.push(try geometry.point(try geometry.edge_point(id, 1)))
-                    continue
-                let size = try geometry.face_size(id)
-                for at in 0..<size:
-                    try self.preview.push(try geometry.point(try geometry.face_point(id, at)))
-                    try self.preview.push(try geometry.point(try geometry.face_point(id, (at + 1) % size)))
+                if picked.domain() == 4: try self.preview.add(try geometry.edge_point(id, 0), try geometry.edge_point(id, 1))
+                else: try face_outline(geometry, id, &self.preview)
 
     ## Hide the point markers of points whose faces are all in face
     ## `selection` of `mesh` (the renderer leaves those faces out); none
@@ -268,7 +309,7 @@ pub struct EditOverlay:
         let bits = selection_bits(picked)
         let domain = picked.domain()
         if (usize)(try geometry.domain_count(domain)) != bits.count: error(errors.invalid, "the finding is of another mesh")
-        var layer = FindingLayer(Growing[Vector3](), Growing[Vector3](), color)
+        var layer = FindingLayer(PairLines(), PointLines(), CornerTriangles(), color)
         errdefer layer.close()
         var arm = 0.0
         if domain == 0: arm = (try mean_edge(geometry)) / 6.0
@@ -278,35 +319,26 @@ pub struct EditOverlay:
                 let id = (i64)(word * 64 + (usize)trailing_zeros(pending))
                 pending = pending & (pending - 1)
                 if domain == 4:
-                    try layer.lines.push(try geometry.point(try geometry.edge_point(id, 0)))
-                    try layer.lines.push(try geometry.point(try geometry.edge_point(id, 1)))
+                    try layer.lines.add(try geometry.edge_point(id, 0), try geometry.edge_point(id, 1))
                 elif domain == 0:
                     let p = try geometry.point(id)
                     for axis in 0..<(usize)3:
-                        try layer.lines.push(p.subtract(Vector3.along(axis, arm)))
-                        try layer.lines.push(p.add(Vector3.along(axis, arm)))
+                        try layer.crosses.add(p.subtract(Vector3.along(axis, arm)), p.add(Vector3.along(axis, arm)))
                 elif domain == 2:
-                    let size = try geometry.face_size(id)
-                    let first = try geometry.point(try geometry.face_point(id, 0))
-                    for at in 0..<size:
-                        let a = try geometry.point(try geometry.face_point(id, at))
-                        try layer.lines.push(a)
-                        try layer.lines.push(try geometry.point(try geometry.face_point(id, (at + 1) % size)))
-                        if at > 0 and at + 1 < size:
-                            try layer.faces.push(first)
-                            try layer.faces.push(a)
-                            try layer.faces.push(try geometry.point(try geometry.face_point(id, at + 1)))
+                    try face_outline(geometry, id, &layer.lines)
+                    try face_triangles(geometry, id, &layer.faces)
         try self.findings.push(layer)
 
-    ## Segments and triangles the Mesh Check layers draw (tests).
+    ## Segments the Mesh Check layers draw (tests).
     pub func finding_segments() -> i64:
         var total: usize = 0
-        for at in 0..<self.findings.count: total += self.findings.items[at].lines.count // 2
+        for at in 0..<self.findings.count:
+            total += self.findings.items[at].lines.segments() + self.findings.items[at].crosses.segments()
         return (i64)total
 
     ## Segments the gesture preview draws (tests).
     pub func preview_segments() -> i64:
-        return (i64)self.preview.count // 2
+        return (i64)self.preview.segments()
 
     ## Show a soft selection's reach: points within `radius` of the selection
     ## are tinted by their weight (`falloff` 0 linear, 1 quadratic, 2 cubic,
@@ -368,50 +400,90 @@ pub struct EditOverlay:
         let native = try target.get()
         let size = try native.size()
         if size.width <= 0.0 or size.height <= 0.0: return
-        if wires: try self.draw_wires(mesh, camera, target, wire)
+        let projection = try camera.value().projection(size.width / size.height)
+        var device = gpu.device_of(native) catch failure:
+            if failure.code != gpu.unavailable: error(failure.code, failure.message)
+            recover gpu.Device()
+        defer device.destroy()
+        var frame = LayerFrame(native, camera, target, device, projection, gpu.Buffer(), gpu.Buffer(), mesh.position_origin())
+        if device.is_open():
+            if self.device.is_open() and not self.device.same(&device): self.drop_copies()
+            if not self.device.is_open(): self.device = try device.share()
+            try self.arrays.begin(device)
+            # A mesh without points (an empty cloud) has no positions to send.
+            if mesh.point_count() > 0: frame.positions = try position_buffer(&self.arrays, mesh)
+            if mesh.vertex_count() > 0 and (self.faces.count() > 0 or self.findings.count > 0): frame.corners = try corner_buffer(&self.arrays, mesh)
+        if wires:
+            if self.wired != self.topology: try self.rebuild_wires(mesh)
+            try self.wires.draw(&frame, mesh, wire, 1.0, near_bias)
         if let dim = hidden:
-            if self.accent.count > 0: try WireRenderer.lines(self.accent.view(), camera, target, dim, 1.5, 0.000001, false)
-        if self.faces.count > 0:
-            try WireRenderer.triangles(self.faces.view(), camera, target, accent)
+            # Over everything: on the CPU, as the GPU layers test depth.
+            var lines = try self.accent.points(mesh)
+            defer lines.close()
+            if lines.count > 0: try WireRenderer.lines(lines.view(), camera, target, dim, 1.5, near_bias, false)
+            if self.strokes.segments() > 0: try WireRenderer.lines(self.strokes.points.view(), camera, target, dim, 1.5, near_bias, false)
+        try self.faces.draw(&frame, mesh, accent, fill_bias)
         # The selection's lines and the marks stand a little toward the eye,
         # so the surface does not break them up; the marks write no depth,
         # so the selection's lines along the same edges draw over them
         # instead of fighting them.
-        let bias = line_bias(try camera.value().projection(size.width / size.height), mesh)
+        let bias = line_bias(projection, mesh)
         if seam != none or sharp != none:
-            if not self.marks_built: try self.build_marks(mesh)
-            if let color = sharp:
-                if self.sharps.count > 0: try WireRenderer.lines(self.sharps.view(), camera, target, color, mark_width, bias, writes_depth = false)
-            if let color = seam:
-                if self.seams.count > 0: try WireRenderer.lines(self.seams.view(), camera, target, color, mark_width, bias, writes_depth = false)
+            try self.marks_ready(mesh)
+            if let color = sharp: try self.sharps.draw(&frame, mesh, color, mark_width, bias, writes_depth = false)
+            if let color = seam: try self.seams.draw(&frame, mesh, color, mark_width, bias, writes_depth = false)
         for at in 0..<self.findings.count:
             let layer = &self.findings.items[at]
-            if layer.faces.count > 0: try WireRenderer.triangles(layer.faces.view(), camera, target, gpu.Color(layer.color.red, layer.color.green, layer.color.blue, 0.35))
-            if layer.lines.count > 0: try WireRenderer.lines(layer.lines.view(), camera, target, layer.color, 2.5, bias, writes_depth = false)
+            try layer.faces.draw(&frame, mesh, gpu.Color(layer.color.red, layer.color.green, layer.color.blue, 0.35), fill_bias)
+            try layer.lines.draw(&frame, mesh, layer.color, 2.5, bias, writes_depth = false)
+            try layer.crosses.draw(&frame, layer.color, 2.5, bias, writes_depth = false)
         # The selection's lines are narrower than the marks, so a marked
         # edge that is selected shows its mark's color at both sides.
-        if self.accent.count > 0:
-            try WireRenderer.lines(self.accent.view(), camera, target, accent, selection_width, bias)
-        if self.preview.count > 0:
-            try WireRenderer.lines(self.preview.view(), camera, target, preview else point, 2.5)
-        if self.hover.count > 0:
-            try WireRenderer.lines(self.hover.view(), camera, target, accent, 3.0 if self.mode == 2 else 2.5)
+        try self.accent.draw(&frame, mesh, accent, selection_width, bias)
+        try self.strokes.draw(&frame, accent, selection_width, bias)
+        try self.preview.draw(&frame, mesh, preview else point, 2.5, near_bias)
+        try self.hover.draw(&frame, mesh, accent, 3.0 if self.mode == 2 else 2.5, near_bias)
         # Point markers in point mode; in the others only the soft reach.
         if self.mode == 0 or self.weights.count > 0:
-            let projection = try camera.value().projection(size.width / size.height)
             try self.screen.update(mesh, projection, size.width, size.height)
             for gone in self.hidden_points.view():
                 if (usize)gone < self.screen.depths.count: self.screen.depths.items[(usize)gone] = 0.0
-            try self.markers.draw(native, &self.screen, self.selected.view(), self.weights.view(), self.mode == 0,
+            let selected = self.selected.view() if self.mode == 0 else self.selected.view()[..<0]
+            try self.markers.draw(native, device, &self.screen, selected, self.weights.view(), self.mode == 0,
                                   self.hovered if self.mode == 0 else -1, projection, size.width, size.height, point, accent)
+        if device.is_open(): self.arrays.trim()
+
+    ## The GPU copies were made on another device: make them again.
+    func drop_copies():
+        self.wires.drop()
+        self.accent.drop()
+        self.strokes.drop()
+        self.faces.drop()
+        self.hover.drop()
+        self.preview.drop()
+        self.seams.drop()
+        self.sharps.drop()
+        for at in 0..<self.findings.count: self.findings.items[at].drop()
+        self.markers.drop()
+        self.device.destroy()
 
     ## Mean of the distinct points under a selection, or the bounds center when
     ## nothing is selected: the Move gizmo's origin, without Luce list scans.
+    ## Points are told apart by a set as large as the selection's, not the
+    ## mesh.
     pub static func center(mesh: interop.Reference[Mesh], mode: i64, selection: const i64[]) -> Vector3!:
         let geometry = try mesh.get()
-        let marked = try new bool[(usize)geometry.point_count()] --- in memory.heap
-        defer free(marked) in memory.heap
-        for at in 0..<marked.length: marked[at] = false
+        let middle = geometry.bounds().minimum.add(geometry.bounds().maximum).multiply_scalar(0.5)
+        if selection.length == 0: return middle
+        var corners: usize = 0
+        for id in selection:
+            if mode == 2 and id >= 0 and id < geometry.face_count(): corners += (usize)(try geometry.face_size(id))
+            else: corners += 2
+        var slots: usize = 64
+        while slots < corners * 2: slots *= 2
+        let seen = try new u32[slots] --- in memory.heap
+        defer free(seen) in memory.heap
+        for at in 0..<slots: seen[at] = 0xFFFFFFFF
         var sum = Vector3()
         var count = 0.0
         for id in selection:
@@ -423,51 +495,55 @@ pub struct EditOverlay:
                 var point = id
                 if mode == 1: point = try geometry.edge_point(id, at)
                 elif mode == 2: point = try geometry.face_point(id, at)
-                if marked[(usize)point]: continue
-                marked[(usize)point] = true
+                var slot = ((usize)point *% 0x9E3779B1) & (slots - 1)
+                while seen[slot] != 0xFFFFFFFF and seen[slot] != (u32)point: slot = (slot + 1) & (slots - 1)
+                if seen[slot] == (u32)point: continue
+                seen[slot] = (u32)point
                 sum = sum.add(try geometry.point(point))
                 count += 1.0
-        if count == 0.0: return geometry.bounds().minimum.add(geometry.bounds().maximum).multiply_scalar(0.5)
+        if count == 0.0: return middle
         return sum.multiply_scalar(1.0 / count)
 
-    ## The lines of the edges marked `seam` and `sharp` (above 0): a pass
-    ## over the edges only when the mesh has either mark.
-    func build_marks(mesh: const Mesh*) -> !:
-        self.marks_built = true
-        self.seams.clear()
-        self.sharps.clear()
+    ## The edges marked `seam` and `sharp` (above 0), made again when the
+    ## topology or either mark changes.
+    func marks_ready(mesh: const Mesh*) -> !:
         let seam = mesh.attribute_on("seam", Domain.edge)
         let sharp = mesh.attribute_on("sharp", Domain.edge)
-        if seam < 0 and sharp < 0: return
-        let edges = try mesh.edge_count()
-        if seam >= 0: try marked_lines(mesh, try mesh.attribute_entry(seam), edges, &self.seams)
-        if sharp >= 0: try marked_lines(mesh, try mesh.attribute_entry(sharp), edges, &self.sharps)
+        var key = (self.topology *% 0x9E3779B97F4A7C15) | 1
+        if seam >= 0: key = (key ^ (try mesh.attribute_id(seam))) *% 0x100000001B3
+        if sharp >= 0: key = (key ^ ((try mesh.attribute_id(sharp)) << 1)) *% 0x100000001B3
+        if key == self.marks_key: return
+        self.marks_key = key
+        self.seams.clear()
+        self.sharps.clear()
+        let edges = try mesh.edge_span()
+        if seam >= 0: try marked_pairs(try mesh.attribute_entry(seam), edges, &self.seams)
+        if sharp >= 0: try marked_pairs(try mesh.attribute_entry(sharp), edges, &self.sharps)
 
-    ## Edges drawn as seams and as hard, for tests: built as the next draw
-    ## would build them.
+    ## Edges drawn as seams and as hard, for tests: made as the next draw
+    ## would make them.
     pub func seam_segments() -> i64!:
-        try self.marks_ready()
-        return (i64)self.seams.count // 2
+        let current = self.mesh else return 0
+        try self.marks_ready(try current.get())
+        return (i64)self.seams.segments()
 
     pub func hard_segments() -> i64!:
-        try self.marks_ready()
-        return (i64)self.sharps.count // 2
-
-    func marks_ready() -> !:
-        let current = self.mesh else return
-        if not self.marks_built: try self.build_marks(try current.get())
+        let current = self.mesh else return 0
+        try self.marks_ready(try current.get())
+        return (i64)self.sharps.segments()
 
     ## Selection batch sizes, for tests and diagnostics.
     pub func accent_segments() -> i64:
-        return (i64)self.accent.count // 2
+        return (i64)(self.accent.segments() + self.strokes.segments())
 
     pub func selected_triangles() -> i64:
-        return (i64)self.faces.count // 3
+        return (i64)self.faces.count()
 
-    ## Selection rebuilds so far: hover and camera changes must not add any.
     pub func hover_segments() -> i64:
-        return (i64)self.hover.count // 2
+        return (i64)self.hover.segments()
 
+    ## Selection rebuilds so far: hover, camera and point moves must not add
+    ## any.
     pub func selection_builds() -> i64:
         return self.builds
 
@@ -479,157 +555,110 @@ pub struct EditOverlay:
         if self.mode == 2 or width <= 0.0 or height <= 0.0: return -1
         let projection = try camera.value().projection(math.max(1.0, width) / math.max(1.0, height))
         let mesh = try current.get()
-        let found = try screens.pick(mesh, self.mode == 1, projection, x, y, width, height, face)
+        var under = face
+        if mesh.face_count() > 0 and not (self.mode == 1 and self.groups_tagged(mesh)):
+            under = try screens.face_under(mesh, projection, x, y, width, height, face)
+        let found = try screens.pick(mesh, self.mode == 1, projection, x, y, width, height, under, &self.screen, &self.segments)
         if self.mode != 3 or found < 0: return found
         # A vertex: the picked face's corner at the picked point.
-        let hit = try screens.face_under(mesh, projection, x, y, width, height, face)
-        if hit < 0: return -1
-        for at in 0..<(try mesh.face_size(hit)):
-            if (try mesh.face_point(hit, at)) == found: return (try mesh.face_offset(hit)) + at
+        if under < 0: return -1
+        for at in 0..<(try mesh.face_size(under)):
+            if (try mesh.face_point(under, at)) == found: return (try mesh.face_offset(under)) + at
         return -1
 
-    func draw_wires(mesh: const Mesh*, camera: interop.Reference[Camera], target: interop.View[gpu.RenderTarget], color: gpu.Color) -> !:
-        let native = try target.get()
-        var device = gpu.device_of(native) catch failure:
-            if failure.code != gpu.unavailable: error(failure.code, failure.message)
-            recover gpu.Device()
-        defer device.destroy()
-        let edges = (usize)(try mesh.edge_count())
-        if edges == 0: return
-        if device.is_open():
-            if not self.wires.is_open():
-                let vertices = try new gpu.Vertex[edges] --- in memory.heap
-                defer free(vertices) in memory.heap
-                for edge in 0..<edges:
-                    let a = try mesh.point(try mesh.edge_point((i64)edge, 0))
-                    let b = try mesh.point(try mesh.edge_point((i64)edge, 1))
-                    vertices[edge] = gpu.Vertex(x = (f32)a.x, y = (f32)a.y, z = (f32)a.z, red = (f32)b.x, green = (f32)b.y, blue = (f32)b.z)
-                try self.wires.upload(device, vertices, true)
-            let size = try native.size()
-            let projection = try camera.value().projection(size.width / size.height)
-            try self.wires.draw(native, projection_matrix(projection), color, 1.0)
-            return
-        # Deviceless frames (tests, recording) expand wires on the CPU into the
-        # frame's vertex budget; a wireframe that cannot fit is left out.
-        if edges * 6 > 4194304: return
-        if self.wire_points.count == 0:
-            try self.wire_points.reserve(edges * 2)
-            for edge in 0..<edges:
-                try self.wire_points.push(try mesh.point(try mesh.edge_point((i64)edge, 0)))
-                try self.wire_points.push(try mesh.point(try mesh.edge_point((i64)edge, 1)))
-        try WireRenderer.lines(self.wire_points.view(), camera, target, color)
+    ## Whether `mesh` has CAD boundary tags (edges are picked among them).
+    func groups_tagged(mesh: const Mesh*) -> bool:
+        return mesh.find_attribute("cad_edge", 4) >= 0
+
+    func rebuild_wires(mesh: const Mesh*) -> !:
+        self.wires.clear()
+        let edges = try mesh.edge_span()
+        try self.wires.ids.reserve(edges.length)
+        for end in edges: try self.wires.ids.push((u32)end)
+        self.wired = self.topology
 
     ## Selection geometry costs O(selection), never O(mesh): selected faces add
-    ## their triangles (a contiguous range per face) and edges; selected points
-    ## light the edges whose ends are both selected, found by adjacency.
-    func rebuild_selection(mesh: const Mesh*) -> !:
+    ## their triangles (a contiguous range per face) and outlines; selected
+    ## points light the edges whose ends are both selected, found by the
+    ## mesh's point-edge adjacency (shared by its topology).
+    func rebuild_selection(mesh: const Mesh*, chosen: const i64[]) -> !:
         self.accent.clear()
+        self.strokes.clear()
         self.faces.clear()
-        let points = (usize)mesh.point_count()
+        # The marks of the last selection go one by one; the flags are as
+        # many as the mode's elements.
+        let elements = (usize)(mesh.point_count() if self.mode == 0 else (mesh.face_count() if self.mode == 2 else 0))
+        if self.selected.count != elements: try self.selected.fill(elements, false)
+        else:
+            for id in self.selection.view():
+                if id >= 0 and (usize)id < elements: self.selected.items[(usize)id] = false
+        try self.selection.assign(chosen)
+        for id in self.selection.view():
+            if id >= 0 and (usize)id < elements: self.selected.items[(usize)id] = true
         if self.mode == 0:
-            try self.selected.fill(points, false)
+            if self.selection.count == 0: return
+            let around = try mesh.point_edge_span()
+            let ends = try mesh.edge_span()
             for id in self.selection.view():
-                if id >= 0 and (usize)id < points: self.selected.items[(usize)id] = true
-            if self.selection.count > 0: try self.adjacency(mesh)
-            for id in self.selection.view():
-                if id < 0 or (usize)id >= points: continue
-                for at in self.edge_starts.items[(usize)id]..<self.edge_starts.items[(usize)id + 1]:
-                    let edge = (i64)self.point_edges.items[(usize)at]
-                    let a = try mesh.edge_point(edge, 0)
-                    let b = try mesh.edge_point(edge, 1)
+                if id < 0 or (usize)id >= elements: continue
+                for at in (usize)around.0[(usize)id]..<(usize)around.0[(usize)id + 1]:
+                    let edge = (usize)around.1[at]
+                    let a = (i64)ends[edge * 2]
+                    let b = (i64)ends[edge * 2 + 1]
                     # Reached from both selected ends; emit from the low one.
-                    if a == id and self.selected.items[(usize)b]:
-                        try self.accent.push(try mesh.point(a))
-                        try self.accent.push(try mesh.point(b))
+                    let other = b if a == id else a
+                    if id < other and self.selected.items[(usize)other]: try self.accent.add(a, b)
             return
-        self.selected.clear()
         if self.mode == 3:
-            # Vertices: a short stroke from each corner's point into its face.
-            for id in self.selection.view():
-                if id < 0 or id >= mesh.vertex_count(): continue
-                let face = try mesh.corner_face(id)
-                let p = try mesh.point(try mesh.corner_point(id))
-                try self.accent.push(p)
-                try self.accent.push(p.add((try mesh.face_center(face)).subtract(p).multiply_scalar(0.3)))
+            try self.rebuild_strokes(mesh)
             return
         # Outlines of more faces than this would cover the model: the tint
         # alone shows a selection that large.
         let outline = self.mode == 1 or self.selection.count <= 20000
+        let edges = try mesh.edge_count()
         for id in self.selection.view():
             if self.mode == 1:
-                if id < 0 or id >= (try mesh.edge_count()): continue
-                try self.accent.push(try mesh.point(try mesh.edge_point(id, 0)))
-                try self.accent.push(try mesh.point(try mesh.edge_point(id, 1)))
+                if id < 0 or id >= edges: continue
+                try self.accent.add(try mesh.edge_point(id, 0), try mesh.edge_point(id, 1))
                 continue
             if id < 0 or id >= mesh.face_count(): continue
-            let offset = try mesh.face_offset(id)
-            let size = try mesh.face_size(id)
-            if outline:
-                for at in 0..<size:
-                    try self.accent.push(try mesh.point(try mesh.face_point(id, at)))
-                    try self.accent.push(try mesh.point(try mesh.face_point(id, (at + 1) % size)))
-            if not self.fill: continue
-            # Triangles are grouped by face, size - 2 per polygon.
-            let first = (offset - id * 2) * 3
-            for at in first..<first + (size - 2) * 3:
-                let value = mesh.index(at)
-                defer value.release()
-                try self.faces.push(try mesh.point(try mesh.corner_point(try value.get())))
+            if outline: try face_outline(mesh, id, &self.accent)
+            if self.fill: try face_triangles(mesh, id, &self.faces)
 
-    func adjacency(mesh: const Mesh*) -> !:
-        if self.edge_starts.count > 0: return
-        let points = (usize)mesh.point_count()
-        let edges = (try mesh.edge_count())
-        try self.edge_starts.fill(points + 1, 0)
-        for edge in 0..<edges:
-            self.edge_starts.items[(usize)(try mesh.edge_point(edge, 0)) + 1] += 1
-            self.edge_starts.items[(usize)(try mesh.edge_point(edge, 1)) + 1] += 1
-        for at in 0..<points: self.edge_starts.items[at + 1] += self.edge_starts.items[at]
-        try self.point_edges.fill((usize)edges * 2, 0)
-        var cursor = try new u32[points] --- in memory.heap
-        defer free(cursor) in memory.heap
-        memory.copy(cursor, self.edge_starts.items, points)
-        for edge in 0..<edges:
-            for end in 0..<(i64)2:
-                let point = (usize)(try mesh.edge_point(edge, end))
-                self.point_edges.items[(usize)cursor[point]] = (u32)edge
-                cursor[point] += 1
+    ## Vertices: a short stroke from each corner's point into its face.
+    func rebuild_strokes(mesh: const Mesh*) -> !:
+        self.strokes.clear()
+        for id in self.selection.view():
+            if id < 0 or id >= mesh.vertex_count(): continue
+            let face = try mesh.corner_face(id)
+            let p = try mesh.point(try mesh.corner_point(id))
+            try self.strokes.add(p, p.add((try mesh.face_center(face)).subtract(p).multiply_scalar(0.3)))
 
-    ## The hovered edge, or the outline of a hovered unselected face.
+    ## The hovered edge (a CAD boundary's whole edge), or the outline of a
+    ## hovered unselected face.
     func rebuild_hover(mesh: const Mesh*) -> !:
         self.hover.clear()
         let id = self.hovered
         if id < 0: return
         if self.mode == 1 and id < (try mesh.edge_count()):
-            let tag = mesh.find_attribute("cad_edge", 4)
-            let owner = mesh.find_attribute("cad_edge_model", 4)
-            if tag >= 0 and owner >= 0:
-                let edge_id = try mesh.attribute_value(tag, id)
-                let model_id = try mesh.attribute_value(owner, id)
-                if edge_id < 0.0: return
-                for edge in 0..<(try mesh.edge_count()):
-                    if (try mesh.attribute_value(tag, edge)) != edge_id or (try mesh.attribute_value(owner, edge)) != model_id: continue
-                    try self.hover.push(try mesh.point(try mesh.edge_point(edge, 0)))
-                    try self.hover.push(try mesh.point(try mesh.edge_point(edge, 1)))
+            if self.groups_tagged(mesh) and mesh.find_attribute("cad_edge_model", 4) >= 0:
+                let ends = try mesh.edge_span()
+                for edge in try self.groups.segments(mesh, id):
+                    try self.hover.add((i64)ends[(usize)edge * 2], (i64)ends[(usize)edge * 2 + 1])
             else:
-                try self.hover.push(try mesh.point(try mesh.edge_point(id, 0)))
-                try self.hover.push(try mesh.point(try mesh.edge_point(id, 1)))
+                try self.hover.add(try mesh.edge_point(id, 0), try mesh.edge_point(id, 1))
         if self.mode == 2 and id < mesh.face_count():
-            for chosen in self.selection.view():
-                if chosen == id: return
-            let size = try mesh.face_size(id)
-            for at in 0..<size:
-                try self.hover.push(try mesh.point(try mesh.face_point(id, at)))
-                try self.hover.push(try mesh.point(try mesh.face_point(id, (at + 1) % size)))
+            if (usize)id < self.selected.count and self.selected.items[(usize)id]: return
+            try face_outline(mesh, id, &self.hover)
 
     pub func close():
         let previous = self.mesh
         self.mesh = none
         if let current = previous: current.release()
         self.wires.close()
-        self.wire_points.close()
         self.selection.close()
         self.accent.close()
+        self.strokes.close()
         self.faces.close()
         self.hover.close()
         self.preview.close()
@@ -639,14 +668,22 @@ pub struct EditOverlay:
         self.findings.close()
         self.hidden_points.close()
         self.selected.close()
-        self.edge_starts.close()
         self.listed.close()
-        self.point_edges.close()
         self.screen.close()
+        self.segments.close()
+        self.groups.close()
         self.markers.close()
         self.weights.close()
+        self.arrays.close()
+        self.device.destroy()
 
     func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
         if let current = self.mesh: current.trace(visit, context)
+
+## The edges whose mark `entry` is above 0, as point pairs into `lines`.
+func marked_pairs(entry: const Attribute*, ends: const i32[], lines: PairLines*) -> !:
+    for edge in 0..<ends.length // 2:
+        if entry.number(edge, 0) <= 0.0: continue
+        try lines.add((i64)ends[edge * 2], (i64)ends[edge * 2 + 1])
 
 pub let edit_overlay_type: interop.Type[EditOverlay] = interop.Type[EditOverlay]("EditOverlay", EditOverlay.close, EditOverlay.trace, closeable = true, main_thread = true)

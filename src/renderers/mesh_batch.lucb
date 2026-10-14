@@ -54,14 +54,18 @@ pub struct MeshShading:
     ## Draft mode: the draft angle asked for, in degrees.
     pub var draft: f64 = 1.0
 
-## Faces tinted with an accent (a face selection): one bit per face of the
-## topology whose corners array is `topology`. `key` names the bits' GPU copy.
+## Faces tinted with an accent (a face selection), or hidden: one bit per
+## face of the topology whose corners array is `topology`. `key` names the
+## bits' version; `drawn` the version the GPU copies were last made for (of
+## topology `drawn_topology`), which a new version's copies replace in place.
 pub struct FaceHighlight:
     pub var topology: u64 = 0
     pub var key: u64 = 0
     pub var words: Growing[u32] = Growing[u32]()
     pub var color: Color = Color(1.0, 0.5, 0.0)
     pub var weight: f64 = 0.45
+    pub var drawn: u64 = 0
+    pub var drawn_topology: u64 = 0
 
     ## Mark `faces` (ids outside `count` faces are ignored) of the topology
     ## `topology`; cheap when nothing changed.
@@ -111,7 +115,7 @@ pub struct FrameLighting:
 ## are: their triangles and edges collapse to a point.
 pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh: const Mesh*, world: Matrix4, projection: Projection,
                       lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*, slope_bias: f64,
-                      surfaces: bool, wire_width: f64, wire_color: Color, highlight: const FaceHighlight*? = none, fade: f64 = 0.0, hidden: const FaceHighlight*? = none) -> !:
+                      surfaces: bool, wire_width: f64, wire_color: Color, highlight: FaceHighlight*? = none, fade: f64 = 0.0, hidden: FaceHighlight*? = none) -> !:
     if mesh.face_count() == 0: return
     var buffers = gpu.MeshBuffers()
     buffers.positions = try positions(arrays, mesh)
@@ -124,11 +128,15 @@ pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh:
             block[gpu.mesh_accent + 1] = (f32)marked.color.green
             block[gpu.mesh_accent + 2] = (f32)marked.color.blue
             block[gpu.mesh_accent + 3] = (f32)marked.weight
+    let versions = hidden_versions(mesh, hidden)
     if surfaces:
         buffers.corners = try corner_points(arrays, mesh)
-        let normals = try normal_buffer(arrays, mesh)
-        buffers.normals = normals.0
-        block[gpu.mesh_mode + 1] = (f32)normals.1
+        # Flat and unlit shading read no normals: none are made for them.
+        let unlit = shading.mode == gpu.Shading.unlit or ((shading.mode == gpu.Shading.lit or shading.mode == gpu.Shading.flat) and not lit)
+        if shading.mode != gpu.Shading.flat and not unlit:
+            let normals = try normal_buffer(arrays, mesh)
+            buffers.normals = normals.0
+            block[gpu.mesh_mode + 1] = (f32)normals.1
         if shading.mode == gpu.Shading.curvature:
             let curvature = try curvature_buffer(arrays, mesh, shading)
             buffers.colors = curvature.0
@@ -146,7 +154,7 @@ pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh:
         var part: u32 = 0
         while first < total:
             let count = chunk_triangles if total - first > chunk_triangles else total - first
-            buffers.triangles = try triangles(arrays, mesh, first, count, part, hidden)
+            buffers.triangles = try triangles(arrays, mesh, first, count, part, hidden, versions)
             buffers.faces = try triangle_faces(arrays, mesh, first, count, part)
             try gpu.draw_mesh(target, &buffers, count * 3, block, gpu.MeshKind.surface, slope_bias)
             first += count
@@ -154,7 +162,7 @@ pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh:
     if wire_width > 0.0 and (try mesh.edge_count()) > 0 and not (try too_dense(target, mesh, world, projection)):
         var wires = gpu.MeshBuffers()
         wires.positions = buffers.positions
-        wires.triangles = try edges(arrays, mesh, hidden)
+        wires.triangles = try edges(arrays, mesh, hidden, versions)
         var line = block
         line[gpu.mesh_tint] = (f32)wire_color.red
         line[gpu.mesh_tint + 1] = (f32)wire_color.green
@@ -163,10 +171,11 @@ pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh:
         line[gpu.mesh_line] = (f32)wire_width
         line[gpu.mesh_line + 3] = 0.000001
         try gpu.draw_mesh(target, &wires, (usize)(try mesh.edge_count()) * 6, line, gpu.MeshKind.wires)
+    settle_hidden(mesh, hidden, versions)
 
 ## Face ids of `mesh` from `base` + 1, into an rgba8_linear target
 ## (picking); faces marked in `hidden` are left out.
-pub func draw_polygon_ids(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh: const Mesh*, world: Matrix4, projection: Projection, base: u32, hidden: const FaceHighlight*? = none) -> !:
+pub func draw_polygon_ids(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh: const Mesh*, world: Matrix4, projection: Projection, base: u32, hidden: FaceHighlight*? = none) -> !:
     if mesh.face_count() == 0: return
     let lighting = FrameLighting()
     let shading = MeshShading(mode = gpu.Shading.unlit)
@@ -175,23 +184,28 @@ pub func draw_polygon_ids(arrays: GpuArrays*, target: const gpu.RenderTarget*, m
     var buffers = gpu.MeshBuffers()
     buffers.positions = try positions(arrays, mesh)
     buffers.corners = try corner_points(arrays, mesh)
+    let versions = hidden_versions(mesh, hidden)
     let total = (usize)mesh.index_count() // 3
     var first: usize = 0
     var part: u32 = 0
     while first < total:
         let count = chunk_triangles if total - first > chunk_triangles else total - first
-        buffers.triangles = try triangles(arrays, mesh, first, count, part, hidden)
+        buffers.triangles = try triangles(arrays, mesh, first, count, part, hidden, versions)
         buffers.faces = try triangle_faces(arrays, mesh, first, count, part)
         try gpu.draw_mesh(target, &buffers, count * 3, block, gpu.MeshKind.ids)
         first += count
         part += 1
+    settle_hidden(mesh, hidden, versions)
 
 func parameters(mesh: const Mesh*, world: Matrix4, projection: Projection, lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*) -> f32[128]:
+    return parameters_at(mesh.position_origin(), world, projection, lighting, tint, lit, shading)
+
+## The parameter block of positions stored as f32 offsets from `origin`.
+func parameters_at(origin: Vector3, world: Matrix4, projection: Projection, lighting: const FrameLighting*, tint: Color, lit: bool, shading: const MeshShading*) -> f32[128]:
     var block: f32[128]
     let view = projection_matrix(projection)
-    # Positions are f32 offsets from the mesh's f64 origin; the origin joins
-    # the placement here, in f64.
-    let origin = mesh.position_origin()
+    # Positions are f32 offsets from the f64 origin; the origin joins the
+    # placement here, in f64.
     let placed = world.translation.add(world.x.multiply_scalar(origin.x)).add(world.y.multiply_scalar(origin.y)).add(world.z.multiply_scalar(origin.z))
     let columns: Vector3[4] = [world.x, world.y, world.z, placed]
     for column in 0..<(usize)4:
@@ -254,6 +268,87 @@ func parameters(mesh: const Mesh*, world: Matrix4, projection: Projection, light
     block[gpu.mesh_zebra_light + 2] = (f32)shading.light.blue
     return block
 
+# mark: Overlays ==============================================================================
+
+## A faded mesh draw writes no depth; this little fade changes its color by
+## under 0.03%. Overlay marks drawn under a selection's lines use it so the
+## lines along the same edges draw over them.
+let depth_kept: f64 = 0.000244140625
+
+## Unlit lines between point pairs: `pairs` holds `segments` pairs of indices
+## into `positions` (f32 triples, offsets from `origin`, in world space),
+## `width` logical pixels wide in `color`, pulled `bias` toward the eye (as
+## Projection.clip's bias). `writes_depth` false leaves the depth buffer to
+## later draws.
+pub func draw_lines(target: const gpu.RenderTarget*, points: gpu.Buffer, origin: Vector3, pairs: gpu.Buffer, segments: usize, projection: Projection,
+                    color: gpu.Color, width: f64, bias: f64, writes_depth: bool = true) -> !:
+    if segments == 0: return
+    let lighting = FrameLighting()
+    let shading = MeshShading(mode = gpu.Shading.unlit)
+    var block = parameters_at(origin, Matrix4(), projection, &lighting, Color(color.red, color.green, color.blue), false, &shading)
+    block[gpu.mesh_line] = (f32)width
+    block[gpu.mesh_line + 3] = (f32)bias
+    if not writes_depth: block[gpu.mesh_fade] = (f32)depth_kept
+    var buffers = gpu.MeshBuffers()
+    buffers.positions = points
+    buffers.triangles = pairs
+    try gpu.draw_mesh(target, &buffers, segments * 6, block, gpu.MeshKind.wires)
+
+## Unlit triangles of a mesh's corners: `fill` holds `count` triangles
+## of corner ids into `owners` (each corner's point in `points`, offsets
+## from `origin`), in `color`, pulled `bias` toward the eye so they cover the
+## surface they lie on.
+pub func draw_fill(target: const gpu.RenderTarget*, points: gpu.Buffer, owners: gpu.Buffer, origin: Vector3, fill: gpu.Buffer, count: usize,
+                   projection: Projection, color: gpu.Color, bias: f64) -> !:
+    if count == 0: return
+    let lighting = FrameLighting()
+    let shading = MeshShading(mode = gpu.Shading.unlit)
+    var block = parameters_at(origin, Matrix4(), projection, &lighting, Color(color.red, color.green, color.blue), false, &shading)
+    # The bias as Projection.clip applies it: clip z less bias times w.
+    for column in 0..<(usize)4:
+        block[gpu.mesh_clip + column * 4 + 2] -= (f32)bias * block[gpu.mesh_clip + column * 4 + 3]
+    var buffers = gpu.MeshBuffers()
+    buffers.positions = points
+    buffers.corners = owners
+    buffers.triangles = fill
+    # The vertex stage reads a face per triangle; with no accent bits it
+    # only passes it on, so the triangle buffer (long enough) stands in.
+    buffers.faces = fill
+    try gpu.draw_mesh(target, &buffers, count * 3, block, gpu.MeshKind.surface)
+
+## Unlit triangles laid out on the CPU in normalized device coordinates:
+## `count` vertices of `points` (x, y, depth as f32 triples) with a color
+## each in `colors`, drawn through `order` (0, 1, 2, ... for at least
+## `count`); depth tested. Point markers, made once per camera.
+pub func draw_screen(target: const gpu.RenderTarget*, points: gpu.Buffer, colors: gpu.Buffer, order: gpu.Buffer, count: usize) -> !:
+    if count == 0: return
+    let lighting = FrameLighting()
+    let shading = MeshShading(mode = gpu.Shading.unlit)
+    var block = parameters_at(Vector3(), Matrix4(), projection_identity(), &lighting, Color(1.0, 1.0, 1.0), false, &shading)
+    for at in 0..<(usize)16: block[gpu.mesh_clip + at] = 1.0 if at % 5 == 0 else 0.0
+    # Colors per point (domain 0), the points being the vertices themselves.
+    block[gpu.mesh_mode + 2] = 0.0
+    var buffers = gpu.MeshBuffers()
+    buffers.positions = points
+    buffers.colors = colors
+    buffers.corners = order
+    buffers.triangles = order
+    buffers.faces = order
+    try gpu.draw_mesh(target, &buffers, count, block, gpu.MeshKind.surface)
+
+## A projection for blocks whose clip matrix is set by hand.
+func projection_identity() -> Projection:
+    return Projection(position = Vector3(), right = Vector3(1.0, 0.0, 0.0), up = Vector3(0.0, 1.0, 0.0), backward = Vector3(0.0, 0.0, 1.0),
+                      focal = 1.0, aspect = 1.0, near = 0.1, far = 10.0, ortho = 1.0)
+
+## The GPU copy of `mesh`'s positions and of its corners' points, from
+## `arrays` (uploaded or patched as for drawing).
+pub func position_buffer(arrays: GpuArrays*, mesh: const Mesh*) -> gpu.Buffer!:
+    return try positions(arrays, mesh)
+
+pub func corner_buffer(arrays: GpuArrays*, mesh: const Mesh*) -> gpu.Buffer!:
+    return try corner_points(arrays, mesh)
+
 # mark: Arrays ================================================================================
 
 func positions(arrays: GpuArrays*, mesh: const Mesh*) -> gpu.Buffer!:
@@ -284,17 +379,37 @@ func hiding(mesh: const Mesh*, hidden: const FaceHighlight*?) -> const FaceHighl
     if marked.words.count == 0 or marked.topology != mesh.corners_id(): return none
     return marked
 
+## The version of the hidden faces `mesh`'s triangles and edges show now (0:
+## none hidden) and the one their copies were last made for, which the new
+## copies replace.
+func hidden_versions(mesh: const Mesh*, hidden: const FaceHighlight*?) -> (u64, u64):
+    let marked = hidden else return (0, 0)
+    let topology = mesh.corners_id()
+    let current = marked.key if marked.words.count > 0 and marked.topology == topology else 0
+    let previous = marked.drawn if marked.drawn_topology == topology else current
+    return (current, previous)
+
+## After a draw: `hidden`'s copies of `mesh` now hold `versions.0`.
+func settle_hidden(mesh: const Mesh*, hidden: FaceHighlight*?, versions: (u64, u64)):
+    let marked = hidden else return
+    let topology = mesh.corners_id()
+    if marked.topology != topology and marked.drawn_topology != topology: return
+    marked.drawn = versions.0
+    marked.drawn_topology = topology
+
+## Array id `base` as shown with hidden version `version`.
+func variant(base: u64, version: u64) -> u64:
+    return base if version == 0 else (base *% 0x9E3779B97F4A7C15) ^ version
+
 func hidden_face(marked: const FaceHighlight*, face: usize) -> bool:
     let words = marked.words.view()
     return face // 32 < words.length and (words[face // 32] >> (u32)(face % 32)) & 1 != 0
 
 ## Triangles first..<first + count, those of hidden faces collapsed onto
 ## their first corner (nothing rasterizes, ids and faces keep their place).
-func triangles(arrays: GpuArrays*, mesh: const Mesh*, first: usize, count: usize, part: u32, hidden: const FaceHighlight*? = none) -> gpu.Buffer!:
+func triangles(arrays: GpuArrays*, mesh: const Mesh*, first: usize, count: usize, part: u32, hidden: const FaceHighlight*?, versions: (u64, u64)) -> gpu.Buffer!:
     let marked = hiding(mesh, hidden)
-    var id = mesh.triangles_id()
-    if let mask = marked: id = (id *% 0x9E3779B97F4A7C15) ^ mask.key
-    let key = ArrayKey(id, tag_triangles, part)
+    let key = ArrayKey(variant(mesh.triangles_id(), versions.0), tag_triangles, part)
     if let found = arrays.find(key): return found
     let bytes = try arrays.staging(count * 12)
     let corners = as_u32(bytes)
@@ -307,7 +422,7 @@ func triangles(arrays: GpuArrays*, mesh: const Mesh*, first: usize, count: usize
             if hidden_face(mask, (usize)faces[at]):
                 corners[at * 3 + 1] = corners[at * 3]
                 corners[at * 3 + 2] = corners[at * 3]
-    return try arrays.store(key, bytes)
+    return try arrays.store(key, bytes, variant(mesh.triangles_id(), versions.1))
 
 ## Whether `mesh`'s wires would cover its faces: more than one edge for every
 ## `dense_wires` pixels of its bounds on screen (a 1M-face grid filling
@@ -346,11 +461,9 @@ func triangle_faces(arrays: GpuArrays*, mesh: const Mesh*, first: usize, count: 
 
 ## Every edge as its two points; an edge all of whose faces are hidden
 ## collapses onto its first point.
-func edges(arrays: GpuArrays*, mesh: const Mesh*, hidden: const FaceHighlight*? = none) -> gpu.Buffer!:
+func edges(arrays: GpuArrays*, mesh: const Mesh*, hidden: const FaceHighlight*?, versions: (u64, u64)) -> gpu.Buffer!:
     let marked = hiding(mesh, hidden)
-    var id = mesh.edges_id()
-    if let mask = marked: id = (id *% 0x9E3779B97F4A7C15) ^ mask.key
-    let key = ArrayKey(id, tag_edges, 0)
+    let key = ArrayKey(variant(mesh.edges_id(), versions.0), tag_edges, 0)
     if let found = arrays.find(key): return found
     let count = (usize)(try mesh.edge_count())
     let bytes = try arrays.staging(count * 8)
@@ -364,7 +477,7 @@ func edges(arrays: GpuArrays*, mesh: const Mesh*, hidden: const FaceHighlight*? 
             for at in (usize)around.0[edge]..<(usize)around.0[edge + 1]:
                 shown = shown or not hidden_face(mask, (usize)corner_faces[(usize)around.1[at]])
             if not shown and around.0[edge] < around.0[edge + 1]: ends[edge * 2 + 1] = ends[edge * 2]
-    return try arrays.store(key, bytes)
+    return try arrays.store(key, bytes, variant(mesh.edges_id(), versions.1))
 
 ## The shading normals and their domain: an authored N (corner, then point,
 ## face and detail), else the mesh's smooth normals (per point, or per corner
@@ -390,29 +503,36 @@ func normal_buffer(arrays: GpuArrays*, mesh: const Mesh*) -> (gpu.Buffer, i64)!:
 ## Principal curvatures (k1, k2) for the curvature map: the CAD analytic
 ## attributes (corners), else the discrete estimate (points); their domain;
 ## and the range the map spans.
+## The automatic range is measured once per source and value kind and kept
+## with the source's copy.
 func curvature_buffer(arrays: GpuArrays*, mesh: const Mesh*, shading: const MeshShading*) -> (gpu.Buffer, i64, f64)!:
     let source = try mesh.curvature_source()
+    let key = ArrayKey(source.key, tag_curvature, 0)
+    var buffer = arrays.find(key)
+    if buffer == none:
+        let count = (usize)mesh.vertex_count() if source.domain == 1 else (usize)mesh.point_count()
+        let bytes = try arrays.staging(count * 12)
+        try mesh.pack_curvature(&source, as_f32(bytes))
+        buffer = try arrays.store(key, bytes)
     var range = shading.curvature_range
     if range <= 0.0:
-        if let known = arrays.range(source.key, shading.curvature): range = known
+        if let known = arrays.range(key, shading.curvature): range = known
         else:
             range = try mesh.curvature_range(&source, shading.curvature)
-            arrays.remember_range(source.key, shading.curvature, range)
-    let key = ArrayKey(source.key, tag_curvature, 0)
-    if let found = arrays.find(key): return (found, source.domain, range)
-    let count = (usize)mesh.vertex_count() if source.domain == 1 else (usize)mesh.point_count()
-    let bytes = try arrays.staging(count * 12)
-    try mesh.pack_curvature(&source, as_f32(bytes))
-    return (try arrays.store(key, bytes), source.domain, range)
+            arrays.remember_range(key, shading.curvature, range)
+    return (buffer else trap("curvature buffer"), source.domain, range)
 
-## The highlight's bits, one u32 per 32 faces.
-func flag_buffer(arrays: GpuArrays*, highlight: const FaceHighlight*) -> gpu.Buffer!:
+## The highlight's bits, one u32 per 32 faces: a new selection rewrites the
+## copy of the last one.
+func flag_buffer(arrays: GpuArrays*, highlight: FaceHighlight*) -> gpu.Buffer!:
     let key = ArrayKey(highlight.key, tag_flags, 0)
     if let found = arrays.find(key): return found
     let words = highlight.words.view()
     let bytes = try arrays.staging(words.length * 4)
     memory.copy(u32[]((u32*)bytes.data, words.length), words, words.length)
-    return try arrays.store(key, bytes)
+    let buffer = try arrays.store(key, bytes, highlight.drawn)
+    highlight.drawn = highlight.key
+    return buffer
 
 ## Cd by the same precedence, or none.
 func color_buffer(arrays: GpuArrays*, mesh: const Mesh*) -> (gpu.Buffer?, i64)!:

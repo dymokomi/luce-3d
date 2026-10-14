@@ -243,9 +243,12 @@ pub struct GaussianSplats:
             self.marks_changed = true
         if not self.marks_changed: return
         var buffers = self.buffers else return
-        if buffers.marks.is_open():
-            buffers.marks.destroy()
-        if self.marks.length > 0: buffers.marks = try gpu.Buffer.create(device, u8[]((u8*)self.marks.data, self.marks.length * 4))
+        let bytes = u8[]((u8*)self.marks.data, self.marks.length * 4)
+        # A new selection of the same cloud rewrites the marks in place.
+        if buffers.marks.is_open() and (self.marks.length == 0 or buffers.marks.bytes() != bytes.length): buffers.marks.destroy()
+        if self.marks.length > 0:
+            if buffers.marks.is_open(): try buffers.marks.upload(0, bytes)
+            else: buffers.marks = try gpu.Buffer.create(device, bytes)
         self.buffers = buffers
         self.marks_changed = false
 
@@ -344,6 +347,8 @@ pub func draw_clouds(view: SplatView*, clouds: GaussianSplats*[], look: SplatLoo
     defer free(inputs) in memory.heap
     let signature = try new u32[clouds.length * signature_words] --- in memory.heap
     defer free(signature) in memory.heap
+    let marks = try new u64[clouds.length] --- in memory.heap
+    defer free(marks) in memory.heap
     for index in 0..<clouds.length:
         let cloud = clouds[index]
         inputs[index] = cloud.input(projection, width, height, scale, look, lod)
@@ -352,9 +357,11 @@ pub func draw_clouds(view: SplatView*, clouds: GaussianSplats*[], look: SplatLoo
         words[1] = (u32)(cloud.serial >> 32)
         let uniforms = u32[]((u32*)&inputs[index].uniforms[0], 32)
         for at in 0..<(usize)32: words[2 + at] = uniforms[at]
-        # A new selection resorts too (its tint is in the records).
-        words[2 + 18] = (u32)(cloud.marks_key & 0xFFFFFFFF)
-    if not view.sorted_for(signature): try view.sort_clouds(inputs, signature)
+        marks[index] = cloud.marks_key
+    # A new selection tints the records again where they are: its points
+    # neither move nor change depth, so nothing is sorted again.
+    if not view.sorted_for(signature): try view.sort_clouds(inputs, signature, marks)
+    elif not view.marked_for(marks): try view.recolor_clouds(inputs, marks)
     let pipeline = try splat_pipeline(device, try target.pixel_format())
     try view.draw(target, pipeline, look.alpha_cull)
 

@@ -16,6 +16,7 @@
 from luce_gpu import gpu
 import memory
 import errors
+from luce_geocore.core.growing import Growing
 from renderers.radix_sort import RadixSort
 from renderers.splat_shaders import splat_project_comp_words, splat_project_comp_msl, splat_project_comp_group, splat_project_comp_bindings, splat_project_comp_fast_math
 from renderers.splat_shaders import splat_offsets_comp_words, splat_offsets_comp_msl, splat_offsets_comp_group, splat_offsets_comp_bindings
@@ -79,10 +80,12 @@ pub struct SplatView:
     var signature: u32[]
     var signed: usize
     var sorts: i64
+    ## Each cloud's selection marks (their key) the last projection tinted.
+    var marked: Growing[u64]
 
     ## A view on `device`: its kernels; buffers come with the first sort.
     pub static func open(device: gpu.Device) -> SplatView!:
-        var made = SplatView(device = try device.share(), capacity = 0, signed = 0, sorts = 0)
+        var made = SplatView(device = try device.share(), capacity = 0, signed = 0, sorts = 0, marked = Growing[u64]())
         errdefer made.destroy()
         made.project = try gpu.Kernel.create(device, splat_project_comp_words, splat_project_comp_msl, splat_project_comp_group, splat_project_comp_bindings,
                                              splat_project_comp_fast_math)
@@ -107,33 +110,47 @@ pub struct SplatView:
             if signature[index] != self.signature[index]: return false
         return true
 
-    ## Record and submit the pass that projects, gathers and sorts `clouds`
-    ## together; `signature` says what it sorted.
-    pub func sort_clouds(clouds: const CloudInput[], signature: const u32[]) -> !:
-        var slots: usize = 0
-        for cloud in clouds: slots += padded(cloud.count)
-        try self.reserve(slots)
-        try self.remember(signature)
+    ## Whether the last projection tinted each cloud's marks `marks` (keys).
+    pub func marked_for(marks: const u64[]) -> bool:
+        if marks.length != self.marked.count: return false
+        for at in 0..<marks.length:
+            if marks[at] != self.marked.items[at]: return false
+        return true
+
+    ## Project `clouds` again into the records the last sort ordered, for a
+    ## new selection's tint (`marks`): the camera and the clouds are those the
+    ## sort saw, so every record keeps its slot and its depth, and nothing is
+    ## gathered or sorted again.
+    pub func recolor_clouds(clouds: const CloudInput[], marks: const u64[]) -> !:
+        try self.marked.assign(marks)
         if let previous = self.pass:
             var closing = previous
             closing.close()
             self.pass = none
         var pass = try gpu.Compute.begin(self.device)
         errdefer pass.close()
-        var first: usize = 0
-        for cloud in clouds:
-            if cloud.count == 0: continue
-            var bytes = cloud.uniforms
-            # The cloud's first slot (splat_params.glsl's view.z).
-            bytes[18] = f32.bits((u32)first)
-            let groups = padded(cloud.count) // 256
-            let across = groups if groups < grid_width else grid_width
-            let down = (groups + across - 1) // across
-            let projecting: gpu.Binding[9] = [gpu.Binding(buffer = cloud.centers), gpu.Binding(buffer = cloud.covariances), gpu.Binding(buffer = cloud.colors),
-                                              gpu.Binding(buffer = cloud.frames), gpu.Binding(buffer = cloud.harmonics), gpu.Binding(buffer = self.records),
-                                              gpu.Binding(buffer = self.depth_keys), gpu.Binding(buffer = self.group_counts), gpu.Binding(buffer = cloud.marks)]
-            try pass.dispatch(self.project, projecting, u8[]((u8*)&bytes[0], 128), (u32)across, (u32)down)
-            first += padded(cloud.count)
+        try self.project_clouds(&pass, clouds)
+        _ = try pass.timestamp()
+        _ = try pass.timestamp()
+        _ = try pass.timestamp()
+        try pass.submit()
+        self.pass = pass
+
+    ## Record and submit the pass that projects, gathers and sorts `clouds`
+    ## together; `signature` says what it sorted.
+    pub func sort_clouds(clouds: const CloudInput[], signature: const u32[], marks: const u64[]) -> !:
+        var slots: usize = 0
+        for cloud in clouds: slots += padded(cloud.count)
+        try self.reserve(slots)
+        try self.remember(signature)
+        try self.marked.assign(marks)
+        if let previous = self.pass:
+            var closing = previous
+            closing.close()
+            self.pass = none
+        var pass = try gpu.Compute.begin(self.device)
+        errdefer pass.close()
+        try self.project_clouds(&pass, clouds)
         _ = try pass.timestamp()
         # The gather kernels see the whole index space as one cloud.
         var whole: f32[32]
@@ -155,6 +172,23 @@ pub struct SplatView:
         try pass.submit()
         self.pass = pass
         self.sorts += 1
+
+    ## Each cloud's projection into its slots of the records and depth keys.
+    func project_clouds(pass: gpu.Compute*, clouds: const CloudInput[]) -> !:
+        var first: usize = 0
+        for cloud in clouds:
+            if cloud.count == 0: continue
+            var bytes = cloud.uniforms
+            # The cloud's first slot (splat_params.glsl's view.z).
+            bytes[18] = f32.bits((u32)first)
+            let groups = padded(cloud.count) // 256
+            let across = groups if groups < grid_width else grid_width
+            let down = (groups + across - 1) // across
+            let projecting: gpu.Binding[9] = [gpu.Binding(buffer = cloud.centers), gpu.Binding(buffer = cloud.covariances), gpu.Binding(buffer = cloud.colors),
+                                              gpu.Binding(buffer = cloud.frames), gpu.Binding(buffer = cloud.harmonics), gpu.Binding(buffer = self.records),
+                                              gpu.Binding(buffer = self.depth_keys), gpu.Binding(buffer = self.group_counts), gpu.Binding(buffer = cloud.marks)]
+            try pass.dispatch(self.project, projecting, u8[]((u8*)&bytes[0], 128), (u32)across, (u32)down)
+            first += padded(cloud.count)
 
     ## Draw the last sorted view into `target` with `pipeline`; `cull` is the
     ## alpha cull.
@@ -180,7 +214,7 @@ pub struct SplatView:
     ## Buffers for at least `slots` slots (a quarter more when they grow, so
     ## a scene growing a little at a time reallocates seldom).
     func reserve(slots: usize) -> !:
-        if slots <= self.capacity and self.sort != none: return
+        if slots <= self.capacity and self.capacity > 0: return
         var wanted = slots + slots // 4
         if wanted < 256: wanted = 256
         wanted = padded(wanted)
@@ -193,7 +227,13 @@ pub struct SplatView:
         self.keys = try gpu.Buffer.allocate(self.device, wanted * 4)
         self.values = try gpu.Buffer.allocate(self.device, wanted * 4)
         self.arguments = try gpu.Buffer.allocate(self.device, 32)
-        self.sort = try RadixSort.create(self.device, wanted)
+        # The sort's kernels stay; only its scratch follows the size.
+        if let held = self.sort:
+            var sort = held
+            try sort.resize(self.device, wanted)
+            self.sort = sort
+        else:
+            self.sort = try RadixSort.create(self.device, wanted)
         self.capacity = wanted
 
     func remember(signature: const u32[]) -> !:
@@ -210,10 +250,6 @@ pub struct SplatView:
             var closing = pass
             closing.close()
             self.pass = none
-        if let sort = self.sort:
-            var owned = sort
-            owned.destroy()
-            self.sort = none
         for buffer in [self.records, self.depth_keys, self.group_counts, self.group_offsets, self.keys, self.values, self.arguments]:
             var owned = buffer
             owned.destroy()
@@ -222,6 +258,11 @@ pub struct SplatView:
     ## Free the buffers, kernels and the last pass.
     pub func destroy():
         self.release_buffers()
+        if let sort = self.sort:
+            var owned = sort
+            owned.destroy()
+            self.sort = none
+        self.marked.close()
         if self.signature.length > 0: free(self.signature) in memory.heap
         var nothing: u32[]
         self.signature = nothing

@@ -28,41 +28,55 @@ pub struct FogPass:
     pub var members: usize[4]
     pub var count: usize
 
-## The passes of `drawn` (its drawings, `order` farther first): each drawing
-## with the drawings whose boxes meet its own, directly or through others, up
-## to `most_together` and the tallest stack. Appended to `passes` in the order
-## of their farthest members, so passes draw back to front.
-pub func fog_passes(drawn: FogVolume*[], order: const usize[], passes: Growing[FogPass]*) -> !:
-    let count = order.length
-    # Union-find over the drawings whose boxes meet.
-    let parent = try new usize[count + 1] --- in memory.heap
-    defer free(parent) in memory.heap
-    for at in 0..<count: parent[at] = at
+## Each drawing's overlap group into `roots` (by its index in `drawn`, the
+## index of its group's first drawing): the drawings whose boxes meet its own,
+## directly or through others. Made when the drawings change, not each frame:
+## world boxes once each, then the pairs.
+pub func fog_groups(drawn: FogVolume*[], roots: Growing[usize]*) -> !:
+    let count = drawn.length
+    let lows = try new Vector3[count + 1] --- in memory.heap
+    defer free(lows) in memory.heap
+    let highs = try new Vector3[count + 1] --- in memory.heap
+    defer free(highs) in memory.heap
+    for at in 0..<count:
+        let (low, high) = world_box(drawn[at])
+        lows[at] = low
+        highs[at] = high
+    try roots.fill(count, 0)
+    for at in 0..<count: roots.items[at] = at
+    let parent = roots.items[..<count]
     for a in 0..<count:
         for b in a + 1..<count:
-            if boxes_meet(drawn[order[a]], drawn[order[b]]): join(parent[..<count], a, b)
-    # Each set's open pass (an index into `passes`, or `count` for none) and
-    # its stack's height; drawings join their set's open pass farther first,
-    # so every pass starts at its farthest member and passes are in order.
-    let open = try new usize[count + 1] --- in memory.heap
-    defer free(open) in memory.heap
-    let height = try new usize[count + 1] in memory.heap
-    defer free(height) in memory.heap
-    for at in 0..<count: open[at] = count
+            let meet = lows[a].x < highs[b].x and lows[b].x < highs[a].x and lows[a].y < highs[b].y and lows[b].y < highs[a].y and lows[a].z < highs[b].z and lows[b].z < highs[a].z
+            if meet: join(parent, a, b)
+    for at in 0..<count: roots.items[at] = find(parent, at)
+
+## The passes of `drawn` (its drawings, `order` farther first, `roots` their
+## groups): each group's drawings up to `most_together` and the tallest
+## stack. Appended to `passes` in the order of their farthest members, so
+## passes draw back to front. `open` and `height` are scratch.
+pub func fog_passes(drawn: FogVolume*[], order: const usize[], roots: const usize[], passes: Growing[FogPass]*, open: Growing[usize]*, height: Growing[usize]*) -> !:
+    let count = order.length
+    # Each group's open pass (an index into `passes`, or `count` for none)
+    # and its stack's height; drawings join their group's open pass farther
+    # first, so every pass starts at its farthest member and passes are in
+    # order.
+    try open.fill(count, count)
+    try height.fill(count, 0)
     for at in 0..<count:
-        let root = find(parent[..<count], at)
+        let root = roots[order[at]]
         let atlas_height = drawn[order[at]].texel_data().height
-        if open[root] != count:
-            let pass = &passes.items[open[root]]
-            if pass.count == most_together or height[root] + atlas_height > tallest: open[root] = count
-        if open[root] == count:
-            open[root] = passes.count
-            height[root] = 0
+        if open.items[root] != count:
+            let pass = &passes.items[open.items[root]]
+            if pass.count == most_together or height.items[root] + atlas_height > tallest: open.items[root] = count
+        if open.items[root] == count:
+            open.items[root] = passes.count
+            height.items[root] = 0
             try passes.push(FogPass(members = [0, 0, 0, 0], count = 0))
-        let pass = &passes.items[open[root]]
+        let pass = &passes.items[open.items[root]]
         pass.members[pass.count] = order[at]
         pass.count += 1
-        height[root] += atlas_height
+        height.items[root] += atlas_height
 
 func find(parent: usize[], at: usize) -> usize:
     var root = at
@@ -78,14 +92,6 @@ func join(parent: usize[], a: usize, b: usize):
     let ra = find(parent, a)
     let rb = find(parent, b)
     if ra != rb: parent[rb] = ra
-
-## Whether two drawings' boxes overlap past their padding (the texel of
-## background around each), in world boxes around them: then they march in one
-## pass. Boxes meeting only in padding hold no fog in common.
-pub func boxes_meet(a: const FogVolume*, b: const FogVolume*) -> bool:
-    let (a_low, a_high) = world_box(a)
-    let (b_low, b_high) = world_box(b)
-    return a_low.x < b_high.x and b_low.x < a_high.x and a_low.y < b_high.y and b_low.y < a_high.y and a_low.z < b_high.z and b_low.z < a_high.z
 
 ## The world box around a drawing's texels inside their padding.
 func world_box(volume: const FogVolume*) -> (Vector3, Vector3):
@@ -113,14 +119,22 @@ pub struct StackedAtlas:
     ## Whether the frame being drawn uses it (those left unused are freed).
     pub var used: bool
 
+    ## Where drawing `serial` is in the stack (`count` when it is not).
+    pub func slot_of(serial: u64) -> usize:
+        for at in 0..<self.count:
+            if self.drawings[at] == serial: return at
+        return self.count
+
     pub func close():
         self.texture.destroy()
 
-## Whether `stack` holds `pass`'s drawings in its order.
+## Whether `stack` holds `pass`'s drawings, in any order: a pass's order
+## follows the camera, but the shader sums the drawings at each sample, so a
+## stack serves its group from every side.
 pub func stack_holds(stack: const StackedAtlas*, pass: const FogPass*, drawn: FogVolume*[]) -> bool:
     if stack.count != pass.count: return false
     for at in 0..<pass.count:
-        if stack.drawings[at] != drawn[pass.members[at]].drawing_id(): return false
+        if stack.slot_of(drawn[pass.members[at]].drawing_id()) == stack.count: return false
     return true
 
 ## A new stack of `pass`'s atlases (`atlases`, by drawing index) on `device`,

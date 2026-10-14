@@ -1,0 +1,117 @@
+## A CAD mesh's boundary segments grouped by the CAD edge they draw (the
+## `cad_edge` id within the `cad_edge_model` model of each mesh edge), made
+## once per mesh topology and tagging: hovering a boundary lights its whole
+## edge from its own segments, without a pass over the mesh's edges.
+from luce_geocore.geocore import Mesh
+from luce_geocore.core.growing import Growing
+
+## No group (an edge without a CAD id).
+let ungrouped: u32 = 0xFFFFFFFF
+
+## A CAD edge: its model's id and its id there.
+struct Pair:
+    var model: f64
+    var edge: f64
+
+## What groups are made from: the topology and both tags' columns.
+struct Source:
+    var topology: u64
+    var tags: u64
+    var owners: u64
+
+pub struct CadEdges:
+    var key: Source
+    ## Each mesh edge's group, and each group's edges (`starts` into
+    ## `members`).
+    var group_of: Growing[u32]
+    var starts: Growing[u32]
+    var members: Growing[u32]
+    ## Open-addressed (model, edge) pairs to their group: slot + 1 in
+    ## `slots` names group `slots[...] - 1`, whose pair is `pairs[group]`.
+    var slots: Growing[u32]
+    var pairs: Growing[Pair]
+
+    pub func init():
+        self.key = Source(0, 0, 0)
+        self.group_of = Growing[u32]()
+        self.starts = Growing[u32]()
+        self.members = Growing[u32]()
+        self.slots = Growing[u32]()
+        self.pairs = Growing[Pair]()
+
+    ## The segments of the CAD edge mesh edge `edge` belongs to (empty when
+    ## it has none or the mesh has no tags).
+    pub func segments(mesh: const Mesh*, edge: i64) -> const u32[]!:
+        try self.update(mesh)
+        if edge < 0 or (usize)edge >= self.group_of.count: return self.members.view()[..<0]
+        let group = self.group_of.items[(usize)edge]
+        if group == ungrouped: return self.members.view()[..<0]
+        return self.members.view()[(usize)self.starts.items[(usize)group]..<(usize)self.starts.items[(usize)group + 1]]
+
+    func update(mesh: const Mesh*) -> !:
+        let tag = mesh.find_attribute("cad_edge", 4)
+        let owner = mesh.find_attribute("cad_edge_model", 4)
+        if tag < 0 or owner < 0:
+            self.group_of.clear()
+            self.key = Source(0, 0, 0)
+            return
+        let key = Source(mesh.corners_id(), try mesh.attribute_id(tag), try mesh.attribute_id(owner))
+        if key == self.key: return
+        let tags = try mesh.attribute_entry(tag)
+        let owners = try mesh.attribute_entry(owner)
+        let edges = (usize)(try mesh.edge_count())
+        self.pairs.clear()
+        try self.slots.fill(64, 0)
+        try self.group_of.fill(edges, ungrouped)
+        for edge in 0..<edges:
+            let id = tags.number(edge, 0)
+            if id < 0.0: continue
+            self.group_of.items[edge] = try self.group(Pair(owners.number(edge, 0), id))
+        let groups = self.pairs.count
+        try self.starts.fill(groups + 1, 0)
+        for group in self.group_of.view():
+            if group != ungrouped: self.starts.items[(usize)group + 1] += 1
+        for at in 0..<groups: self.starts.items[at + 1] += self.starts.items[at]
+        try self.members.fill((usize)self.starts.items[groups], 0)
+        for edge in 0..<edges:
+            let group = self.group_of.items[edge]
+            if group == ungrouped: continue
+            self.members.items[(usize)self.starts.items[(usize)group]] = (u32)edge
+            self.starts.items[(usize)group] += 1
+        # Filling moved each start to its group's end: move them back.
+        var at = groups
+        while at > 0:
+            self.starts.items[at] = self.starts.items[at - 1]
+            at -= 1
+        self.starts.items[0] = 0
+        self.key = key
+
+    ## The group of `pair`, made when new.
+    func group(pair: Pair) -> u32!:
+        if (self.pairs.count + 1) * 2 > self.slots.count:
+            try self.slots.fill(self.slots.count * 2, 0)
+            for at in 0..<self.pairs.count: self.place(at)
+        var slot = spread(pair) & (self.slots.count - 1)
+        while self.slots.items[slot] != 0:
+            let at = (usize)self.slots.items[slot] - 1
+            if self.pairs.items[at].model == pair.model and self.pairs.items[at].edge == pair.edge: return (u32)at
+            slot = (slot + 1) & (self.slots.count - 1)
+        try self.pairs.push(pair)
+        self.slots.items[slot] = (u32)self.pairs.count
+        return (u32)(self.pairs.count - 1)
+
+    func place(at: usize):
+        var slot = spread(self.pairs.items[at]) & (self.slots.count - 1)
+        while self.slots.items[slot] != 0: slot = (slot + 1) & (self.slots.count - 1)
+        self.slots.items[slot] = (u32)(at + 1)
+
+    pub func close():
+        self.group_of.close()
+        self.starts.close()
+        self.members.close()
+        self.slots.close()
+        self.pairs.close()
+
+func spread(pair: Pair) -> usize:
+    let mixed = ((u64)(i64)pair.model *% 0x9E3779B97F4A7C15) ^ ((u64)(i64)pair.edge *% 0xC2B2AE3D27D4EB4F)
+    return (usize)(mixed ^ (mixed >> 31))
