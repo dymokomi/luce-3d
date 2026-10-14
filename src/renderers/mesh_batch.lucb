@@ -5,6 +5,7 @@
 ## shaders, so changing lights or shading uploads nothing.
 from luce_gpu import gpu
 import memory
+from luce_std import math
 from luce_geocore.geocore import Mesh, Matrix4, Vector3
 from core.material import Color
 from cameras.camera import Projection
@@ -26,6 +27,9 @@ let tag_flags: u8 = 10
 ## Triangles per draw: the triangle and face buffers stay under luce-gpu's
 ## buffer limit (12 bytes per triangle).
 let chunk_triangles: usize = 11184810
+## Pixels of a mesh's footprint each wire edge needs, or its wires are left
+## out (too_dense).
+let dense_wires = 2.0
 
 ## How surfaces are shaded: a luce-gpu Shading mode and the zebra / isophote
 ## stripe settings. Stripes run around (cylinder) or along (planar) `axis`;
@@ -147,7 +151,7 @@ pub func draw_polygon(arrays: GpuArrays*, target: const gpu.RenderTarget*, mesh:
             try gpu.draw_mesh(target, &buffers, count * 3, block, gpu.MeshKind.surface, slope_bias)
             first += count
             part += 1
-    if wire_width > 0.0 and (try mesh.edge_count()) > 0:
+    if wire_width > 0.0 and (try mesh.edge_count()) > 0 and not (try too_dense(target, mesh, world, projection)):
         var wires = gpu.MeshBuffers()
         wires.positions = buffers.positions
         wires.triangles = try edges(arrays, mesh, hidden)
@@ -304,6 +308,33 @@ func triangles(arrays: GpuArrays*, mesh: const Mesh*, first: usize, count: usize
                 corners[at * 3 + 1] = corners[at * 3]
                 corners[at * 3 + 2] = corners[at * 3]
     return try arrays.store(key, bytes)
+
+## Whether `mesh`'s wires would cover its faces: more than one edge for every
+## `dense_wires` pixels of its bounds on screen (a 1M-face grid filling
+## part of the view). Its faces then show their shading (a sculpted
+## surface) instead of a solid wire color; as the camera nears, the wires
+## come back.
+func too_dense(target: const gpu.RenderTarget*, mesh: const Mesh*, world: Matrix4, projection: Projection) -> bool!:
+    let size = try target.size()
+    let area = size.width * size.height
+    let wires = (f64)(try mesh.edge_count())
+    if area <= 0.0 or wires * dense_wires <= area: return false
+    let box = mesh.bounds()
+    var low_x = size.width
+    var low_y = size.height
+    var high_x = 0.0
+    var high_y = 0.0
+    for corner in 0..<8:
+        let local = Vector3(box.maximum.x if corner & 1 != 0 else box.minimum.x, box.maximum.y if corner & 2 != 0 else box.minimum.y, box.maximum.z if corner & 4 != 0 else box.minimum.z)
+        let on = projection.screen(world.transform_point(local), size.width, size.height)
+        # A corner behind the camera: the mesh may fill the view.
+        if on.z <= 0.0: return true
+        low_x = math.min(low_x, on.x)
+        low_y = math.min(low_y, on.y)
+        high_x = math.max(high_x, on.x)
+        high_y = math.max(high_y, on.y)
+    let covered = math.max(0.0, math.min(size.width, high_x) - math.max(0.0, low_x)) * math.max(0.0, math.min(size.height, high_y) - math.max(0.0, low_y))
+    return wires * dense_wires > covered
 
 ## Faces follow triangles and corners: keyed by both ids.
 func triangle_faces(arrays: GpuArrays*, mesh: const Mesh*, first: usize, count: usize, part: u32) -> gpu.Buffer!:
