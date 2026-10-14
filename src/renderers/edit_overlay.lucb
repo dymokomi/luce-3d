@@ -35,6 +35,29 @@ func marked_lines(mesh: const Mesh*, entry: const Attribute*, edges: i64, lines:
         try lines.push(try mesh.point(try mesh.edge_point(edge, 0)))
         try lines.push(try mesh.point(try mesh.edge_point(edge, 1)))
 
+## One layer of the Mesh Check's findings: edges as lines, faces as their
+## outlines and a tint, points as small crosses, in one color.
+struct FindingLayer:
+    var lines: Growing[Vector3]
+    var faces: Growing[Vector3]
+    var color: gpu.Color
+
+    func close():
+        self.lines.close()
+        self.faces.close()
+
+## How wide (logical pixels) the edge marks and the selection's lines draw.
+let mark_width = 3.5
+let selection_width = 2.0
+
+## The mean edge length of `mesh` (1 without edges).
+func mean_edge(mesh: const Mesh*) -> f64!:
+    let edges = try mesh.edge_count()
+    if edges == 0: return 1.0
+    var total = 0.0
+    for edge in 0..<edges: total += (try mesh.point(try mesh.edge_point(edge, 1))).subtract(try mesh.point(try mesh.edge_point(edge, 0))).length()
+    return total / (f64)edges
+
 ## Component modes: 0 points, 1 edges, 2 faces, 3 vertices (corners).
 pub struct EditOverlay:
     var mesh: interop.Reference[Mesh]?
@@ -54,10 +77,14 @@ pub struct EditOverlay:
     var preview: Growing[Vector3]
     var preview_key: u64
     ## Edges marked as UV seams and hard (luce-geocore's `seam` and `sharp`
-    ## edge marks, above 0), as lines; built once per mesh when drawn.
+    ## edge marks, above 0), as lines; built once per mesh when drawn,
+    ## wider than the selection's lines.
     var seams: Growing[Vector3]
     var sharps: Growing[Vector3]
     var marks_built: bool
+    ## The Mesh Check's findings, layer by layer (luced-3d sets them when
+    ## its overlay is on and the mesh changed).
+    var findings: Growing[FindingLayer]
     ## Points every face of which is hidden (an editor's Hide): no marker.
     var hidden_points: Growing[u32]
     var hidden_key: u64
@@ -98,6 +125,7 @@ pub struct EditOverlay:
         self.seams = Growing[Vector3]()
         self.sharps = Growing[Vector3]()
         self.marks_built = false
+        self.findings = Growing[FindingLayer]()
         self.hidden_points = Growing[u32]()
         self.hidden_key = 0
         self.selected = Growing[bool]()
@@ -226,6 +254,56 @@ pub struct EditOverlay:
                     break
             if all: try self.hidden_points.push((u32)point)
 
+    ## Drop every Mesh Check layer.
+    pub func clear_findings():
+        for at in 0..<self.findings.count: self.findings.items[at].close()
+        self.findings.clear()
+
+    ## Add a Mesh Check layer: `selection`'s elements of `mesh` in `color`
+    ## (edges as lines, faces as outlines and a tint, points as crosses a
+    ## third of the mesh's mean edge long).
+    pub func add_finding(mesh: interop.Reference[Mesh], selection: interop.Reference[Selection], color: gpu.Color) -> !:
+        let geometry = try mesh.get()
+        let picked = try selection.get()
+        let bits = selection_bits(picked)
+        let domain = picked.domain()
+        if (usize)(try geometry.domain_count(domain)) != bits.count: error(errors.invalid, "the finding is of another mesh")
+        var layer = FindingLayer(Growing[Vector3](), Growing[Vector3](), color)
+        errdefer layer.close()
+        var arm = 0.0
+        if domain == 0: arm = (try mean_edge(geometry)) / 6.0
+        for word in 0..<bits.words.length:
+            var pending = bits.words[word]
+            while pending != 0:
+                let id = (i64)(word * 64 + (usize)trailing_zeros(pending))
+                pending = pending & (pending - 1)
+                if domain == 4:
+                    try layer.lines.push(try geometry.point(try geometry.edge_point(id, 0)))
+                    try layer.lines.push(try geometry.point(try geometry.edge_point(id, 1)))
+                elif domain == 0:
+                    let p = try geometry.point(id)
+                    for axis in 0..<(usize)3:
+                        try layer.lines.push(p.subtract(Vector3.along(axis, arm)))
+                        try layer.lines.push(p.add(Vector3.along(axis, arm)))
+                elif domain == 2:
+                    let size = try geometry.face_size(id)
+                    let first = try geometry.point(try geometry.face_point(id, 0))
+                    for at in 0..<size:
+                        let a = try geometry.point(try geometry.face_point(id, at))
+                        try layer.lines.push(a)
+                        try layer.lines.push(try geometry.point(try geometry.face_point(id, (at + 1) % size)))
+                        if at > 0 and at + 1 < size:
+                            try layer.faces.push(first)
+                            try layer.faces.push(a)
+                            try layer.faces.push(try geometry.point(try geometry.face_point(id, at + 1)))
+        try self.findings.push(layer)
+
+    ## Segments and triangles the Mesh Check layers draw (tests).
+    pub func finding_segments() -> i64:
+        var total: usize = 0
+        for at in 0..<self.findings.count: total += self.findings.items[at].lines.count // 2
+        return (i64)total
+
     ## Segments the gesture preview draws (tests).
     pub func preview_segments() -> i64:
         return (i64)self.preview.count // 2
@@ -303,11 +381,17 @@ pub struct EditOverlay:
         if seam != none or sharp != none:
             if not self.marks_built: try self.build_marks(mesh)
             if let color = sharp:
-                if self.sharps.count > 0: try WireRenderer.lines(self.sharps.view(), camera, target, color, 2.0, bias, writes_depth = false)
+                if self.sharps.count > 0: try WireRenderer.lines(self.sharps.view(), camera, target, color, mark_width, bias, writes_depth = false)
             if let color = seam:
-                if self.seams.count > 0: try WireRenderer.lines(self.seams.view(), camera, target, color, 2.0, bias, writes_depth = false)
+                if self.seams.count > 0: try WireRenderer.lines(self.seams.view(), camera, target, color, mark_width, bias, writes_depth = false)
+        for at in 0..<self.findings.count:
+            let layer = &self.findings.items[at]
+            if layer.faces.count > 0: try WireRenderer.triangles(layer.faces.view(), camera, target, gpu.Color(layer.color.red, layer.color.green, layer.color.blue, 0.35))
+            if layer.lines.count > 0: try WireRenderer.lines(layer.lines.view(), camera, target, layer.color, 2.5, bias, writes_depth = false)
+        # The selection's lines are narrower than the marks, so a marked
+        # edge that is selected shows its mark's color at both sides.
         if self.accent.count > 0:
-            try WireRenderer.lines(self.accent.view(), camera, target, accent, 2.5, bias)
+            try WireRenderer.lines(self.accent.view(), camera, target, accent, selection_width, bias)
         if self.preview.count > 0:
             try WireRenderer.lines(self.preview.view(), camera, target, preview else point, 2.5)
         if self.hover.count > 0:
@@ -551,6 +635,8 @@ pub struct EditOverlay:
         self.preview.close()
         self.seams.close()
         self.sharps.close()
+        self.clear_findings()
+        self.findings.close()
         self.hidden_points.close()
         self.selected.close()
         self.edge_starts.close()
